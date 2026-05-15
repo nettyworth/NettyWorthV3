@@ -71,7 +71,10 @@ contract AssetNFTTest is Test {
 
     function test_Initialize_RevertsOnZeroAdmin() public {
         AssetNFT impl = new AssetNFT();
-        bytes memory data = abi.encodeCall(AssetNFT.initialize, (address(0), NAME, SYMBOL, CONTRACT_URI));
+        bytes memory data = abi.encodeCall(
+            AssetNFT.initialize,
+            (address(0), NAME, SYMBOL, CONTRACT_URI)
+        );
         vm.expectRevert(AssetNFT.AssetNFT__ZeroAddress.selector);
         new ERC1967Proxy(address(impl), data);
     }
@@ -156,7 +159,13 @@ contract AssetNFTTest is Test {
         }
 
         vm.prank(minter);
-        vm.expectRevert(abi.encodeWithSelector(AssetNFT.AssetNFT__BatchTooLarge.selector, size, 50));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AssetNFT.AssetNFT__BatchTooLarge.selector,
+                size,
+                50
+            )
+        );
         nft.batchMint(recipients, ids, uris);
     }
 
@@ -225,7 +234,11 @@ contract AssetNFTTest is Test {
 
         vm.prank(burner);
         vm.expectRevert(
-            abi.encodeWithSelector(AssetNFT.AssetNFT__TokenNotBurnable.selector, 1, AssetNFT.AssetState.Listed)
+            abi.encodeWithSelector(
+                AssetNFT.AssetNFT__TokenNotBurnable.selector,
+                1,
+                AssetNFT.AssetState.Listed
+            )
         );
         nft.burn(1);
     }
@@ -237,7 +250,11 @@ contract AssetNFTTest is Test {
 
         vm.prank(burner);
         vm.expectRevert(
-            abi.encodeWithSelector(AssetNFT.AssetNFT__TokenNotBurnable.selector, 1, AssetNFT.AssetState.Loaned)
+            abi.encodeWithSelector(
+                AssetNFT.AssetNFT__TokenNotBurnable.selector,
+                1,
+                AssetNFT.AssetState.Loaned
+            )
         );
         nft.burn(1);
     }
@@ -250,35 +267,50 @@ contract AssetNFTTest is Test {
         _mintToken(1);
         vm.prank(stateManager);
         nft.setAssetState(1, AssetNFT.AssetState.Listed);
-        assertEq(uint8(nft.getAssetState(1)), uint8(AssetNFT.AssetState.Listed));
+        assertEq(
+            uint8(nft.getAssetState(1)),
+            uint8(AssetNFT.AssetState.Listed)
+        );
     }
 
     function test_SetAssetState_HeldToLoaned() public {
         _mintToken(1);
         vm.prank(stateManager);
         nft.setAssetState(1, AssetNFT.AssetState.Loaned);
-        assertEq(uint8(nft.getAssetState(1)), uint8(AssetNFT.AssetState.Loaned));
+        assertEq(
+            uint8(nft.getAssetState(1)),
+            uint8(AssetNFT.AssetState.Loaned)
+        );
     }
 
     function test_SetAssetState_HeldToTraded() public {
         _mintToken(1);
         vm.prank(stateManager);
         nft.setAssetState(1, AssetNFT.AssetState.Traded);
-        assertEq(uint8(nft.getAssetState(1)), uint8(AssetNFT.AssetState.Traded));
+        assertEq(
+            uint8(nft.getAssetState(1)),
+            uint8(AssetNFT.AssetState.Traded)
+        );
     }
 
     function test_SetAssetState_HeldToInShipment() public {
         _mintToken(1);
         vm.prank(stateManager);
         nft.setAssetState(1, AssetNFT.AssetState.InShipment);
-        assertEq(uint8(nft.getAssetState(1)), uint8(AssetNFT.AssetState.InShipment));
+        assertEq(
+            uint8(nft.getAssetState(1)),
+            uint8(AssetNFT.AssetState.InShipment)
+        );
     }
 
     function test_SetAssetState_HeldToRemoved() public {
         _mintToken(1);
         vm.prank(stateManager);
         nft.setAssetState(1, AssetNFT.AssetState.RemovedFromPlatform);
-        assertEq(uint8(nft.getAssetState(1)), uint8(AssetNFT.AssetState.RemovedFromPlatform));
+        assertEq(
+            uint8(nft.getAssetState(1)),
+            uint8(AssetNFT.AssetState.RemovedFromPlatform)
+        );
     }
 
     function test_SetAssetState_ListedToHeld() public {
@@ -305,18 +337,27 @@ contract AssetNFTTest is Test {
         nft.setAssetState(1, AssetNFT.AssetState.InShipment);
         nft.setAssetState(1, AssetNFT.AssetState.RemovedFromPlatform);
         vm.stopPrank();
-        assertEq(uint8(nft.getAssetState(1)), uint8(AssetNFT.AssetState.RemovedFromPlatform));
+        assertEq(
+            uint8(nft.getAssetState(1)),
+            uint8(AssetNFT.AssetState.RemovedFromPlatform)
+        );
     }
 
     function test_SetAssetState_EmitsEvent() public {
         _mintToken(1);
         vm.expectEmit(true, true, true, false, address(nft));
-        emit AssetStateChanged(1, AssetNFT.AssetState.Held, AssetNFT.AssetState.Listed);
+        emit AssetStateChanged(
+            1,
+            AssetNFT.AssetState.Held,
+            AssetNFT.AssetState.Listed
+        );
         vm.prank(stateManager);
         nft.setAssetState(1, AssetNFT.AssetState.Listed);
     }
 
-    function test_SetAssetState_RevertsInvalidTransition_ListedToLoaned() public {
+    function test_SetAssetState_RevertsInvalidTransition_ListedToLoaned()
+        public
+    {
         _mintToken(1);
         vm.startPrank(stateManager);
         nft.setAssetState(1, AssetNFT.AssetState.Listed);
@@ -363,14 +404,25 @@ contract AssetNFTTest is Test {
         vm.stopPrank();
 
         uint256[] memory ids = new uint256[](3);
-        ids[0] = 1; ids[1] = 2; ids[2] = 3;
+        ids[0] = 1;
+        ids[1] = 2;
+        ids[2] = 3;
 
         vm.prank(stateManager);
         nft.batchSetAssetState(ids, AssetNFT.AssetState.Listed);
 
-        assertEq(uint8(nft.getAssetState(1)), uint8(AssetNFT.AssetState.Listed));
-        assertEq(uint8(nft.getAssetState(2)), uint8(AssetNFT.AssetState.Listed));
-        assertEq(uint8(nft.getAssetState(3)), uint8(AssetNFT.AssetState.Listed));
+        assertEq(
+            uint8(nft.getAssetState(1)),
+            uint8(AssetNFT.AssetState.Listed)
+        );
+        assertEq(
+            uint8(nft.getAssetState(2)),
+            uint8(AssetNFT.AssetState.Listed)
+        );
+        assertEq(
+            uint8(nft.getAssetState(3)),
+            uint8(AssetNFT.AssetState.Listed)
+        );
     }
 
     // Fuzz: exhaustively validate transition matrix (30 cross-state combos + 6 same-state)
@@ -431,7 +483,11 @@ contract AssetNFTTest is Test {
 
         vm.prank(user);
         vm.expectRevert(
-            abi.encodeWithSelector(AssetNFT.AssetNFT__TokenNotTransferable.selector, 1, AssetNFT.AssetState.Listed)
+            abi.encodeWithSelector(
+                AssetNFT.AssetNFT__TokenNotTransferable.selector,
+                1,
+                AssetNFT.AssetState.Listed
+            )
         );
         nft.transferFrom(user, user2, 1);
     }
@@ -443,7 +499,11 @@ contract AssetNFTTest is Test {
 
         vm.prank(user);
         vm.expectRevert(
-            abi.encodeWithSelector(AssetNFT.AssetNFT__TokenNotTransferable.selector, 1, AssetNFT.AssetState.Loaned)
+            abi.encodeWithSelector(
+                AssetNFT.AssetNFT__TokenNotTransferable.selector,
+                1,
+                AssetNFT.AssetState.Loaned
+            )
         );
         nft.transferFrom(user, user2, 1);
     }
@@ -455,7 +515,11 @@ contract AssetNFTTest is Test {
 
         vm.prank(user);
         vm.expectRevert(
-            abi.encodeWithSelector(AssetNFT.AssetNFT__TokenNotTransferable.selector, 1, AssetNFT.AssetState.InShipment)
+            abi.encodeWithSelector(
+                AssetNFT.AssetNFT__TokenNotTransferable.selector,
+                1,
+                AssetNFT.AssetState.InShipment
+            )
         );
         nft.transferFrom(user, user2, 1);
     }
@@ -467,7 +531,11 @@ contract AssetNFTTest is Test {
 
         vm.prank(user);
         vm.expectRevert(
-            abi.encodeWithSelector(AssetNFT.AssetNFT__TokenNotTransferable.selector, 1, AssetNFT.AssetState.RemovedFromPlatform)
+            abi.encodeWithSelector(
+                AssetNFT.AssetNFT__TokenNotTransferable.selector,
+                1,
+                AssetNFT.AssetState.RemovedFromPlatform
+            )
         );
         nft.transferFrom(user, user2, 1);
     }
@@ -505,7 +573,10 @@ contract AssetNFTTest is Test {
 
         // After setting a base URI, tokenURI returns baseURI + stored token suffix
         // ERC721URIStorageUpgradeable: if _tokenURIs[id] is set, returns _baseURI() + _tokenURIs[id]
-        assertEq(nft.tokenURI(1), string.concat("https://api.nettyworth.io/assets/", TOKEN_URI));
+        assertEq(
+            nft.tokenURI(1),
+            string.concat("https://api.nettyworth.io/assets/", TOKEN_URI)
+        );
     }
 
     function test_SetContractURI_Updates() public {

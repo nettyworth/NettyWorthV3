@@ -1,6 +1,7 @@
 import hardhatToolboxViemPlugin from "@nomicfoundation/hardhat-toolbox-viem";
 import HardhatContractSizer from "@solidstate/hardhat-contract-sizer";
 import { configVariable, defineConfig } from "hardhat/config";
+import "dotenv/config";
 
 export default defineConfig({
   plugins: [hardhatToolboxViemPlugin, HardhatContractSizer],
@@ -34,6 +35,27 @@ export default defineConfig({
     hardhatOp: {
       type: "edr-simulated",
       chainType: "op",
+    },
+    forkMainnet: {
+      type: "edr-simulated",
+      chainType: "l1",
+      forking: {
+        url: configVariable("MAINNET_RPC_URL"),
+      },
+    },
+    forkBase: {
+      type: "edr-simulated",
+      chainType: "op",
+      forking: {
+        url: configVariable("BASE_RPC_URL"),
+      },
+    },
+    forkSepolia: {
+      type: "edr-simulated",
+      chainType: "l1",
+      forking: {
+        url: configVariable("SEPOLIA_RPC_URL"),
+      },
     },
     sepolia: {
       type: "http",
