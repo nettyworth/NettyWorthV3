@@ -56,5 +56,6 @@ export default defineConfig({
   },
   contractSizer: {
     runOnCompile: true,
+    except: [/Test$/],
   },
 });
