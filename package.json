@@ -16,6 +16,7 @@
     "@solidstate/hardhat-contract-sizer": "^3.0.0",
     "@types/node": "^22.19.19",
     "dotenv": "^17.4.2",
+    "erc721a-upgradeable": "^4.3.0",
     "forge-std": "github:foundry-rs/forge-std#v1.9.4",
     "hardhat": "^3.4.5",
     "prettier": "^3.8.3",

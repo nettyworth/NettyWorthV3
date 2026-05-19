@@ -1,26 +1,32 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
-import {ERC721Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC721/ERC721Upgradeable.sol";
-import {ERC721EnumerableUpgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC721/extensions/ERC721EnumerableUpgradeable.sol";
-import {ERC721URIStorageUpgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC721/extensions/ERC721URIStorageUpgradeable.sol";
-import {ERC721PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC721/extensions/ERC721PausableUpgradeable.sol";
+import {ERC721AQueryableUpgradeable} from "erc721a-upgradeable/contracts/extensions/ERC721AQueryableUpgradeable.sol";
+import {
+    ERC721AUpgradeable,
+    IERC721AUpgradeable
+} from "erc721a-upgradeable/contracts/ERC721AUpgradeable.sol";
+import {ERC2771ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/metatx/ERC2771ContextUpgradeable.sol";
+import {ERC2981Upgradeable} from "@openzeppelin/contracts-upgradeable/token/common/ERC2981Upgradeable.sol";
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ContextUpgradeable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @title AssetNFT
 /// @author NettyWorth
-/// @notice ERC-721 token representing tokenized physical assets with lifecycle state management and role-based access control.
+/// @notice ERC-721A token representing tokenized physical assets with lifecycle state management and role-based access control.
 /// @dev UUPS upgradeable proxy pattern (EIP-1822). Storage uses ERC-7201 namespaced slots to avoid collisions across
 ///      upgrades. Asset lifecycle transitions are validated via a packed 48-bit bitmask (one byte per state).
+///      ERC-2771 meta-transaction support: trusted forwarder is immutable per implementation — change by upgrading.
 /// @custom:security-contact security@nettyworth.io
 contract AssetNFT is
-    ERC721Upgradeable,
-    ERC721EnumerableUpgradeable,
-    ERC721URIStorageUpgradeable,
-    ERC721PausableUpgradeable,
+    ERC721AQueryableUpgradeable,
+    ERC2771ContextUpgradeable,
+    ERC2981Upgradeable,
     AccessControlUpgradeable,
+    PausableUpgradeable,
     UUPSUpgradeable,
     ReentrancyGuard
 {
@@ -77,15 +83,13 @@ contract AssetNFT is
     // =========================================================================
 
     /// @notice Namespaced storage struct for AssetNFT to avoid upgrade slot collisions.
-    /// @dev Fields:
-    ///   - `assetStates`: maps tokenId to its current AssetState
-    ///   - `contractURIValue`: ERC-7572 collection-level metadata URI
-    ///   - `baseURIValue`: optional base URI prepended to per-token URIs
     /// @custom:storage-location erc7201:nettyworth.storage.AssetNFT
     struct AssetNFTStorage {
         mapping(uint256 => AssetState) assetStates;
         string contractURIValue;
         string baseURIValue;
+        /// @dev Per-token URI storage (replaces ERC721URIStorageUpgradeable).
+        mapping(uint256 => string) tokenURIs;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.AssetNFT")) - 1)) & ~bytes32(uint256(0xff))
@@ -104,13 +108,20 @@ contract AssetNFT is
     }
 
     // =========================================================================
+    // EIP-4906 events (not defined by ERC721A)
+    // =========================================================================
+
+    /// @dev EIP-4906: emitted when metadata for a single token is updated.
+    event MetadataUpdate(uint256 _tokenId);
+
+    /// @dev EIP-4906: emitted when metadata for a range of tokens is updated.
+    event BatchMetadataUpdate(uint256 _fromTokenId, uint256 _toTokenId);
+
+    // =========================================================================
     // Events
     // =========================================================================
 
     /// @notice Emitted when a token's lifecycle state is updated.
-    /// @param tokenId The token whose state changed.
-    /// @param previousState The state before the transition.
-    /// @param newState The state after the transition.
     event AssetStateChanged(
         uint256 indexed tokenId,
         AssetState indexed previousState,
@@ -121,77 +132,70 @@ contract AssetNFT is
     event ContractURIUpdated();
 
     /// @notice Emitted when the base URI for token metadata is updated.
-    /// @param uri The new base URI value.
     event BaseURIUpdated(string uri);
 
     // =========================================================================
     // Errors
     // =========================================================================
 
-    /// @notice Thrown when a requested state transition is not permitted by the state machine.
-    /// @param tokenId The token for which the transition was attempted.
-    /// @param currentState The token's current state.
-    /// @param newState The disallowed target state.
     error AssetNFT__InvalidStateTransition(
         uint256 tokenId,
         AssetState currentState,
         AssetState newState
     );
 
-    /// @notice Thrown when a transfer is attempted on a token that is not in the `Held` state.
-    /// @param tokenId The token that cannot be transferred.
-    /// @param currentState The token's current state blocking the transfer.
     error AssetNFT__TokenNotTransferable(
         uint256 tokenId,
         AssetState currentState
     );
 
-    /// @notice Thrown when burn is attempted on a token that is not in `Held` or `RemovedFromPlatform` state.
-    /// @param tokenId The token that cannot be burned.
-    /// @param currentState The token's current state blocking the burn.
     error AssetNFT__TokenNotBurnable(uint256 tokenId, AssetState currentState);
 
-    /// @notice Thrown when calldata arrays supplied to a batch function have different lengths.
     error AssetNFT__ArrayLengthMismatch();
 
-    /// @notice Thrown when a zero address is provided where a non-zero address is required.
     error AssetNFT__ZeroAddress();
 
-    /// @notice Thrown when a batch operation exceeds the maximum allowed size.
-    /// @param size The number of elements provided.
-    /// @param maxSize The maximum number of elements allowed.
     error AssetNFT__BatchTooLarge(uint256 size, uint256 maxSize);
+
+    error AssetNFT__TokenNotFound(uint256 tokenId);
 
     // =========================================================================
     // Constructor & initializer
     // =========================================================================
 
-    /// @notice Locks the implementation contract so it cannot be initialized directly.
-    /// @dev Calls `_disableInitializers()` to prevent anyone from calling `initialize` on
-    ///      the bare implementation address (only the proxy should be initialized).
-    constructor() {
+    /// @notice Sets the immutable trusted forwarder and locks the implementation.
+    /// @dev The trusted forwarder is stored as an immutable in the implementation bytecode.
+    ///      To change it, deploy a new implementation via UUPS upgrade.
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor(
+        address trustedForwarder_
+    ) ERC2771ContextUpgradeable(trustedForwarder_) {
         _disableInitializers();
     }
 
-    /// @notice Initializes the proxy with token metadata, access control roles, and contract URI.
-    /// @dev Grants all operational roles to `defaultAdmin`. Must be called exactly once via the proxy.
-    /// @param defaultAdmin Address that receives `DEFAULT_ADMIN_ROLE` and all operational roles.
+    /// @notice Initializes the proxy with token metadata, royalties, access control roles, and contract URI.
+    /// @dev Must be called exactly once via the proxy. Uses both ERC721A and OZ initializer guards.
+    /// @param defaultAdmin Address that receives DEFAULT_ADMIN_ROLE and all operational roles.
     /// @param name_ ERC-721 token name.
     /// @param symbol_ ERC-721 token symbol.
     /// @param contractURI_ Initial ERC-7572 collection-level metadata URI.
+    /// @param royaltyReceiver_ Address to receive royalty payments.
+    /// @param royaltyFeeNumerator_ Royalty fee in basis points (e.g. 250 = 2.5%). Denominator is 10_000.
     function initialize(
         address defaultAdmin,
         string calldata name_,
         string calldata symbol_,
-        string calldata contractURI_
-    ) external initializer {
+        string calldata contractURI_,
+        address royaltyReceiver_,
+        uint96 royaltyFeeNumerator_
+    ) external initializerERC721A initializer {
         if (defaultAdmin == address(0)) revert AssetNFT__ZeroAddress();
 
-        __ERC721_init(name_, symbol_);
-        __ERC721Enumerable_init();
-        __ERC721URIStorage_init();
-        __ERC721Pausable_init();
+        __ERC721A_init(name_, symbol_);
+        __ERC721AQueryable_init();
         __AccessControl_init();
+        __Pausable_init();
+        __ERC2981_init();
 
         _grantRole(DEFAULT_ADMIN_ROLE, defaultAdmin);
         _grantRole(MINTER_ROLE, defaultAdmin);
@@ -202,50 +206,51 @@ contract AssetNFT is
         _grantRole(UPGRADER_ROLE, defaultAdmin);
 
         _getAssetNFTStorage().contractURIValue = contractURI_;
+
+        if (royaltyReceiver_ != address(0)) {
+            _setDefaultRoyalty(royaltyReceiver_, royaltyFeeNumerator_);
+        }
+    }
+
+    // =========================================================================
+    // ERC721A overrides
+    // =========================================================================
+
+    /// @dev Token IDs start at 1 for 1-based indexing UX.
+    function _startTokenId() internal pure override returns (uint256) {
+        return 1;
     }
 
     // =========================================================================
     // Minting
     // =========================================================================
 
-    /// @notice Mints a single asset token and assigns its metadata URI.
-    /// @param to Recipient address.
-    /// @param tokenId Token identifier to mint.
-    /// @param uri Metadata URI for the token.
-    function mint(
-        address to,
-        uint256 tokenId,
-        string calldata uri
-    ) external onlyRole(MINTER_ROLE) nonReentrant {
-        _safeMint(to, tokenId);
-        _setTokenURI(tokenId, uri);
-    }
-
     /// @notice Mints multiple asset tokens in a single transaction.
-    /// @dev Limited to 50 tokens per batch to bound gas usage. Emits `BatchMetadataUpdate` after minting.
+    /// @dev Limited to 50 tokens per batch. Token IDs are assigned sequentially. Emits BatchMetadataUpdate.
     /// @param recipients Array of recipient addresses, one per token.
-    /// @param tokenIds Array of token identifiers to mint.
     /// @param uris Array of metadata URIs, one per token.
     function batchMint(
         address[] calldata recipients,
-        uint256[] calldata tokenIds,
         string[] calldata uris
-    ) external onlyRole(MINTER_ROLE) nonReentrant {
+    ) external onlyRole(MINTER_ROLE) nonReentrant whenNotPaused {
         uint256 len = recipients.length;
-        if (len != tokenIds.length || len != uris.length)
-            revert AssetNFT__ArrayLengthMismatch();
+        if (len != uris.length) revert AssetNFT__ArrayLengthMismatch();
         if (len > 50) revert AssetNFT__BatchTooLarge(len, 50);
 
+        AssetNFTStorage storage $ = _getAssetNFTStorage();
+        uint256 startId = _nextTokenId();
+
         for (uint256 i; i < len; ) {
-            _safeMint(recipients[i], tokenIds[i]);
-            _setTokenURI(tokenIds[i], uris[i]);
+            uint256 tokenId = startId + i;
+            _mint(recipients[i], 1);
+            $.tokenURIs[tokenId] = uris[i];
             unchecked {
                 ++i;
             }
         }
 
         if (len > 0) {
-            emit BatchMetadataUpdate(tokenIds[0], tokenIds[len - 1]);
+            emit BatchMetadataUpdate(startId, startId + len - 1);
         }
     }
 
@@ -253,55 +258,54 @@ contract AssetNFT is
     // Burning
     // =========================================================================
 
-    /// @notice Burns an asset token, permanently removing it from supply.
-    /// @dev Only tokens in `Held` or `RemovedFromPlatform` state may be burned. Deletes the stored state entry.
-    /// @param tokenId Token to burn.
-    function burn(uint256 tokenId) external onlyRole(BURNER_ROLE) nonReentrant {
+    /// @notice Burns multiple asset tokens in a single transaction.
+    /// @dev Only tokens in `Held` or `RemovedFromPlatform` state may be burned. Limited to 50 tokens per batch.
+    /// @param tokenIds Array of token IDs to burn.
+    function batchBurn(
+        uint256[] calldata tokenIds
+    ) external onlyRole(BURNER_ROLE) nonReentrant {
+        uint256 len = tokenIds.length;
+        if (len > 50) revert AssetNFT__BatchTooLarge(len, 50);
+
         AssetNFTStorage storage $ = _getAssetNFTStorage();
-        AssetState state = $.assetStates[tokenId];
-        if (
-            state != AssetState.Held && state != AssetState.RemovedFromPlatform
-        ) {
-            revert AssetNFT__TokenNotBurnable(tokenId, state);
+        for (uint256 i; i < len; ) {
+            uint256 tokenId = tokenIds[i];
+            if (!_exists(tokenId)) revert AssetNFT__TokenNotFound(tokenId);
+            AssetState state = $.assetStates[tokenId];
+            if (
+                state != AssetState.Held &&
+                state != AssetState.RemovedFromPlatform
+            ) {
+                revert AssetNFT__TokenNotBurnable(tokenId, state);
+            }
+            emit MetadataUpdate(tokenId);
+            _burn(tokenId);
+            delete $.assetStates[tokenId];
+            unchecked {
+                ++i;
+            }
         }
-        emit MetadataUpdate(tokenId);
-        _burn(tokenId);
-        delete $.assetStates[tokenId];
     }
 
     // =========================================================================
     // State machine
     // =========================================================================
 
-    /// @notice Transitions a single token to a new lifecycle state.
-    /// @param tokenId Token whose state is being updated.
-    /// @param newState Target state; must be reachable from the current state per the transition rules.
-    function setAssetState(
-        uint256 tokenId,
-        AssetState newState
-    ) external onlyRole(STATE_MANAGER_ROLE) {
-        _requireOwned(tokenId);
-        AssetNFTStorage storage $ = _getAssetNFTStorage();
-        AssetState current = $.assetStates[tokenId];
-        if (!_isValidTransition(current, newState)) {
-            revert AssetNFT__InvalidStateTransition(tokenId, current, newState);
-        }
-        $.assetStates[tokenId] = newState;
-        emit AssetStateChanged(tokenId, current, newState);
-    }
-
-    /// @notice Transitions multiple tokens to the same new lifecycle state in a single call.
-    /// @param tokenIds Array of token identifiers to update.
-    /// @param newState Target state applied to every token in the array.
+    /// @notice Transitions multiple tokens to individual new lifecycle states in a single call.
+    /// @dev Arrays must have equal length and at most 50 elements. Pass arrays of length 1 for single-token transitions.
     function batchSetAssetState(
         uint256[] calldata tokenIds,
-        AssetState newState
+        AssetState[] calldata newStates
     ) external onlyRole(STATE_MANAGER_ROLE) {
+        uint256 len = tokenIds.length;
+        if (len != newStates.length) revert AssetNFT__ArrayLengthMismatch();
+        if (len > 50) revert AssetNFT__BatchTooLarge(len, 50);
         AssetNFTStorage storage $ = _getAssetNFTStorage();
-        for (uint256 i; i < tokenIds.length; ) {
+        for (uint256 i; i < len; ) {
             uint256 tokenId = tokenIds[i];
-            _requireOwned(tokenId);
+            if (!_exists(tokenId)) revert AssetNFT__TokenNotFound(tokenId);
             AssetState current = $.assetStates[tokenId];
+            AssetState newState = newStates[i];
             if (!_isValidTransition(current, newState)) {
                 revert AssetNFT__InvalidStateTransition(
                     tokenId,
@@ -318,19 +322,11 @@ contract AssetNFT is
     }
 
     /// @notice Returns the current lifecycle state of a token.
-    /// @param tokenId Token to query; must exist.
-    /// @return The token's current `AssetState`.
     function getAssetState(uint256 tokenId) external view returns (AssetState) {
-        _requireOwned(tokenId);
+        if (!_exists(tokenId)) revert AssetNFT__TokenNotFound(tokenId);
         return _getAssetNFTStorage().assetStates[tokenId];
     }
 
-    /// @dev Validates a state transition using the packed `TRANSITIONS` bitmask.
-    ///      Extracts the byte for `from` state, then checks whether bit `to` is set.
-    ///      Self-transitions (from == to) are always rejected.
-    /// @param from Current state of the token.
-    /// @param to Desired target state.
-    /// @return True if the transition is permitted, false otherwise.
     function _isValidTransition(
         AssetState from,
         AssetState to
@@ -345,18 +341,16 @@ contract AssetNFT is
     // =========================================================================
 
     /// @notice Updates the metadata URI for a specific token.
-    /// @param tokenId Token to update; must exist.
-    /// @param uri New metadata URI.
     function setTokenURI(
         uint256 tokenId,
         string calldata uri
     ) external onlyRole(URI_SETTER_ROLE) {
-        _requireOwned(tokenId);
-        _setTokenURI(tokenId, uri);
+        if (!_exists(tokenId)) revert AssetNFT__TokenNotFound(tokenId);
+        _getAssetNFTStorage().tokenURIs[tokenId] = uri;
+        emit MetadataUpdate(tokenId);
     }
 
-    /// @notice Sets the base URI prepended to all per-token URIs.
-    /// @param baseURI_ New base URI string.
+    /// @notice Sets the base URI prepended to all per-token URIs when no per-token URI is set.
     function setBaseURI(
         string calldata baseURI_
     ) external onlyRole(URI_SETTER_ROLE) {
@@ -365,13 +359,11 @@ contract AssetNFT is
     }
 
     /// @notice ERC-7572 collection-level metadata URI.
-    /// @return The current contract URI string.
     function contractURI() external view returns (string memory) {
         return _getAssetNFTStorage().contractURIValue;
     }
 
     /// @notice Updates the ERC-7572 collection-level metadata URI.
-    /// @param contractURI_ New contract URI string.
     function setContractURI(
         string calldata contractURI_
     ) external onlyRole(URI_SETTER_ROLE) {
@@ -380,15 +372,46 @@ contract AssetNFT is
     }
 
     // =========================================================================
+    // ERC-2981 royalty admin
+    // =========================================================================
+
+    /// @notice Sets the default royalty receiver and fee for all tokens.
+    function setDefaultRoyalty(
+        address receiver,
+        uint96 feeNumerator
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _setDefaultRoyalty(receiver, feeNumerator);
+    }
+
+    /// @notice Sets a per-token royalty override.
+    function setTokenRoyalty(
+        uint256 tokenId,
+        address receiver,
+        uint96 feeNumerator
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _setTokenRoyalty(tokenId, receiver, feeNumerator);
+    }
+
+    /// @notice Deletes the default royalty configuration.
+    function deleteDefaultRoyalty() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _deleteDefaultRoyalty();
+    }
+
+    /// @notice Removes the per-token royalty override, falling back to the default.
+    function resetTokenRoyalty(
+        uint256 tokenId
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _resetTokenRoyalty(tokenId);
+    }
+
+    // =========================================================================
     // Pause
     // =========================================================================
 
-    /// @notice Pauses all token transfers.
     function pause() external onlyRole(PAUSER_ROLE) {
         _pause();
     }
 
-    /// @notice Unpauses token transfers.
     function unpause() external onlyRole(PAUSER_ROLE) {
         _unpause();
     }
@@ -397,7 +420,6 @@ contract AssetNFT is
     // UUPS upgrade authorization
     // =========================================================================
 
-    /// @inheritdoc UUPSUpgradeable
     function _authorizeUpgrade(
         address newImplementation
     ) internal override onlyRole(UPGRADER_ROLE) {}
@@ -406,73 +428,99 @@ contract AssetNFT is
     // Required overrides
     // =========================================================================
 
-    /// @inheritdoc ERC721Upgradeable
-    function _baseURI() internal view override returns (string memory) {
-        return _getAssetNFTStorage().baseURIValue;
-    }
-
-    /// @inheritdoc ERC721Upgradeable
-    /// @dev Blocks transfers (non-mint, non-burn) when the token is not in the `Held` state.
-    function _update(
-        address to,
-        uint256 tokenId,
-        address auth
-    )
-        internal
-        override(
-            ERC721Upgradeable,
-            ERC721EnumerableUpgradeable,
-            ERC721PausableUpgradeable
-        )
-        returns (address)
-    {
-        address from = _ownerOf(tokenId);
-
-        // Block transfers (not mints or burns) when asset is not in Held state.
-        if (from != address(0) && to != address(0)) {
-            AssetState state = _getAssetNFTStorage().assetStates[tokenId];
-            if (state != AssetState.Held) {
-                revert AssetNFT__TokenNotTransferable(tokenId, state);
-            }
-        }
-
-        return super._update(to, tokenId, auth);
-    }
-
-    /// @inheritdoc ERC721Upgradeable
-    function _increaseBalance(
-        address account,
-        uint128 value
-    ) internal override(ERC721Upgradeable, ERC721EnumerableUpgradeable) {
-        super._increaseBalance(account, value);
-    }
-
-    /// @inheritdoc ERC721Upgradeable
+    /// @dev Returns per-token URI if set, otherwise falls back to baseURI + tokenId string.
     function tokenURI(
         uint256 tokenId
     )
         public
         view
-        override(ERC721Upgradeable, ERC721URIStorageUpgradeable)
+        override(ERC721AUpgradeable, IERC721AUpgradeable)
         returns (string memory)
     {
-        return super.tokenURI(tokenId);
+        if (!_exists(tokenId)) revert URIQueryForNonexistentToken();
+        AssetNFTStorage storage $ = _getAssetNFTStorage();
+        string memory _tokenURI = $.tokenURIs[tokenId];
+        string memory base = $.baseURIValue;
+        if (bytes(base).length == 0) return _tokenURI;
+        if (bytes(_tokenURI).length > 0) return string.concat(base, _tokenURI);
+        return string.concat(base, _toString(tokenId));
     }
 
-    /// @inheritdoc ERC721Upgradeable
+    /// @dev Blocks all operations when paused; blocks transfers (not mints/burns) when asset state != Held.
+    function _beforeTokenTransfers(
+        address from,
+        address to,
+        uint256 startTokenId_,
+        uint256 quantity
+    ) internal override {
+        super._beforeTokenTransfers(from, to, startTokenId_, quantity);
+
+        if (paused()) revert EnforcedPause();
+
+        if (from != address(0) && to != address(0)) {
+            AssetNFTStorage storage $ = _getAssetNFTStorage();
+            for (uint256 i; i < quantity; ) {
+                uint256 tokenId = startTokenId_ + i;
+                AssetState state = $.assetStates[tokenId];
+                if (state != AssetState.Held) {
+                    revert AssetNFT__TokenNotTransferable(tokenId, state);
+                }
+                unchecked {
+                    ++i;
+                }
+            }
+        }
+    }
+
+    /// @dev Bridges ERC721A's sender resolution to the ERC-2771-aware _msgSender().
+    function _msgSenderERC721A() internal view override returns (address) {
+        return _msgSender();
+    }
+
+    function _msgSender()
+        internal
+        view
+        override(ContextUpgradeable, ERC2771ContextUpgradeable)
+        returns (address)
+    {
+        return ERC2771ContextUpgradeable._msgSender();
+    }
+
+    function _msgData()
+        internal
+        view
+        override(ContextUpgradeable, ERC2771ContextUpgradeable)
+        returns (bytes calldata)
+    {
+        return ERC2771ContextUpgradeable._msgData();
+    }
+
+    function _contextSuffixLength()
+        internal
+        view
+        override(ContextUpgradeable, ERC2771ContextUpgradeable)
+        returns (uint256)
+    {
+        return ERC2771ContextUpgradeable._contextSuffixLength();
+    }
+
+    /// @dev Combines ERC721A, ERC2981, and AccessControl interface support.
     function supportsInterface(
         bytes4 interfaceId
     )
         public
         view
         override(
-            ERC721Upgradeable,
-            ERC721EnumerableUpgradeable,
-            ERC721URIStorageUpgradeable,
+            ERC721AUpgradeable,
+            IERC721AUpgradeable,
+            ERC2981Upgradeable,
             AccessControlUpgradeable
         )
         returns (bool)
     {
-        return super.supportsInterface(interfaceId);
+        return
+            ERC721AUpgradeable.supportsInterface(interfaceId) ||
+            ERC2981Upgradeable.supportsInterface(interfaceId) ||
+            AccessControlUpgradeable.supportsInterface(interfaceId);
     }
 }
