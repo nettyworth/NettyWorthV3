@@ -8,7 +8,7 @@ Solidity smart contracts for physical asset tokenization, targeting Ethereum mai
 | ----- | ---------- |
 | Language | Solidity 0.8.28 |
 | Framework | Hardhat 3 (beta) |
-| Libraries | OpenZeppelin Contracts Upgradeable v5.6.1 |
+| Libraries | OpenZeppelin Contracts Upgradeable v5.6.1, ERC721A Upgradeable v4 |
 | Test runner | Foundry-style `.t.sol` + Node.js `node:test` |
 | Chain interaction | viem |
 | Package manager | pnpm |
@@ -17,30 +17,42 @@ Solidity smart contracts for physical asset tokenization, targeting Ethereum mai
 
 ```text
 contracts/
-  AssetNFT.sol              # Main ERC-721 asset tokenization contract
-  test-helpers/             # Thin proxy wrappers used in tests
-  test/                     # Foundry-style Solidity unit tests (.t.sol)
-test/                       # TypeScript integration tests (node:test + viem)
+  AssetNFT.sol                    # ERC-721A asset tokenization with lifecycle states
+  PermissionManager.sol           # Centralized role registry (AccessControlEnumerable)
+  PermissionConsumer.sol          # Abstract base for role-gated contracts
+  interfaces/
+    IPermissionManager.sol        # Permission manager interface
+    ITransferValidator.sol        # External transfer validation hook
+  lib/
+    Roles.sol                     # Protocol role constants library
+  test-helpers/                   # Thin proxy wrappers used in tests
+  test/                           # Foundry-style Solidity unit tests (.t.sol)
+test/                             # TypeScript integration tests (node:test + viem)
 scripts/
-  deploy-asset-nft.ts       # Deployment script (implementation + ERC1967 proxy)
-  send-op-tx.ts             # OP chain transaction example
+  deploy-permission-manager.ts    # Deploy PermissionManager + ERC1967 proxy
+  deploy-asset-nft.ts             # Deploy AssetNFT + ERC1967 proxy
+  upgrade-asset-nft.ts            # UUPS upgrade for AssetNFT proxy
+  send-op-tx.ts                   # OP chain transaction example
 ```
 
 ## AssetNFT Contract
 
-`AssetNFT` is an ERC-721 NFT representing tokenized physical assets. Each token tracks a lifecycle state and enforces allowed transitions.
+`AssetNFT` is an ERC-721A NFT representing tokenized physical assets. Each token tracks a lifecycle state and enforces allowed transitions. Access control is delegated to the protocol-wide `PermissionManager` via `PermissionConsumer`.
 
 ### Roles
 
+All roles are defined in `Roles.sol` and administered by `PermissionManager`.
+
 | Role | Permission |
 | ---- | ---------- |
-| `DEFAULT_ADMIN_ROLE` | Manage all roles |
+| `DEFAULT_ADMIN_ROLE` | Manage all roles, configure royalties and transfer validator |
 | `MINTER_ROLE` | Mint new tokens |
 | `BURNER_ROLE` | Burn tokens |
 | `STATE_MANAGER_ROLE` | Transition asset lifecycle states |
 | `URI_SETTER_ROLE` | Update token and contract metadata URIs |
 | `PAUSER_ROLE` | Pause and unpause transfers |
 | `UPGRADER_ROLE` | Authorize UUPS contract upgrades |
+| `BLACKLIST_ROLE` | Manage address blacklist |
 
 ### Asset Lifecycle States
 
@@ -57,12 +69,26 @@ Transfers are blocked unless the token is in `Held` state. Burns are only permit
 
 ### Key Features
 
-- **UUPS upgradeable** (EIP-1822) — logic can be upgraded without changing the proxy address
-- **Role-based access control** — fine-grained permissions via `AccessControlUpgradeable`
-- **Batch operations** — `batchMint` (up to 50) and `batchSetAssetState`
+- **ERC-721A** — gas-optimized batch minting (up to 50 per call)
+- **UUPS upgradeable** (EIP-1822) — logic upgrades without changing the proxy address
+- **PermissionManager access control** — centralized role registry, checks delegated via `PermissionConsumer`
+- **ERC-2981 royalties** — per-token and default royalties, admin-configurable
+- **ERC-2771 meta-transactions** — trusted forwarder support (immutable per implementation)
+- **Blacklist system** — address-level transfer blocking via `BLACKLIST_ROLE`
+- **External transfer validator** — pluggable `ITransferValidator` hook for custom transfer rules
+- **Batch operations** — `batchMint`, `batchBurn`, `batchSetAssetState` (max 50 each)
 - **Pausable transfers** — emergency stop via `PAUSER_ROLE`
 - **ERC-7201 namespaced storage** — collision-safe across upgrades
 - **ERC-7572 contract URI** — collection-level metadata
+
+## PermissionManager Contract
+
+`PermissionManager` is the centralized role registry for the protocol. It inherits `AccessControlEnumerableUpgradeable` and exposes `hasProtocolRole(bytes32 role, address account)` for consumers to query.
+
+- Deployed as a UUPS-upgradeable proxy, independent of AssetNFT
+- All 7 protocol roles plus `DEFAULT_ADMIN_ROLE` are administered here
+- Consumer contracts inherit `PermissionConsumer`, which stores a reference to the manager and provides the `onlyProtocolRole` modifier
+- Two-step manager migration on consumers (propose → accept) prevents accidental loss of control
 
 ## Getting Started
 
@@ -93,9 +119,12 @@ MAINNET_PRIVATE_KEY=
 BASE_PRIVATE_KEY=
 
 # Optional — used by deploy-asset-nft.ts
+PERMISSION_MANAGER_PROXY=
 ASSET_NFT_NAME=
 ASSET_NFT_SYMBOL=
 ASSET_NFT_CONTRACT_URI=
+ASSET_NFT_ROYALTY_RECEIVER=
+ASSET_NFT_ROYALTY_FEE=
 ```
 
 ## Commands
@@ -124,11 +153,29 @@ pnpm fork:sepolia
 
 ## Deployment
 
-`scripts/deploy-asset-nft.ts` deploys the implementation contract and an ERC1967 proxy in a single run. On success it saves addresses to `deployments/<network>.json`.
+### 1. Deploy PermissionManager
+
+```bash
+npx hardhat run scripts/deploy-permission-manager.ts --network <network>
+```
+
+Deploys the PermissionManager implementation and ERC1967 proxy. Saves addresses to `deployments/<network>.json`.
+
+### 2. Deploy AssetNFT
 
 ```bash
 npx hardhat run scripts/deploy-asset-nft.ts --network <network>
 ```
+
+Deploys AssetNFT implementation and ERC1967 proxy. Resolves `PERMISSION_MANAGER_PROXY` from env or prior deployment in `deployments/<network>.json`.
+
+### 3. Upgrade AssetNFT
+
+```bash
+npx hardhat run scripts/upgrade-asset-nft.ts --network <network>
+```
+
+Deploys a new AssetNFT implementation and calls `upgradeToAndCall` on the existing proxy. Requires `UPGRADER_ROLE`.
 
 ## Networks
 
