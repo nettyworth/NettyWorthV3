@@ -5,6 +5,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Optional raw reinitializer calldata for future reinitializers
 const REINITIALIZER_DATA = (
   process.env.UPGRADE_REINITIALIZER_DATA ?? "0x"
 ) as `0x${string}`;
@@ -22,6 +23,7 @@ async function confirmUpgrade(
   proxy: string,
   oldImpl: string,
   newImpl: string,
+  callData: `0x${string}`,
 ): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   console.log("\n=== Upgrade Summary ===");
@@ -32,7 +34,7 @@ async function confirmUpgrade(
   console.log(`Current Impl:       ${oldImpl}`);
   console.log(`New Impl:           ${newImpl}`);
   console.log(
-    `Reinitializer Data: ${REINITIALIZER_DATA === "0x" ? "(none)" : REINITIALIZER_DATA}`,
+    `Upgrade Calldata:   ${callData === "0x" ? "(none)" : callData}`,
   );
   console.log("=======================\n");
   const answer = await rl.question("Proceed with upgrade? (yes/no): ");
@@ -52,10 +54,7 @@ const deploymentsDir = join(
   dirname(fileURLToPath(import.meta.url)),
   "../deployments",
 );
-const deploymentPath = join(
-  deploymentsDir,
-  `${connection.networkName}.json`,
-);
+const deploymentPath = join(deploymentsDir, `${connection.networkName}.json`);
 
 // Load deployment JSON, falling back to ASSET_NFT_PROXY env var for local networks
 let deploymentData: Record<string, unknown> = {};
@@ -100,18 +99,30 @@ if (!implSlotValue || implSlotValue === `0x${"0".repeat(64)}`) {
   );
   process.exit(1);
 }
-// Storage slot is a 32-byte (64 hex chars) right-aligned address
 const currentImplAddress = getAddress(`0x${implSlotValue.slice(26)}`);
 
-// Pre-check: upgrader must hold UPGRADER_ROLE before wasting gas on impl deployment
 const nft = await viem.getContractAt("AssetNFT", proxyAddress);
-const hasRole = await nft.read.hasRole([UPGRADER_ROLE, upgraderAddress]);
-if (!hasRole) {
+let hasUpgraderRole = false;
+
+try {
+  const pmAddress = await nft.read.getPermissionManager();
+  const pm = await viem.getContractAt("PermissionManager", pmAddress);
+  hasUpgraderRole = await pm.read.hasProtocolRole([UPGRADER_ROLE, upgraderAddress]);
+} catch {
+  console.warn(
+    "Could not verify UPGRADER_ROLE. Proceeding, but upgrade may fail.",
+  );
+  hasUpgraderRole = true;
+}
+
+if (!hasUpgraderRole) {
   console.error(
     `Account ${upgraderAddress} does not have UPGRADER_ROLE on proxy ${proxyAddress}`,
   );
   process.exit(1);
 }
+
+const upgradeCalldata: `0x${string}` = REINITIALIZER_DATA;
 
 console.log("\n[1/3] Deploying new AssetNFT implementation...");
 const newImpl = await viem.deployContract("AssetNFT");
@@ -125,6 +136,7 @@ if (connection.networkConfig.type === "http") {
     proxyAddress,
     currentImplAddress,
     newImpl.address,
+    upgradeCalldata,
   );
   if (!ok) {
     console.log("Upgrade cancelled.");
@@ -134,7 +146,7 @@ if (connection.networkConfig.type === "http") {
 
 console.log("[2/3] Calling upgradeToAndCall on proxy...");
 const txHash = await nft.write.upgradeToAndCall(
-  [newImpl.address, REINITIALIZER_DATA],
+  [newImpl.address, upgradeCalldata],
   { account: upgraderClient.account },
 );
 const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
@@ -178,7 +190,7 @@ if (connection.networkConfig.type === "http") {
     newImplementation: newImpl.address,
     upgradedAt: new Date().toISOString(),
     txHash,
-    reinitializerData: REINITIALIZER_DATA,
+    upgradeCalldata,
   });
 
   deploymentData["AssetNFT"] = {

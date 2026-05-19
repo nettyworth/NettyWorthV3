@@ -4,9 +4,30 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {AssetNFT} from "../AssetNFT.sol";
+import {PermissionManager} from "../PermissionManager.sol";
+import {PermissionConsumer} from "../PermissionConsumer.sol";
+import {ITransferValidator} from "../interfaces/ITransferValidator.sol";
+
+contract MockTransferValidator is ITransferValidator {
+    bool public shouldRevert;
+
+    function setShouldRevert(bool _shouldRevert) external {
+        shouldRevert = _shouldRevert;
+    }
+
+    function validateTransfer(
+        address,
+        address,
+        address,
+        uint256
+    ) external view override {
+        require(!shouldRevert, "MockTransferValidator: blocked");
+    }
+}
 
 contract AssetNFTTest is Test {
     AssetNFT internal nft;
+    PermissionManager internal pm;
 
     address internal admin = makeAddr("admin");
     address internal minter = makeAddr("minter");
@@ -27,22 +48,47 @@ contract AssetNFTTest is Test {
     uint96 internal constant ROYALTY_FEE = 250; // 2.5%
 
     function setUp() public {
+        // Deploy PermissionManager proxy
+        PermissionManager pmImpl = new PermissionManager();
+        bytes memory pmData = abi.encodeCall(
+            PermissionManager.initialize,
+            (admin)
+        );
+        ERC1967Proxy pmProxy = new ERC1967Proxy(address(pmImpl), pmData);
+        pm = PermissionManager(address(pmProxy));
+
+        // Cache role constants before prank to avoid consuming the prank on the getter call
+        bytes32 minterRole = pm.MINTER_ROLE();
+        bytes32 burnerRole = pm.BURNER_ROLE();
+        bytes32 stateManagerRole = pm.STATE_MANAGER_ROLE();
+        bytes32 uriSetterRole = pm.URI_SETTER_ROLE();
+        bytes32 pauserRole = pm.PAUSER_ROLE();
+        bytes32 upgraderRole = pm.UPGRADER_ROLE();
+
+        vm.startPrank(admin);
+        pm.grantRole(minterRole, minter);
+        pm.grantRole(burnerRole, burner);
+        pm.grantRole(stateManagerRole, stateManager);
+        pm.grantRole(uriSetterRole, uriSetter);
+        pm.grantRole(pauserRole, pauser);
+        pm.grantRole(upgraderRole, upgrader);
+        vm.stopPrank();
+
+        // Deploy AssetNFT proxy
         AssetNFT impl = new AssetNFT(forwarder);
         bytes memory data = abi.encodeCall(
             AssetNFT.initialize,
-            (admin, NAME, SYMBOL, CONTRACT_URI, royaltyReceiver, ROYALTY_FEE)
+            (
+                address(pm),
+                NAME,
+                SYMBOL,
+                CONTRACT_URI,
+                royaltyReceiver,
+                ROYALTY_FEE
+            )
         );
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), data);
         nft = AssetNFT(address(proxy));
-
-        vm.startPrank(admin);
-        nft.grantRole(nft.MINTER_ROLE(), minter);
-        nft.grantRole(nft.BURNER_ROLE(), burner);
-        nft.grantRole(nft.STATE_MANAGER_ROLE(), stateManager);
-        nft.grantRole(nft.URI_SETTER_ROLE(), uriSetter);
-        nft.grantRole(nft.PAUSER_ROLE(), pauser);
-        nft.grantRole(nft.UPGRADER_ROLE(), upgrader);
-        vm.stopPrank();
     }
 
     // =========================================================================
@@ -61,12 +107,23 @@ contract AssetNFTTest is Test {
     }
 
     /// @dev Transitions a single token state via batchSetAssetState.
-    function _setAssetState(uint256 tokenId, AssetNFT.AssetState newState) internal {
+    function _setAssetState(
+        uint256 tokenId,
+        AssetNFT.AssetState newState
+    ) internal {
         uint256[] memory ids = new uint256[](1);
         AssetNFT.AssetState[] memory states = new AssetNFT.AssetState[](1);
         ids[0] = tokenId;
         states[0] = newState;
         nft.batchSetAssetState(ids, states);
+    }
+
+    function _setBlacklisted(address account, bool status) internal {
+        address[] memory accounts = new address[](1);
+        bool[] memory statuses = new bool[](1);
+        accounts[0] = account;
+        statuses[0] = status;
+        nft.setBlacklisted(accounts, statuses);
     }
 
     // =========================================================================
@@ -85,29 +142,50 @@ contract AssetNFTTest is Test {
         assertEq(nft.contractURI(), CONTRACT_URI);
     }
 
-    function test_Initialize_AdminHasAllRoles() public view {
-        assertTrue(nft.hasRole(nft.DEFAULT_ADMIN_ROLE(), admin));
-        assertTrue(nft.hasRole(nft.MINTER_ROLE(), admin));
-        assertTrue(nft.hasRole(nft.BURNER_ROLE(), admin));
-        assertTrue(nft.hasRole(nft.STATE_MANAGER_ROLE(), admin));
-        assertTrue(nft.hasRole(nft.URI_SETTER_ROLE(), admin));
-        assertTrue(nft.hasRole(nft.PAUSER_ROLE(), admin));
-        assertTrue(nft.hasRole(nft.UPGRADER_ROLE(), admin));
+    function test_Initialize_PermissionManagerSet() public view {
+        assertEq(nft.getPermissionManager(), address(pm));
     }
 
-    function test_Initialize_RevertsOnZeroAdmin() public {
+    function test_Initialize_AdminHasAllRolesOnManager() public view {
+        assertTrue(pm.hasProtocolRole(pm.DEFAULT_ADMIN_ROLE(), admin));
+        assertTrue(pm.hasProtocolRole(pm.MINTER_ROLE(), admin));
+        assertTrue(pm.hasProtocolRole(pm.BURNER_ROLE(), admin));
+        assertTrue(pm.hasProtocolRole(pm.STATE_MANAGER_ROLE(), admin));
+        assertTrue(pm.hasProtocolRole(pm.URI_SETTER_ROLE(), admin));
+        assertTrue(pm.hasProtocolRole(pm.PAUSER_ROLE(), admin));
+        assertTrue(pm.hasProtocolRole(pm.UPGRADER_ROLE(), admin));
+        assertTrue(pm.hasProtocolRole(pm.BLACKLIST_ROLE(), admin));
+    }
+
+    function test_Initialize_RevertsOnZeroPermissionManager() public {
         AssetNFT impl = new AssetNFT(forwarder);
         bytes memory data = abi.encodeCall(
             AssetNFT.initialize,
-            (address(0), NAME, SYMBOL, CONTRACT_URI, royaltyReceiver, ROYALTY_FEE)
+            (
+                address(0),
+                NAME,
+                SYMBOL,
+                CONTRACT_URI,
+                royaltyReceiver,
+                ROYALTY_FEE
+            )
         );
-        vm.expectRevert(AssetNFT.AssetNFT__ZeroAddress.selector);
+        vm.expectRevert(
+            PermissionConsumer.PermissionConsumer__ZeroAddress.selector
+        );
         new ERC1967Proxy(address(impl), data);
     }
 
     function test_Initialize_CannotInitializeTwice() public {
         vm.expectRevert();
-        nft.initialize(admin, NAME, SYMBOL, CONTRACT_URI, royaltyReceiver, ROYALTY_FEE);
+        nft.initialize(
+            address(pm),
+            NAME,
+            SYMBOL,
+            CONTRACT_URI,
+            royaltyReceiver,
+            ROYALTY_FEE
+        );
     }
 
     function test_Initialize_TrustedForwarder() public view {
@@ -145,7 +223,10 @@ contract AssetNFTTest is Test {
 
     function test_BatchMint_StateIsHeld() public {
         uint256 tokenId = _mintToken();
-        assertEq(uint8(nft.getAssetState(tokenId)), uint8(AssetNFT.AssetState.Held));
+        assertEq(
+            uint8(nft.getAssetState(tokenId)),
+            uint8(AssetNFT.AssetState.Held)
+        );
     }
 
     function test_BatchMint_MultipleRecipients() public {
@@ -387,35 +468,50 @@ contract AssetNFTTest is Test {
         uint256 tokenId = _mintToken();
         vm.prank(stateManager);
         _setAssetState(tokenId, AssetNFT.AssetState.Listed);
-        assertEq(uint8(nft.getAssetState(tokenId)), uint8(AssetNFT.AssetState.Listed));
+        assertEq(
+            uint8(nft.getAssetState(tokenId)),
+            uint8(AssetNFT.AssetState.Listed)
+        );
     }
 
     function test_SetAssetState_HeldToLoaned() public {
         uint256 tokenId = _mintToken();
         vm.prank(stateManager);
         _setAssetState(tokenId, AssetNFT.AssetState.Loaned);
-        assertEq(uint8(nft.getAssetState(tokenId)), uint8(AssetNFT.AssetState.Loaned));
+        assertEq(
+            uint8(nft.getAssetState(tokenId)),
+            uint8(AssetNFT.AssetState.Loaned)
+        );
     }
 
     function test_SetAssetState_HeldToTraded() public {
         uint256 tokenId = _mintToken();
         vm.prank(stateManager);
         _setAssetState(tokenId, AssetNFT.AssetState.Traded);
-        assertEq(uint8(nft.getAssetState(tokenId)), uint8(AssetNFT.AssetState.Traded));
+        assertEq(
+            uint8(nft.getAssetState(tokenId)),
+            uint8(AssetNFT.AssetState.Traded)
+        );
     }
 
     function test_SetAssetState_HeldToInShipment() public {
         uint256 tokenId = _mintToken();
         vm.prank(stateManager);
         _setAssetState(tokenId, AssetNFT.AssetState.InShipment);
-        assertEq(uint8(nft.getAssetState(tokenId)), uint8(AssetNFT.AssetState.InShipment));
+        assertEq(
+            uint8(nft.getAssetState(tokenId)),
+            uint8(AssetNFT.AssetState.InShipment)
+        );
     }
 
     function test_SetAssetState_HeldToRemoved() public {
         uint256 tokenId = _mintToken();
         vm.prank(stateManager);
         _setAssetState(tokenId, AssetNFT.AssetState.RemovedFromPlatform);
-        assertEq(uint8(nft.getAssetState(tokenId)), uint8(AssetNFT.AssetState.RemovedFromPlatform));
+        assertEq(
+            uint8(nft.getAssetState(tokenId)),
+            uint8(AssetNFT.AssetState.RemovedFromPlatform)
+        );
     }
 
     function test_SetAssetState_ListedToHeld() public {
@@ -424,7 +520,10 @@ contract AssetNFTTest is Test {
         _setAssetState(tokenId, AssetNFT.AssetState.Listed);
         _setAssetState(tokenId, AssetNFT.AssetState.Held);
         vm.stopPrank();
-        assertEq(uint8(nft.getAssetState(tokenId)), uint8(AssetNFT.AssetState.Held));
+        assertEq(
+            uint8(nft.getAssetState(tokenId)),
+            uint8(AssetNFT.AssetState.Held)
+        );
     }
 
     function test_SetAssetState_LoanedToHeld() public {
@@ -433,7 +532,10 @@ contract AssetNFTTest is Test {
         _setAssetState(tokenId, AssetNFT.AssetState.Loaned);
         _setAssetState(tokenId, AssetNFT.AssetState.Held);
         vm.stopPrank();
-        assertEq(uint8(nft.getAssetState(tokenId)), uint8(AssetNFT.AssetState.Held));
+        assertEq(
+            uint8(nft.getAssetState(tokenId)),
+            uint8(AssetNFT.AssetState.Held)
+        );
     }
 
     function test_SetAssetState_InShipmentToRemoved() public {
@@ -442,18 +544,27 @@ contract AssetNFTTest is Test {
         _setAssetState(tokenId, AssetNFT.AssetState.InShipment);
         _setAssetState(tokenId, AssetNFT.AssetState.RemovedFromPlatform);
         vm.stopPrank();
-        assertEq(uint8(nft.getAssetState(tokenId)), uint8(AssetNFT.AssetState.RemovedFromPlatform));
+        assertEq(
+            uint8(nft.getAssetState(tokenId)),
+            uint8(AssetNFT.AssetState.RemovedFromPlatform)
+        );
     }
 
     function test_SetAssetState_EmitsEvent() public {
         uint256 tokenId = _mintToken();
         vm.expectEmit(true, true, true, false, address(nft));
-        emit AssetStateChanged(tokenId, AssetNFT.AssetState.Held, AssetNFT.AssetState.Listed);
+        emit AssetStateChanged(
+            tokenId,
+            AssetNFT.AssetState.Held,
+            AssetNFT.AssetState.Listed
+        );
         vm.prank(stateManager);
         _setAssetState(tokenId, AssetNFT.AssetState.Listed);
     }
 
-    function test_SetAssetState_RevertsInvalidTransition_ListedToLoaned() public {
+    function test_SetAssetState_RevertsInvalidTransition_ListedToLoaned()
+        public
+    {
         uint256 tokenId = _mintToken();
         vm.startPrank(stateManager);
         _setAssetState(tokenId, AssetNFT.AssetState.Listed);
@@ -510,9 +621,18 @@ contract AssetNFTTest is Test {
         vm.prank(stateManager);
         nft.batchSetAssetState(ids, states);
 
-        assertEq(uint8(nft.getAssetState(id1)), uint8(AssetNFT.AssetState.Listed));
-        assertEq(uint8(nft.getAssetState(id2)), uint8(AssetNFT.AssetState.Listed));
-        assertEq(uint8(nft.getAssetState(id3)), uint8(AssetNFT.AssetState.Listed));
+        assertEq(
+            uint8(nft.getAssetState(id1)),
+            uint8(AssetNFT.AssetState.Listed)
+        );
+        assertEq(
+            uint8(nft.getAssetState(id2)),
+            uint8(AssetNFT.AssetState.Listed)
+        );
+        assertEq(
+            uint8(nft.getAssetState(id3)),
+            uint8(AssetNFT.AssetState.Listed)
+        );
     }
 
     function test_BatchSetAssetState_RevertsWhenTooLarge() public {
@@ -562,8 +682,14 @@ contract AssetNFTTest is Test {
         vm.prank(stateManager);
         nft.batchSetAssetState(ids, states);
 
-        assertEq(uint8(nft.getAssetState(id1)), uint8(AssetNFT.AssetState.Listed));
-        assertEq(uint8(nft.getAssetState(id2)), uint8(AssetNFT.AssetState.Loaned));
+        assertEq(
+            uint8(nft.getAssetState(id1)),
+            uint8(AssetNFT.AssetState.Listed)
+        );
+        assertEq(
+            uint8(nft.getAssetState(id2)),
+            uint8(AssetNFT.AssetState.Loaned)
+        );
     }
 
     // Fuzz: exhaustively validate transition matrix (30 cross-state combos + 6 same-state)
@@ -755,7 +881,7 @@ contract AssetNFTTest is Test {
         assertEq(amount, 1000);
 
         // Other tokens still use default
-        (address defReceiver,) = nft.royaltyInfo(999, 10_000);
+        (address defReceiver, ) = nft.royaltyInfo(999, 10_000);
         assertEq(defReceiver, royaltyReceiver);
     }
 
@@ -777,7 +903,7 @@ contract AssetNFTTest is Test {
         vm.stopPrank();
 
         // Falls back to default
-        (address receiver,) = nft.royaltyInfo(tokenId, 10_000);
+        (address receiver, ) = nft.royaltyInfo(tokenId, 10_000);
         assertEq(receiver, royaltyReceiver);
     }
 
@@ -810,7 +936,7 @@ contract AssetNFTTest is Test {
         bytes memory forwardedCall = bytes.concat(mintCall, bytes20(minter));
 
         vm.prank(forwarder);
-        (bool ok,) = address(nft).call(forwardedCall);
+        (bool ok, ) = address(nft).call(forwardedCall);
         assertTrue(ok);
 
         assertEq(nft.ownerOf(1), user);
@@ -915,6 +1041,46 @@ contract AssetNFTTest is Test {
     }
 
     // =========================================================================
+    // PermissionManager integration
+    // =========================================================================
+
+    function test_RoleCheck_RevokeRoleBlocksAccess() public {
+        bytes32 role = pm.MINTER_ROLE();
+        vm.prank(admin);
+        pm.revokeRole(role, minter);
+
+        address[] memory recipients = new address[](1);
+        string[] memory uris = new string[](1);
+        recipients[0] = user;
+        uris[0] = TOKEN_URI;
+
+        vm.prank(minter);
+        vm.expectRevert();
+        nft.batchMint(recipients, uris);
+    }
+
+    function test_RoleCheck_GrantRoleEnablesAccess() public {
+        address newMinter = makeAddr("newMinter");
+        bytes32 role = pm.MINTER_ROLE();
+
+        address[] memory recipients = new address[](1);
+        string[] memory uris = new string[](1);
+        recipients[0] = user;
+        uris[0] = TOKEN_URI;
+
+        vm.prank(newMinter);
+        vm.expectRevert();
+        nft.batchMint(recipients, uris);
+
+        vm.prank(admin);
+        pm.grantRole(role, newMinter);
+
+        vm.prank(newMinter);
+        nft.batchMint(recipients, uris);
+        assertEq(nft.ownerOf(1), user);
+    }
+
+    // =========================================================================
     // supportsInterface
     // =========================================================================
 
@@ -928,10 +1094,6 @@ contract AssetNFTTest is Test {
 
     function test_SupportsInterface_ERC2981() public view {
         assertTrue(nft.supportsInterface(0x2a55205a)); // IERC2981
-    }
-
-    function test_SupportsInterface_AccessControl() public view {
-        assertTrue(nft.supportsInterface(0x7965db0b)); // IAccessControl
     }
 
     function test_SupportsInterface_ERC165() public view {
@@ -950,4 +1112,343 @@ contract AssetNFTTest is Test {
         AssetNFT.AssetState indexed newState
     );
     event ContractURIUpdated();
+    event BlacklistUpdated(address indexed account, bool indexed status);
+    event TransferValidatorUpdated(
+        address indexed oldValidator,
+        address indexed newValidator
+    );
+
+    // =========================================================================
+    // Blacklist
+    // =========================================================================
+
+    function test_Blacklist_SetTrue_EmitsEvent() public {
+        vm.expectEmit(true, true, false, false, address(nft));
+        emit BlacklistUpdated(user, true);
+        vm.prank(admin);
+        _setBlacklisted(user, true);
+    }
+
+    function test_Blacklist_SetFalse_EmitsEvent() public {
+        vm.prank(admin);
+        _setBlacklisted(user, true);
+        vm.expectEmit(true, true, false, false, address(nft));
+        emit BlacklistUpdated(user, false);
+        vm.prank(admin);
+        _setBlacklisted(user, false);
+    }
+
+    function test_Blacklist_IsBlacklisted_ReturnsCorrectState() public {
+        assertFalse(nft.isBlacklisted(user));
+        vm.prank(admin);
+        _setBlacklisted(user, true);
+        assertTrue(nft.isBlacklisted(user));
+        vm.prank(admin);
+        _setBlacklisted(user, false);
+        assertFalse(nft.isBlacklisted(user));
+    }
+
+    function test_Blacklist_RevertsOnZeroAddress() public {
+        address[] memory accounts = new address[](1);
+        bool[] memory statuses = new bool[](1);
+        accounts[0] = address(0);
+        statuses[0] = true;
+        vm.prank(admin);
+        vm.expectRevert(AssetNFT.AssetNFT__ZeroAddress.selector);
+        nft.setBlacklisted(accounts, statuses);
+    }
+
+    function test_Blacklist_RevertsWhenUnauthorized() public {
+        address[] memory accounts = new address[](1);
+        bool[] memory statuses = new bool[](1);
+        accounts[0] = user2;
+        statuses[0] = true;
+        vm.prank(user);
+        vm.expectRevert();
+        nft.setBlacklisted(accounts, statuses);
+    }
+
+    function test_Blacklist_BlocksTransferFromBlacklisted() public {
+        uint256 tokenId = _mintToken();
+        vm.prank(admin);
+        _setBlacklisted(user, true);
+
+        vm.prank(user);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AssetNFT.AssetNFT__UserBlacklisted.selector,
+                user
+            )
+        );
+        nft.transferFrom(user, user2, tokenId);
+    }
+
+    function test_Blacklist_BlocksTransferToBlacklisted() public {
+        uint256 tokenId = _mintToken();
+        vm.prank(admin);
+        _setBlacklisted(user2, true);
+
+        vm.prank(user);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AssetNFT.AssetNFT__UserBlacklisted.selector,
+                user2
+            )
+        );
+        nft.transferFrom(user, user2, tokenId);
+    }
+
+    function test_Blacklist_BlocksMintToBlacklisted() public {
+        vm.prank(admin);
+        _setBlacklisted(user, true);
+
+        address[] memory recipients = new address[](1);
+        string[] memory uris = new string[](1);
+        recipients[0] = user;
+        uris[0] = TOKEN_URI;
+
+        vm.prank(minter);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AssetNFT.AssetNFT__UserBlacklisted.selector,
+                user
+            )
+        );
+        nft.batchMint(recipients, uris);
+    }
+
+    function test_Blacklist_AllowsTransferAfterRemoval() public {
+        uint256 tokenId = _mintToken();
+        vm.prank(admin);
+        _setBlacklisted(user, true);
+        vm.prank(admin);
+        _setBlacklisted(user, false);
+
+        vm.prank(user);
+        nft.transferFrom(user, user2, tokenId);
+        assertEq(nft.ownerOf(tokenId), user2);
+    }
+
+    function test_SetBlacklisted_MultipleAddresses() public {
+        address user3 = makeAddr("user3");
+        address[] memory accounts = new address[](3);
+        bool[] memory statuses = new bool[](3);
+        accounts[0] = user;
+        accounts[1] = user2;
+        accounts[2] = user3;
+        statuses[0] = true;
+        statuses[1] = true;
+        statuses[2] = true;
+
+        vm.prank(admin);
+        nft.setBlacklisted(accounts, statuses);
+
+        assertTrue(nft.isBlacklisted(user));
+        assertTrue(nft.isBlacklisted(user2));
+        assertTrue(nft.isBlacklisted(user3));
+    }
+
+    function test_SetBlacklisted_MixedStatuses() public {
+        vm.prank(admin);
+        _setBlacklisted(user, true);
+        vm.prank(admin);
+        _setBlacklisted(user2, true);
+
+        address[] memory accounts = new address[](2);
+        bool[] memory statuses = new bool[](2);
+        accounts[0] = user;
+        accounts[1] = user2;
+        statuses[0] = false;
+        statuses[1] = true;
+
+        vm.prank(admin);
+        nft.setBlacklisted(accounts, statuses);
+
+        assertFalse(nft.isBlacklisted(user));
+        assertTrue(nft.isBlacklisted(user2));
+    }
+
+    function test_SetBlacklisted_EmitsEventPerAddress() public {
+        address user3 = makeAddr("user3");
+        address[] memory accounts = new address[](3);
+        bool[] memory statuses = new bool[](3);
+        accounts[0] = user;
+        accounts[1] = user2;
+        accounts[2] = user3;
+        statuses[0] = true;
+        statuses[1] = true;
+        statuses[2] = true;
+
+        vm.expectEmit(true, true, false, false, address(nft));
+        emit BlacklistUpdated(user, true);
+        vm.expectEmit(true, true, false, false, address(nft));
+        emit BlacklistUpdated(user2, true);
+        vm.expectEmit(true, true, false, false, address(nft));
+        emit BlacklistUpdated(user3, true);
+        vm.prank(admin);
+        nft.setBlacklisted(accounts, statuses);
+    }
+
+    function test_SetBlacklisted_RevertsOnArrayLengthMismatch() public {
+        address[] memory accounts = new address[](2);
+        bool[] memory statuses = new bool[](1);
+        accounts[0] = user;
+        accounts[1] = user2;
+        statuses[0] = true;
+
+        vm.prank(admin);
+        vm.expectRevert(AssetNFT.AssetNFT__ArrayLengthMismatch.selector);
+        nft.setBlacklisted(accounts, statuses);
+    }
+
+    function test_SetBlacklisted_RevertsWhenTooLarge() public {
+        address[] memory accounts = new address[](51);
+        bool[] memory statuses = new bool[](51);
+        for (uint256 i; i < 51; ++i) {
+            accounts[i] = vm.addr(i + 1);
+            statuses[i] = true;
+        }
+
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AssetNFT.AssetNFT__BatchTooLarge.selector,
+                51,
+                50
+            )
+        );
+        nft.setBlacklisted(accounts, statuses);
+    }
+
+    function test_SetBlacklisted_RevertsOnZeroAddressInMiddle() public {
+        address[] memory accounts = new address[](3);
+        bool[] memory statuses = new bool[](3);
+        accounts[0] = user;
+        accounts[1] = address(0);
+        accounts[2] = user2;
+        statuses[0] = true;
+        statuses[1] = true;
+        statuses[2] = true;
+
+        vm.prank(admin);
+        vm.expectRevert(AssetNFT.AssetNFT__ZeroAddress.selector);
+        nft.setBlacklisted(accounts, statuses);
+
+        assertFalse(nft.isBlacklisted(user));
+    }
+
+    function test_SetBlacklisted_EmptyArraySucceeds() public {
+        address[] memory accounts = new address[](0);
+        bool[] memory statuses = new bool[](0);
+
+        vm.prank(admin);
+        nft.setBlacklisted(accounts, statuses);
+    }
+
+    function test_SetBlacklisted_MaxBatchSize() public {
+        address[] memory accounts = new address[](50);
+        bool[] memory statuses = new bool[](50);
+        for (uint256 i; i < 50; ++i) {
+            accounts[i] = vm.addr(i + 1);
+            statuses[i] = true;
+        }
+
+        vm.prank(admin);
+        nft.setBlacklisted(accounts, statuses);
+
+        for (uint256 i; i < 50; ++i) {
+            assertTrue(nft.isBlacklisted(vm.addr(i + 1)));
+        }
+    }
+
+    // =========================================================================
+    // Transfer Validator
+    // =========================================================================
+
+    function test_TransferValidator_SetValidator_Success() public {
+        MockTransferValidator validator = new MockTransferValidator();
+        vm.expectEmit(true, true, false, false, address(nft));
+        emit TransferValidatorUpdated(address(0), address(validator));
+        vm.prank(admin);
+        nft.setTransferValidator(address(validator));
+        assertEq(nft.getTransferValidator(), address(validator));
+    }
+
+    function test_TransferValidator_DisableWithZeroAddress() public {
+        MockTransferValidator validator = new MockTransferValidator();
+        vm.startPrank(admin);
+        nft.setTransferValidator(address(validator));
+        nft.setTransferValidator(address(0));
+        vm.stopPrank();
+        assertEq(nft.getTransferValidator(), address(0));
+    }
+
+    function test_TransferValidator_RevertsWhenUnauthorized() public {
+        MockTransferValidator validator = new MockTransferValidator();
+        vm.prank(user);
+        vm.expectRevert();
+        nft.setTransferValidator(address(validator));
+    }
+
+    function test_TransferValidator_BlocksTransferWhenValidatorReverts()
+        public
+    {
+        uint256 tokenId = _mintToken();
+        MockTransferValidator validator = new MockTransferValidator();
+        validator.setShouldRevert(true);
+        vm.prank(admin);
+        nft.setTransferValidator(address(validator));
+
+        vm.prank(user);
+        vm.expectRevert("MockTransferValidator: blocked");
+        nft.transferFrom(user, user2, tokenId);
+    }
+
+    function test_TransferValidator_AllowsTransferWhenValidatorPasses() public {
+        uint256 tokenId = _mintToken();
+        MockTransferValidator validator = new MockTransferValidator();
+        vm.prank(admin);
+        nft.setTransferValidator(address(validator));
+
+        vm.prank(user);
+        nft.transferFrom(user, user2, tokenId);
+        assertEq(nft.ownerOf(tokenId), user2);
+    }
+
+    function test_TransferValidator_NotCalledForMints() public {
+        MockTransferValidator validator = new MockTransferValidator();
+        validator.setShouldRevert(true);
+        vm.prank(admin);
+        nft.setTransferValidator(address(validator));
+
+        // Mint should succeed even though validator would revert on transfers
+        uint256 tokenId = _mintToken();
+        assertEq(nft.ownerOf(tokenId), user);
+    }
+
+    function test_TransferValidator_NotCalledForBurns() public {
+        uint256 tokenId = _mintToken();
+        MockTransferValidator validator = new MockTransferValidator();
+        validator.setShouldRevert(true);
+        vm.prank(admin);
+        nft.setTransferValidator(address(validator));
+
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = tokenId;
+        vm.prank(burner);
+        nft.batchBurn(ids);
+
+        vm.expectRevert();
+        nft.ownerOf(tokenId);
+    }
+
+    function test_TransferValidator_DisabledWhenZeroAddress() public {
+        uint256 tokenId = _mintToken();
+        // No validator set — transfers should work normally
+        assertEq(nft.getTransferValidator(), address(0));
+
+        vm.prank(user);
+        nft.transferFrom(user, user2, tokenId);
+        assertEq(nft.ownerOf(tokenId), user2);
+    }
 }

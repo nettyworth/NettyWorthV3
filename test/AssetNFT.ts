@@ -32,20 +32,25 @@ describe("AssetNFT", async function () {
   const user2Address = walletUser2.account.address;
 
   async function deployAssetNFT() {
-    const impl = await viem.deployContract("AssetNFT", [FORWARDER]);
+    const pmImpl = await viem.deployContract("PermissionManager");
+    const pmInitData = encodeFunctionData({
+      abi: pmImpl.abi,
+      functionName: "initialize",
+      args: [adminAddress],
+    });
+    const pmProxy = await viem.deployContract("ERC1967ProxyHelper", [pmImpl.address, pmInitData]);
+    const permissionManager = await viem.getContractAt("PermissionManager", pmProxy.address);
 
+    const impl = await viem.deployContract("AssetNFT", [FORWARDER]);
     const initData = encodeFunctionData({
       abi: impl.abi,
       functionName: "initialize",
-      args: [adminAddress, "NettyWorth Assets", "NWA", CONTRACT_URI, ROYALTY_RECEIVER, ROYALTY_FEE],
+      args: [permissionManager.address, "NettyWorth Assets", "NWA", CONTRACT_URI, ROYALTY_RECEIVER, ROYALTY_FEE],
     });
+    const proxy = await viem.deployContract("ERC1967ProxyHelper", [impl.address, initData]);
+    const nft = await viem.getContractAt("AssetNFT", proxy.address);
 
-    const proxy = await viem.deployContract("ERC1967ProxyHelper", [
-      impl.address,
-      initData,
-    ]);
-
-    return viem.getContractAt("AssetNFT", proxy.address);
+    return { nft, permissionManager };
   }
 
   function roleHash(role: string): `0x${string}` {
@@ -63,7 +68,7 @@ describe("AssetNFT", async function () {
 
   describe("Deployment", async function () {
     it("should initialize with correct name, symbol, contractURI", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
 
       assert.equal(await nft.read.name(), "NettyWorth Assets");
       assert.equal(await nft.read.symbol(), "NWA");
@@ -71,23 +76,23 @@ describe("AssetNFT", async function () {
     });
 
     it("should grant all roles to defaultAdmin", async function () {
-      const nft = await deployAssetNFT();
+      const { permissionManager } = await deployAssetNFT();
 
       const DEFAULT_ADMIN_ROLE =
         "0x0000000000000000000000000000000000000000000000000000000000000000";
 
       assert.equal(
-        await nft.read.hasRole([DEFAULT_ADMIN_ROLE, adminAddress]),
+        await permissionManager.read.hasRole([DEFAULT_ADMIN_ROLE, adminAddress]),
         true,
       );
-      assert.equal(await nft.read.hasRole([MINTER_ROLE, adminAddress]), true);
-      assert.equal(await nft.read.hasRole([BURNER_ROLE, adminAddress]), true);
+      assert.equal(await permissionManager.read.hasRole([MINTER_ROLE, adminAddress]), true);
+      assert.equal(await permissionManager.read.hasRole([BURNER_ROLE, adminAddress]), true);
       assert.equal(
-        await nft.read.hasRole([STATE_MANAGER_ROLE, adminAddress]),
+        await permissionManager.read.hasRole([STATE_MANAGER_ROLE, adminAddress]),
         true,
       );
       assert.equal(
-        await nft.read.hasRole([URI_SETTER_ROLE, adminAddress]),
+        await permissionManager.read.hasRole([URI_SETTER_ROLE, adminAddress]),
         true,
       );
     });
@@ -113,7 +118,7 @@ describe("AssetNFT", async function () {
     });
 
     it("should set trusted forwarder", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       assert.equal(
         (await nft.read.trustedForwarder()).toLowerCase(),
         FORWARDER.toLowerCase(),
@@ -122,7 +127,7 @@ describe("AssetNFT", async function () {
     });
 
     it("should set default royalty", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       const [receiver, amount] = await nft.read.royaltyInfo([1n, 10000n]);
       assert.equal(receiver.toLowerCase(), ROYALTY_RECEIVER.toLowerCase());
       assert.equal(amount, 250n);
@@ -135,13 +140,13 @@ describe("AssetNFT", async function () {
 
   describe("Role management", async function () {
     it("should allow admin to grant MINTER_ROLE and new minter to batchMint", async function () {
-      const nft = await deployAssetNFT();
+      const { nft, permissionManager } = await deployAssetNFT();
 
-      await nft.write.grantRole([MINTER_ROLE, minterAddress], {
+      await permissionManager.write.grantRole([MINTER_ROLE, minterAddress], {
         account: walletAdmin.account,
       });
 
-      assert.equal(await nft.read.hasRole([MINTER_ROLE, minterAddress]), true);
+      assert.equal(await permissionManager.read.hasRole([MINTER_ROLE, minterAddress]), true);
 
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], {
         account: walletMinter.account,
@@ -154,7 +159,7 @@ describe("AssetNFT", async function () {
     });
 
     it("should reject batchMint from unauthorized account", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await assert.rejects(
         nft.write.batchMint([[userAddress], [TOKEN_URI]], {
           account: walletUser.account,
@@ -169,7 +174,7 @@ describe("AssetNFT", async function () {
 
   describe("Minting", async function () {
     it("batchMint sets owner, tokenURI, and Held state", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
 
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], {
         account: walletAdmin.account,
@@ -186,7 +191,7 @@ describe("AssetNFT", async function () {
     });
 
     it("sequential batchMints get IDs 1, 2, 3", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
 
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], { account: walletAdmin.account });
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], { account: walletAdmin.account });
@@ -199,7 +204,7 @@ describe("AssetNFT", async function () {
     });
 
     it("batch mint sets all tokens and emits BatchMetadataUpdate", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       const startBlock = await publicClient.getBlockNumber();
 
       const recipients = [userAddress, userAddress, userAddress];
@@ -237,7 +242,7 @@ describe("AssetNFT", async function () {
     });
 
     it("batch mint reverts when batch is too large (51 items)", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       const size = 51;
       const recipients = Array(size).fill(userAddress);
       const uris = Array(size).fill(TOKEN_URI);
@@ -250,7 +255,7 @@ describe("AssetNFT", async function () {
     });
 
     it("batch mint reverts on array length mismatch", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
 
       await assert.rejects(
         nft.write.batchMint([[userAddress, userAddress], [TOKEN_URI]], {
@@ -266,7 +271,7 @@ describe("AssetNFT", async function () {
 
   describe("Burning", async function () {
     it("should batchBurn a token in Held state and emit MetadataUpdate", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -287,7 +292,7 @@ describe("AssetNFT", async function () {
     });
 
     it("batchBurn burns multiple tokens in one call", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress, userAddress, userAddress], [TOKEN_URI, TOKEN_URI, TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -298,14 +303,14 @@ describe("AssetNFT", async function () {
     });
 
     it("batchBurn reverts on non-existent token", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await assert.rejects(
         nft.write.batchBurn([[999n]], { account: walletAdmin.account }),
       );
     });
 
     it("should reject batchBurn from non-BURNER_ROLE", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -315,7 +320,7 @@ describe("AssetNFT", async function () {
     });
 
     it("should reject batchBurn of a Listed token", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -328,7 +333,7 @@ describe("AssetNFT", async function () {
     });
 
     it("batchBurn reverts when batch size exceeds 50", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       const ids = Array.from({ length: 51 }, (_, i) => BigInt(i + 1));
 
       await assert.rejects(
@@ -343,7 +348,7 @@ describe("AssetNFT", async function () {
 
   describe("State machine", async function () {
     it("full lifecycle: Held → Listed → Held → InShipment → RemovedFromPlatform", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -373,7 +378,7 @@ describe("AssetNFT", async function () {
     });
 
     it("should emit AssetStateChanged with correct args", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -398,7 +403,7 @@ describe("AssetNFT", async function () {
     });
 
     it("should reject invalid state transition (Listed → Loaned)", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -413,7 +418,7 @@ describe("AssetNFT", async function () {
     });
 
     it("batchSetAssetState updates multiple tokens", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress, userAddress], [TOKEN_URI, TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -427,7 +432,7 @@ describe("AssetNFT", async function () {
     });
 
     it("batchSetAssetState reverts when too large (51 items)", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       const ids = Array.from({ length: 51 }, (_, i) => BigInt(i + 1));
 
       await assert.rejects(
@@ -438,7 +443,7 @@ describe("AssetNFT", async function () {
     });
 
     it("batchSetAssetState reverts on array length mismatch", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress, userAddress], [TOKEN_URI, TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -450,7 +455,7 @@ describe("AssetNFT", async function () {
     });
 
     it("batchSetAssetState applies different states per token", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress, userAddress], [TOKEN_URI, TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -468,7 +473,7 @@ describe("AssetNFT", async function () {
 
   describe("Transfer restrictions", async function () {
     it("should allow transfer when state is Held", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -484,7 +489,7 @@ describe("AssetNFT", async function () {
     });
 
     it("should reject transfer when state is Listed", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -506,7 +511,7 @@ describe("AssetNFT", async function () {
 
   describe("Metadata", async function () {
     it("setTokenURI updates URI and emits MetadataUpdate", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -528,7 +533,7 @@ describe("AssetNFT", async function () {
     });
 
     it("setContractURI updates contractURI and emits ContractURIUpdated", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       const startBlock = await publicClient.getBlockNumber();
 
       await nft.write.setContractURI(["ipfs://new-collection-metadata"], {
@@ -551,7 +556,7 @@ describe("AssetNFT", async function () {
     });
 
     it("setBaseURI prefixes all tokenURIs", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress], ["metadata/1"]], {
         account: walletAdmin.account,
       });
@@ -572,14 +577,14 @@ describe("AssetNFT", async function () {
 
   describe("Royalties", async function () {
     it("returns correct default royalty info", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       const [receiver, amount] = await nft.read.royaltyInfo([1n, 10000n]);
       assert.equal(receiver.toLowerCase(), ROYALTY_RECEIVER.toLowerCase());
       assert.equal(amount, 250n);
     });
 
     it("admin can update default royalty", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.setDefaultRoyalty([user2Address, 500n], {
         account: walletAdmin.account,
       });
@@ -589,7 +594,7 @@ describe("AssetNFT", async function () {
     });
 
     it("admin can set per-token royalty override", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], {
         account: walletAdmin.account,
       });
@@ -602,7 +607,7 @@ describe("AssetNFT", async function () {
     });
 
     it("rejects royalty setter from non-admin", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
       await assert.rejects(
         nft.write.setDefaultRoyalty([userAddress, 100n], {
           account: walletUser.account,
@@ -617,7 +622,7 @@ describe("AssetNFT", async function () {
 
   describe("Pause", async function () {
     it("pause blocks batchMint; unpause resumes", async function () {
-      const nft = await deployAssetNFT();
+      const { nft } = await deployAssetNFT();
 
       await nft.write.pause({ account: walletAdmin.account });
       assert.equal(await nft.read.paused(), true);
@@ -646,13 +651,13 @@ describe("AssetNFT", async function () {
   // =========================================================================
 
   describe("supportsInterface", async function () {
-    it("supports ERC721, ERC2981, ERC165, and IAccessControl", async function () {
-      const nft = await deployAssetNFT();
+    it("supports ERC721, ERC2981, ERC165 but not IAccessControl", async function () {
+      const { nft } = await deployAssetNFT();
 
       assert.equal(await nft.read.supportsInterface(["0x80ac58cd"]), true); // IERC721
       assert.equal(await nft.read.supportsInterface(["0x2a55205a"]), true); // IERC2981
       assert.equal(await nft.read.supportsInterface(["0x01ffc9a7"]), true); // IERC165
-      assert.equal(await nft.read.supportsInterface(["0x7965db0b"]), true); // IAccessControl
+      assert.equal(await nft.read.supportsInterface(["0x7965db0b"]), false); // IAccessControl — not on AssetNFT
     });
   });
 });
