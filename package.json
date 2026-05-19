@@ -4,15 +4,23 @@
   "type": "module",
   "scripts": {
     "compile": "hardhat compile",
-    "test": "hardhat test nodejs"
+    "test": "hardhat test",
+    "fork:mainnet": "hardhat node --network forkMainnet",
+    "fork:base": "hardhat node --network forkBase",
+    "fork:sepolia": "hardhat node --network forkSepolia",
+    "lint": "solhint 'contracts/**/*.sol'"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-ignition": "^3.1.5",
     "@nomicfoundation/hardhat-toolbox-viem": "^5.0.5",
     "@solidstate/hardhat-contract-sizer": "^3.0.0",
     "@types/node": "^22.19.19",
+    "dotenv": "^17.4.2",
+    "erc721a-upgradeable": "^4.3.0",
     "forge-std": "github:foundry-rs/forge-std#v1.9.4",
     "hardhat": "^3.4.5",
+    "prettier": "^3.8.3",
+    "prettier-plugin-solidity": "^2.3.1",
     "typescript": "~5.8.0",
     "viem": "^2.49.2"
   },

@@ -1,57 +1,195 @@
-# Sample Hardhat 3 Beta Project (`node:test` and `viem`)
+# NettyWorth Smart Contracts V3
 
-This project showcases a Hardhat 3 Beta project using the native Node.js test runner (`node:test`) and the `viem` library for Ethereum interactions.
+Solidity smart contracts for physical asset tokenization, targeting Ethereum mainnet and Base L2 (OP-stack).
 
-To learn more about the Hardhat 3 Beta, please visit the [Getting Started guide](https://hardhat.org/docs/getting-started#getting-started-with-hardhat-3). To share your feedback, join our [Hardhat 3 Beta](https://hardhat.org/hardhat3-beta-telegram-group) Telegram group or [open an issue](https://github.com/NomicFoundation/hardhat/issues/new) in our GitHub issue tracker.
+## Tech Stack
 
-## Project Overview
+| Layer | Technology |
+| ----- | ---------- |
+| Language | Solidity 0.8.28 |
+| Framework | Hardhat 3 (beta) |
+| Libraries | OpenZeppelin Contracts Upgradeable v5.6.1, ERC721A Upgradeable v4 |
+| Test runner | Foundry-style `.t.sol` + Node.js `node:test` |
+| Chain interaction | viem |
+| Package manager | pnpm |
 
-This example project includes:
+## Project Layout
 
-- A simple Hardhat configuration file.
-- Foundry-compatible Solidity unit tests.
-- TypeScript integration tests using [`node:test`](nodejs.org/api/test.html), the new Node.js native test runner, and [`viem`](https://viem.sh/).
-- Examples demonstrating how to connect to different types of networks, including locally simulating OP mainnet.
-
-## Usage
-
-### Running Tests
-
-To run all the tests in the project, execute the following command:
-
-```shell
-npx hardhat test
+```text
+contracts/
+  AssetNFT.sol                    # ERC-721A asset tokenization with lifecycle states
+  PermissionManager.sol           # Centralized role registry (AccessControlEnumerable)
+  PermissionConsumer.sol          # Abstract base for role-gated contracts
+  interfaces/
+    IPermissionManager.sol        # Permission manager interface
+    ITransferValidator.sol        # External transfer validation hook
+  lib/
+    Roles.sol                     # Protocol role constants library
+  test-helpers/                   # Thin proxy wrappers used in tests
+  test/                           # Foundry-style Solidity unit tests (.t.sol)
+test/                             # TypeScript integration tests (node:test + viem)
+scripts/
+  deploy-permission-manager.ts    # Deploy PermissionManager + ERC1967 proxy
+  deploy-asset-nft.ts             # Deploy AssetNFT + ERC1967 proxy
+  upgrade-asset-nft.ts            # UUPS upgrade for AssetNFT proxy
+  send-op-tx.ts                   # OP chain transaction example
 ```
 
-You can also selectively run the Solidity or `node:test` tests:
+## AssetNFT Contract
 
-```shell
+`AssetNFT` is an ERC-721A NFT representing tokenized physical assets. Each token tracks a lifecycle state and enforces allowed transitions. Access control is delegated to the protocol-wide `PermissionManager` via `PermissionConsumer`.
+
+### Roles
+
+All roles are defined in `Roles.sol` and administered by `PermissionManager`.
+
+| Role | Permission |
+| ---- | ---------- |
+| `DEFAULT_ADMIN_ROLE` | Manage all roles, configure royalties and transfer validator |
+| `MINTER_ROLE` | Mint new tokens |
+| `BURNER_ROLE` | Burn tokens |
+| `STATE_MANAGER_ROLE` | Transition asset lifecycle states |
+| `URI_SETTER_ROLE` | Update token and contract metadata URIs |
+| `PAUSER_ROLE` | Pause and unpause transfers |
+| `UPGRADER_ROLE` | Authorize UUPS contract upgrades |
+| `BLACKLIST_ROLE` | Manage address blacklist |
+
+### Asset Lifecycle States
+
+| State | Meaning |
+| ----- | ------- |
+| `Held` | In custody — default state, transfers and most actions allowed |
+| `Listed` | On marketplace |
+| `Loaned` | Locked as loan collateral |
+| `Traded` | Locked in active trade or swap |
+| `InShipment` | Physically in transit |
+| `RemovedFromPlatform` | Terminal state (retired) |
+
+Transfers are blocked unless the token is in `Held` state. Burns are only permitted from `Held` or `RemovedFromPlatform`.
+
+### Key Features
+
+- **ERC-721A** — gas-optimized batch minting (up to 50 per call)
+- **UUPS upgradeable** (EIP-1822) — logic upgrades without changing the proxy address
+- **PermissionManager access control** — centralized role registry, checks delegated via `PermissionConsumer`
+- **ERC-2981 royalties** — per-token and default royalties, admin-configurable
+- **ERC-2771 meta-transactions** — trusted forwarder support (immutable per implementation)
+- **Blacklist system** — address-level transfer blocking via `BLACKLIST_ROLE`
+- **External transfer validator** — pluggable `ITransferValidator` hook for custom transfer rules
+- **Batch operations** — `batchMint`, `batchBurn`, `batchSetAssetState` (max 50 each)
+- **Pausable transfers** — emergency stop via `PAUSER_ROLE`
+- **ERC-7201 namespaced storage** — collision-safe across upgrades
+- **ERC-7572 contract URI** — collection-level metadata
+
+## PermissionManager Contract
+
+`PermissionManager` is the centralized role registry for the protocol. It inherits `AccessControlEnumerableUpgradeable` and exposes `hasProtocolRole(bytes32 role, address account)` for consumers to query.
+
+- Deployed as a UUPS-upgradeable proxy, independent of AssetNFT
+- All 7 protocol roles plus `DEFAULT_ADMIN_ROLE` are administered here
+- Consumer contracts inherit `PermissionConsumer`, which stores a reference to the manager and provides the `onlyProtocolRole` modifier
+- Two-step manager migration on consumers (propose → accept) prevents accidental loss of control
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js 20+
+- pnpm 11+
+
+### Install
+
+```bash
+pnpm install
+```
+
+### Environment Variables
+
+Copy and fill in the required config variables for live networks:
+
+```bash
+# RPC endpoints
+SEPOLIA_RPC_URL=
+MAINNET_RPC_URL=
+BASE_RPC_URL=
+
+# Deployer private keys
+SEPOLIA_PRIVATE_KEY=
+MAINNET_PRIVATE_KEY=
+BASE_PRIVATE_KEY=
+
+# Optional — used by deploy-asset-nft.ts
+PERMISSION_MANAGER_PROXY=
+ASSET_NFT_NAME=
+ASSET_NFT_SYMBOL=
+ASSET_NFT_CONTRACT_URI=
+ASSET_NFT_ROYALTY_RECEIVER=
+ASSET_NFT_ROYALTY_FEE=
+```
+
+## Commands
+
+```bash
+# Compile contracts (also runs contract-sizer)
+pnpm compile
+
+# Run all tests (Solidity + TypeScript)
+pnpm test
+
+# Run only Solidity tests
 npx hardhat test solidity
+
+# Run only TypeScript tests
 npx hardhat test nodejs
+
+# Lint Solidity files
+pnpm lint
+
+# Start a fork
+pnpm fork:mainnet
+pnpm fork:base
+pnpm fork:sepolia
 ```
 
-### Make a deployment to Sepolia
+## Deployment
 
-This project includes an example Ignition module to deploy the contract. You can deploy this module to a locally simulated chain or to Sepolia.
+### 1. Deploy PermissionManager
 
-To run the deployment to a local chain:
-
-```shell
-npx hardhat ignition deploy ignition/modules/Counter.ts
+```bash
+npx hardhat run scripts/deploy-permission-manager.ts --network <network>
 ```
 
-To run the deployment to Sepolia, you need an account with funds to send the transaction. The provided Hardhat configuration includes a Configuration Variable called `SEPOLIA_PRIVATE_KEY`, which you can use to set the private key of the account you want to use.
+Deploys the PermissionManager implementation and ERC1967 proxy. Saves addresses to `deployments/<network>.json`.
 
-You can set the `SEPOLIA_PRIVATE_KEY` variable using the `hardhat-keystore` plugin or by setting it as an environment variable.
+### 2. Deploy AssetNFT
 
-To set the `SEPOLIA_PRIVATE_KEY` config variable using `hardhat-keystore`:
-
-```shell
-npx hardhat keystore set SEPOLIA_PRIVATE_KEY
+```bash
+npx hardhat run scripts/deploy-asset-nft.ts --network <network>
 ```
 
-After setting the variable, you can run the deployment with the Sepolia network:
+Deploys AssetNFT implementation and ERC1967 proxy. Resolves `PERMISSION_MANAGER_PROXY` from env or prior deployment in `deployments/<network>.json`.
 
-```shell
-npx hardhat ignition deploy --network sepolia ignition/modules/Counter.ts
+### 3. Upgrade AssetNFT
+
+```bash
+npx hardhat run scripts/upgrade-asset-nft.ts --network <network>
 ```
+
+Deploys a new AssetNFT implementation and calls `upgradeToAndCall` on the existing proxy. Requires `UPGRADER_ROLE`.
+
+## Networks
+
+| Name | Type | Chain |
+| ---- | ---- | ----- |
+| `hardhatMainnet` | Local simulated | L1 |
+| `hardhatOp` | Local simulated | OP |
+| `forkMainnet` | Mainnet fork | L1 |
+| `forkBase` | Base fork | OP |
+| `forkSepolia` | Sepolia fork | L1 |
+| `sepolia` | Live testnet | L1 |
+| `mainnet` | Live | L1 |
+| `base` | Live | OP (Base L2) |
+
+## License
+
+UNLICENSED — All rights reserved, NettyWorth.

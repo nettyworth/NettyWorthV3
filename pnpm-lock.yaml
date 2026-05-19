@@ -27,12 +27,24 @@ importers:
       '@types/node':
         specifier: ^22.19.19
         version: 22.19.19
+      dotenv:
+        specifier: ^17.4.2
+        version: 17.4.2
+      erc721a-upgradeable:
+        specifier: ^4.3.0
+        version: 4.3.0
       forge-std:
         specifier: github:foundry-rs/forge-std#v1.9.4
         version: https://codeload.github.com/foundry-rs/forge-std/tar.gz/1eea5bae12ae557d589f9f0f0edae2faa47cb262
       hardhat:
         specifier: ^3.4.5
         version: 3.4.5
+      prettier:
+        specifier: ^3.8.3
+        version: 3.8.3
+      prettier-plugin-solidity:
+        specifier: ^2.3.1
+        version: 2.3.1(prettier@3.8.3)
       typescript:
         specifier: ~5.8.0
         version: 5.8.3
@@ -59,6 +71,9 @@ packages:
 
   '@adraffy/ens-normalize@1.11.1':
     resolution: {integrity: sha512-nhCBV3quEgesuf7c7KYfperqSS14T8bYuvJ8PcLJp6znkZpFc0AuW4qBtr8eKVyPPe/8RSr7sglCWPU5eaxwKQ==}
+
+  '@bytecodealliance/preview2-shim@0.17.9':
+    resolution: {integrity: sha512-i0R3eQBe6PA/o/1EFE3Owe4In2rcccb6QxnjpntM/lPe3/duJ0bRQTVZM2Ufpo99X4eofGeltQUkape1C91FFA==}
 
   '@colors/colors@1.5.0':
     resolution: {integrity: sha512-ooWCrlZP11i8GImSjTHYHLkvFDP48nS4+204nGb1RiX/WXYHmJA2III9/e2DWVabCESdW7hBAEzHRqUn9OUVvQ==}
@@ -452,6 +467,9 @@ packages:
   '@nomicfoundation/ignition-ui@3.1.2':
     resolution: {integrity: sha512-OoS5eQi9WBeiYI6EXurhqrpr6syRVhnaUzdx5fyK/1syKGq9BsjWWHXTNru0qk5ZFQ9f/KMTZotcDZD4eAdCpg==}
 
+  '@nomicfoundation/slang@1.3.4':
+    resolution: {integrity: sha512-ghzrPSYH1sZO65id6+Bq2Ood87HT54QP3RGC8EkmpcrJ6tT9Ky0RtaJfrzV5G4jpDsnNua6+YEDpzOMori04hQ==}
+
   '@nomicfoundation/solidity-analyzer-darwin-arm64@0.1.2':
     resolution: {integrity: sha512-JaqcWPDZENCvm++lFFGjrDd8mxtf+CtLd2MiXvMNTBD33dContTZ9TWETwNFwg7JTJT5Q9HEecH7FA+HTSsIUw==}
     engines: {node: '>= 12'}
@@ -522,6 +540,9 @@ packages:
 
   '@sinclair/typebox@0.27.10':
     resolution: {integrity: sha512-MTBk/3jGLNB2tVxv6uLlFh1iu64iYOQ2PbdOSK3NW8JZsmlaOh2q6sdtKowBhfw8QFLmYNzTW4/oK4uATIi6ZA==}
+
+  '@solidity-parser/parser@0.20.2':
+    resolution: {integrity: sha512-rbu0bzwNvMcwAjH86hiEAcOeRI2EeK8zCkHDrFykh/Al8mvJeFmjy3UrE7GYQjNwOgbGUUtCn5/k8CB8zIu7QA==}
 
   '@solidstate/hardhat-contract-sizer@3.0.0':
     resolution: {integrity: sha512-A4x5IQWOBqaZzzg2Xuy+ui/wBimx/yUdkY9qkkjqXJi5O5XMfV/3MJZcnqf4/LVNFcgxMz60+LNsJIpdIuCa1Q==}
@@ -658,6 +679,10 @@ packages:
     resolution: {integrity: sha512-EjePK1srD3P08o2j4f0ExnylqRs5B9tJjcp9t1krH2qRi8CCdsYfwe9JgSLurFBWwq4uOlipzfk5fHNvwFKr8Q==}
     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
 
+  dotenv@17.4.2:
+    resolution: {integrity: sha512-nI4U3TottKAcAD9LLud4Cb7b2QztQMUEfHbvhTH09bqXTxnSie8WnjPALV/WMCrJZ6UV/qHJ6L03OqO3LcdYZw==}
+    engines: {node: '>=12'}
+
   dunder-proto@1.0.1:
     resolution: {integrity: sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==}
     engines: {node: '>= 0.4'}
@@ -679,6 +704,9 @@ packages:
   env-paths@3.0.0:
     resolution: {integrity: sha512-dtJUTepzMW3Lm/NPxRf3wP4642UWhjL2sQxc+ym2YMj1m/H2zDNQOlezafzkHwn6sMstjHTwG6iQQsctDW/b1A==}
     engines: {node: ^12.20.0 || ^14.13.1 || >=16.0.0}
+
+  erc721a-upgradeable@4.3.0:
+    resolution: {integrity: sha512-slYCD8cgv6w2V/kmsXSxDNh5W7Txzifv4NZvcmEPycd2lQnsLMvpkDDhrDU0S+Od0aEElSqKHweJ8AKpY1ZONA==}
 
   es-define-property@1.0.1:
     resolution: {integrity: sha512-e3nRfgfUZ4rNGL232gUgX06QNyyez04KdjFrF+LTRoOXmrOgFKDg4BCdsjW8EnT69eqdYGmRpJwiPVYNrCaW3g==}
@@ -725,7 +753,7 @@ packages:
         optional: true
 
   forge-std@https://codeload.github.com/foundry-rs/forge-std/tar.gz/1eea5bae12ae557d589f9f0f0edae2faa47cb262:
-    resolution: {tarball: https://codeload.github.com/foundry-rs/forge-std/tar.gz/1eea5bae12ae557d589f9f0f0edae2faa47cb262}
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/foundry-rs/forge-std/tar.gz/1eea5bae12ae557d589f9f0f0edae2faa47cb262}
     version: 1.9.4
 
   form-data@4.0.5:
@@ -876,6 +904,17 @@ packages:
 
   package-manager-detector@1.6.0:
     resolution: {integrity: sha512-61A5ThoTiDG/C8s8UMZwSorAGwMJ0ERVGj2OjoW5pAalsNOg15+iQiPzrLJ4jhZ1HJzmC2PIHT2oEiH3R5fzNA==}
+
+  prettier-plugin-solidity@2.3.1:
+    resolution: {integrity: sha512-71sZM5oqgq6pnTlf+RH23U6Ej710APfCiMWO2Z/pHNjrXyvn9Nr0vTS1AUVaSf4GRW0V6hj6Djt0MyWudJUJbQ==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      prettier: '>=3.0.0'
+
+  prettier@3.8.3:
+    resolution: {integrity: sha512-7igPTM53cGHMW8xWuVTydi2KO233VFiTNyF5hLJqpilHfmn8C8gPf+PS7dUT64YcXFbiMGZxS9pCSxL/Dxm/Jw==}
+    engines: {node: '>=14'}
+    hasBin: true
 
   pretty-format@29.7.0:
     resolution: {integrity: sha512-Pdlw/oPxN+aXdmM9R00JVC9WVFoCLTKJvDVLgmJ+qAffBMxsV85l/Lu7sNx4zSzPyoL2euImuEwHhOXdEgNFZQ==}
@@ -1044,6 +1083,8 @@ snapshots:
   '@adraffy/ens-normalize@1.10.1': {}
 
   '@adraffy/ens-normalize@1.11.1': {}
+
+  '@bytecodealliance/preview2-shim@0.17.9': {}
 
   '@colors/colors@1.5.0':
     optional: true
@@ -1458,6 +1499,10 @@ snapshots:
 
   '@nomicfoundation/ignition-ui@3.1.2': {}
 
+  '@nomicfoundation/slang@1.3.4':
+    dependencies:
+      '@bytecodealliance/preview2-shim': 0.17.9
+
   '@nomicfoundation/solidity-analyzer-darwin-arm64@0.1.2':
     optional: true
 
@@ -1530,6 +1575,8 @@ snapshots:
       '@simple-git/args-pathspec': 1.0.3
 
   '@sinclair/typebox@0.27.10': {}
+
+  '@solidity-parser/parser@0.20.2': {}
 
   '@solidstate/hardhat-contract-sizer@3.0.0(@nomicfoundation/hardhat-utils@4.1.1)(hardhat@3.4.5)':
     dependencies:
@@ -1667,6 +1714,8 @@ snapshots:
 
   diff-sequences@29.6.3: {}
 
+  dotenv@17.4.2: {}
+
   dunder-proto@1.0.1:
     dependencies:
       call-bind-apply-helpers: 1.0.2
@@ -1693,6 +1742,8 @@ snapshots:
   env-paths@2.2.1: {}
 
   env-paths@3.0.0: {}
+
+  erc721a-upgradeable@4.3.0: {}
 
   es-define-property@1.0.1: {}
 
@@ -1936,6 +1987,15 @@ snapshots:
   p-map@7.0.4: {}
 
   package-manager-detector@1.6.0: {}
+
+  prettier-plugin-solidity@2.3.1(prettier@3.8.3):
+    dependencies:
+      '@nomicfoundation/slang': 1.3.4
+      '@solidity-parser/parser': 0.20.2
+      prettier: 3.8.3
+      semver: 7.8.0
+
+  prettier@3.8.3: {}
 
   pretty-format@29.7.0:
     dependencies:
