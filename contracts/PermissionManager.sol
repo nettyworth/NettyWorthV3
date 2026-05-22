@@ -26,6 +26,7 @@ contract PermissionManager is AccessControlEnumerableUpgradeable, UUPSUpgradeabl
     bytes32 public constant PAUSER_ROLE = Roles.PAUSER_ROLE;
     bytes32 public constant UPGRADER_ROLE = Roles.UPGRADER_ROLE;
     bytes32 public constant BLACKLIST_ROLE = Roles.BLACKLIST_ROLE;
+    bytes32 public constant PACK_OPERATOR_ROLE = Roles.PACK_OPERATOR_ROLE;
 
     // =========================================================================
     // Errors
@@ -57,6 +58,7 @@ contract PermissionManager is AccessControlEnumerableUpgradeable, UUPSUpgradeabl
         _grantRole(Roles.PAUSER_ROLE, defaultAdmin);
         _grantRole(Roles.UPGRADER_ROLE, defaultAdmin);
         _grantRole(Roles.BLACKLIST_ROLE, defaultAdmin);
+        _grantRole(Roles.PACK_OPERATOR_ROLE, defaultAdmin);
     }
 
     // =========================================================================

@@ -363,7 +363,7 @@ contract AssetNFT is
     function setDefaultRoyalty(
         address receiver,
         uint96 feeNumerator
-    ) external onlyProtocolRole(0x00) {
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
         _setDefaultRoyalty(receiver, feeNumerator);
     }
 
@@ -372,19 +372,22 @@ contract AssetNFT is
         uint256 tokenId,
         address receiver,
         uint96 feeNumerator
-    ) external onlyProtocolRole(0x00) {
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
         _setTokenRoyalty(tokenId, receiver, feeNumerator);
     }
 
     /// @notice Deletes the default royalty configuration.
-    function deleteDefaultRoyalty() external onlyProtocolRole(0x00) {
+    function deleteDefaultRoyalty()
+        external
+        onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE)
+    {
         _deleteDefaultRoyalty();
     }
 
     /// @notice Removes the per-token royalty override, falling back to the default.
     function resetTokenRoyalty(
         uint256 tokenId
-    ) external onlyProtocolRole(0x00) {
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
         _resetTokenRoyalty(tokenId);
     }
 
@@ -440,7 +443,7 @@ contract AssetNFT is
     /// @dev Pass address(0) to disable validation.
     function setTransferValidator(
         address validator
-    ) external onlyProtocolRole(0x00) {
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
         AssetNFTStorage storage $ = _getAssetNFTStorage();
         address old = $.transferValidator;
         $.transferValidator = validator;

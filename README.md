@@ -8,7 +8,7 @@ Solidity smart contracts for physical asset tokenization, targeting Ethereum mai
 | ----- | ---------- |
 | Language | Solidity 0.8.28 |
 | Framework | Hardhat 3 (beta) |
-| Libraries | OpenZeppelin Contracts Upgradeable v5.6.1, ERC721A Upgradeable v4 |
+| Libraries | OpenZeppelin Contracts Upgradeable v5.6.1, ERC721A Upgradeable v4, Chainlink VRF v2.5, Uniswap Permit2 |
 | Test runner | Foundry-style `.t.sol` + Node.js `node:test` |
 | Chain interaction | viem |
 | Package manager | pnpm |
@@ -18,14 +18,21 @@ Solidity smart contracts for physical asset tokenization, targeting Ethereum mai
 ```text
 contracts/
   AssetNFT.sol                    # ERC-721A asset tokenization with lifecycle states
+  PackMachine.sol                 # Loot-pack NFT distribution (EIP-1167 clone)
+  PackMachineFactory.sol          # Deploys and manages PackMachine clones (UUPS)
+  PackVRFRouter.sol               # Shared Chainlink VRF v2.5 consumer (UUPS)
   PermissionManager.sol           # Centralized role registry (AccessControlEnumerable)
   PermissionConsumer.sol          # Abstract base for role-gated contracts
   interfaces/
+    IPackMachine.sol              # PackMachine interface
+    IPackMachineFactory.sol       # Factory interface
+    IPackVRFRouter.sol            # VRF router interface
     IPermissionManager.sol        # Permission manager interface
+    ISignatureTransfer.sol        # Uniswap Permit2 signature transfer interface
     ITransferValidator.sol        # External transfer validation hook
   lib/
     Roles.sol                     # Protocol role constants library
-  test-helpers/                   # Thin proxy wrappers used in tests
+  test-helpers/                   # Mocks (MockPermit2, MockVRFCoordinatorV2Plus, etc.)
   test/                           # Foundry-style Solidity unit tests (.t.sol)
 test/                             # TypeScript integration tests (node:test + viem)
 scripts/
@@ -81,12 +88,50 @@ Transfers are blocked unless the token is in `Held` state. Burns are only permit
 - **ERC-7201 namespaced storage** — collision-safe across upgrades
 - **ERC-7572 contract URI** — collection-level metadata
 
+## PackMachine System
+
+The PackMachine system is a loot-pack NFT distribution mechanism where users pay USDC to open a pack and receive randomly-selected AssetNFT tokens. Randomness is sourced from Chainlink VRF v2.5.
+
+### Contracts
+
+| Contract | Pattern | Role |
+| -------- | ------- | ---- |
+| `PackMachine` | EIP-1167 minimal clone | Individual pack instance — holds prize pool, processes opens |
+| `PackMachineFactory` | UUPS-upgradeable singleton | Deploys clones, stores shared config, relays transfer validator hooks |
+| `PackVRFRouter` | UUPS-upgradeable singleton | Single Chainlink VRF consumer that routes callbacks to the correct clone |
+
+### Pack Open Call Flow
+
+```text
+User ──► PackMachine.openPack() ──► PackVRFRouter.requestRandomWords() ──► Chainlink VRF
+                                                                                  │
+User ◄── NFT transferred ◄── PackMachine.fulfillRandomness() ◄── PackVRFRouter.rawFulfillRandomWords()
+```
+
+### PackMachine Roles
+
+| Role | Permission |
+| ---- | ---------- |
+| `PACK_OPERATOR_ROLE` | Create pack machines, deposit/withdraw cards, set price, stop machine, authorize VRF |
+
+`PACK_OPERATOR_ROLE` holders also sign the off-chain EIP-712 `OpenPack` authorization required per pack open.
+
+### PackMachine Features
+
+- **EIP-1167 minimal clones** — cheap per-machine deployment; each clone has its own ERC-7201 namespaced storage
+- **Chainlink VRF v2.5** — verifiable on-chain randomness; shared router avoids Chainlink's per-subscription consumer cap
+- **Permit2 gasless payments** — `openPackWithPermit2` uses Uniswap's canonical Permit2 (`0x000000000022D473030F116dDEE9F6B43aC78BA3`) for relayer-submitted USDC transfers
+- **EIP-712 play signatures** — operator signs each pack open off-chain; per-user nonce prevents replay
+- **Swap-and-pop prize pool** — O(1) random card selection and removal from the prize pool array
+- **Effective pool size accounting** — pool size decremented immediately on VRF request, preventing over-commitment before randomness arrives
+- **Transfer validator relay** — factory proxies Creator Token Standard `beforeAuthorizedTransfer`/`afterAuthorizedTransfer` hooks for AssetNFT royalty enforcement
+
 ## PermissionManager Contract
 
 `PermissionManager` is the centralized role registry for the protocol. It inherits `AccessControlEnumerableUpgradeable` and exposes `hasProtocolRole(bytes32 role, address account)` for consumers to query.
 
 - Deployed as a UUPS-upgradeable proxy, independent of AssetNFT
-- All 7 protocol roles plus `DEFAULT_ADMIN_ROLE` are administered here
+- All 8 protocol roles plus `DEFAULT_ADMIN_ROLE` are administered here
 - Consumer contracts inherit `PermissionConsumer`, which stores a reference to the manager and provides the `onlyProtocolRole` modifier
 - Two-step manager migration on consumers (propose → accept) prevents accidental loss of control
 
