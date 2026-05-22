@@ -58,6 +58,7 @@ The protocol uses a hub-and-spoke permission model:
 4. **PackMachineFactory** (spoke) — UUPS-upgradeable; inherits `PermissionConsumer`; gates `createPackMachine` and admin setters.
 5. **PackVRFRouter** (spoke) — UUPS-upgradeable; inherits `PermissionConsumer`; gates `requestRandomWords` and admin setters.
 6. **PackMachine** (clone spoke) — EIP-1167 clone; does not store the manager address itself; delegates role checks to the factory via `IPackMachineFactory.hasProtocolRole(role, caller)`.
+7. **BuybackPool** (spoke) — UUPS-upgradeable singleton; inherits `PermissionConsumer`; gates admin functions (`setDefaultBuybackBps`, `registerPackMachine`, etc.) with `PACK_OPERATOR_ROLE`; gates emergency operations with `DEFAULT_ADMIN_ROLE`; token registration authorized via internal `registeredPackMachines` mapping (not a role).
 
 When writing new consumer contracts:
 
@@ -80,11 +81,13 @@ When writing new consumer contracts:
 - **EIP-712 play signatures**: `PACK_OPERATOR_ROLE` signs `OpenPack(address user, uint256 nonce)` off-chain; per-user nonces prevent replay; checked on every `openPack` / `openPackWithPermit2` call
 - **Swap-and-pop prize pool**: random card selection in `fulfillRandomness` uses `index = word % poolLen`, swaps selected element with the last, then pops — O(1) removal without preserving order
 - **Effective pool size**: `effectivePrizePoolSize` is decremented on VRF request (not fulfillment) to prevent over-committing cards; `resetEffectivePrizePoolSize()` is an admin escape hatch for stuck requests
+- **Tiered buyback rates**: `BuybackPool` stores per-tier (0–4) buyback rate overrides in basis points for both standard and protected modes; a zero value falls through to the global `defaultBuybackBps` / `protectedBuybackBps`
+- **Auto-redeposit on buyback**: after a buyback, `BuybackPool` approves the source PackMachine and calls `depositFromPool(tokenId, tier)` to return the NFT to the prize pool in O(1); if the source machine is deregistered, the NFT is held in the pool for admin rescue via `rescueNFT`
 
 ## Project Layout
 
 - `contracts/` — Solidity source files
-  - `contracts/interfaces/` — Interface definitions (`IPermissionManager`, `ITransferValidator`, `IPackMachine`, `IPackMachineFactory`, `IPackVRFRouter`, `ISignatureTransfer`)
+  - `contracts/interfaces/` — Interface definitions (`IPermissionManager`, `ITransferValidator`, `IPackMachine`, `IPackMachineFactory`, `IPackVRFRouter`, `IBuybackPool`, `ISignatureTransfer`)
   - `contracts/lib/` — Libraries (`Roles.sol` — protocol role constants)
   - `contracts/test-helpers/` — Mocks for testing (`MockPermit2`, `MockVRFCoordinatorV2Plus`, etc.)
   - `contracts/test/` — Foundry-style `.t.sol` test files

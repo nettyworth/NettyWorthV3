@@ -21,12 +21,14 @@ contracts/
   PackMachine.sol                 # Loot-pack NFT distribution (EIP-1167 clone)
   PackMachineFactory.sol          # Deploys and manages PackMachine clones (UUPS)
   PackVRFRouter.sol               # Shared Chainlink VRF v2.5 consumer (UUPS)
+  BuybackPool.sol                 # Guaranteed buyback pool for AssetNFTs (UUPS)
   PermissionManager.sol           # Centralized role registry (AccessControlEnumerable)
   PermissionConsumer.sol          # Abstract base for role-gated contracts
   interfaces/
     IPackMachine.sol              # PackMachine interface
     IPackMachineFactory.sol       # Factory interface
     IPackVRFRouter.sol            # VRF router interface
+    IBuybackPool.sol              # BuybackPool interface
     IPermissionManager.sol        # Permission manager interface
     ISignatureTransfer.sol        # Uniswap Permit2 signature transfer interface
     ITransferValidator.sol        # External transfer validation hook
@@ -99,6 +101,7 @@ The PackMachine system is a loot-pack NFT distribution mechanism where users pay
 | `PackMachine` | EIP-1167 minimal clone | Individual pack instance — holds prize pool, processes opens |
 | `PackMachineFactory` | UUPS-upgradeable singleton | Deploys clones, stores shared config, relays transfer validator hooks |
 | `PackVRFRouter` | UUPS-upgradeable singleton | Single Chainlink VRF consumer that routes callbacks to the correct clone |
+| `BuybackPool` | UUPS-upgradeable singleton | Holds USDC from pack sales; pays guaranteed buyback to NFT holders; re-deposits NFTs into source machine |
 
 ### Pack Open Call Flow
 
@@ -106,6 +109,19 @@ The PackMachine system is a loot-pack NFT distribution mechanism where users pay
 User ──► PackMachine.openPack() ──► PackVRFRouter.requestRandomWords() ──► Chainlink VRF
                                                                                   │
 User ◄── NFT transferred ◄── PackMachine.fulfillRandomness() ◄── PackVRFRouter.rawFulfillRandomWords()
+                                        │
+                                        └──► BuybackPool.registerToken() (records per-card price + tier)
+```
+
+### Buyback Call Flow
+
+```text
+(later, card holder wants to sell back)
+
+User ──► BuybackPool.buyback(tokenId)
+              │
+              ├── USDC transferred to user (80% of per-card price, or 90% with protection)
+              └── NFT auto-deposited back into source PackMachine clone
 ```
 
 ### PackMachine Roles
@@ -113,6 +129,7 @@ User ◄── NFT transferred ◄── PackMachine.fulfillRandomness() ◄─�
 | Role | Permission |
 | ---- | ---------- |
 | `PACK_OPERATOR_ROLE` | Create pack machines, deposit/withdraw cards, set price, stop machine, authorize VRF |
+| `BUYBACK_POOL_ROLE` | Reserved for BuybackPool contract to call `depositFromPool` on PackMachine instances |
 
 `PACK_OPERATOR_ROLE` holders also sign the off-chain EIP-712 `OpenPack` authorization required per pack open.
 
@@ -125,6 +142,46 @@ User ◄── NFT transferred ◄── PackMachine.fulfillRandomness() ◄─�
 - **Swap-and-pop prize pool** — O(1) random card selection and removal from the prize pool array
 - **Effective pool size accounting** — pool size decremented immediately on VRF request, preventing over-commitment before randomness arrives
 - **Transfer validator relay** — factory proxies Creator Token Standard `beforeAuthorizedTransfer`/`afterAuthorizedTransfer` hooks for AssetNFT royalty enforcement
+
+## BuybackPool Contract
+
+`BuybackPool` is a UUPS-upgradeable pool that holds USDC allocations from pack purchases and allows token holders to sell AssetNFT cards back at a guaranteed percentage of the original per-card price. Bought-back NFTs are automatically re-deposited into their source PackMachine clone, returning them to the prize pool.
+
+### How It Fits the System
+
+1. When a user opens a pack, `PackMachine.fulfillRandomness()` calls `BuybackPool.registerToken()`, recording the per-card price, rarity tier, and whether buyback protection was purchased at pack-open time.
+2. At any time, the token holder calls `buyback(tokenId)` or `buybackWithProtection(tokenId)` to sell the card back.
+3. USDC is paid out, the NFT is transferred to the pool, and the pool auto-deposits it back into the originating PackMachine's prize pool via `depositFromPool`.
+
+### Buyback Rates
+
+| Mode | Default | Description |
+| ---- | ------- | ----------- |
+| Standard | 80% (8000 bps) | Available for all registered tokens |
+| Protected | 90% (9000 bps) | Requires buyback protection purchased at pack-open time |
+
+Per-tier overrides (5 tiers: Base/Common/Uncommon/Rare/Ultra) can be set by `PACK_OPERATOR_ROLE`. A zero override falls through to the global default.
+
+### BuybackPool Roles
+
+| Role | Permission |
+| ---- | ---------- |
+| `PACK_OPERATOR_ROLE` | Register/deregister PackMachines, set buyback rates (default, protected, per-tier) |
+| `PAUSER_ROLE` | Pause and unpause the contract |
+| `DEFAULT_ADMIN_ROLE` | Emergency USDC withdrawal (only while paused), rescue stuck NFTs, UUPS upgrade authorization |
+| `UPGRADER_ROLE` | Authorize UUPS contract upgrades |
+
+### BuybackPool Features
+
+- **UUPS upgradeable** (EIP-1822) — logic upgrades without changing the proxy address
+- **PermissionConsumer access control** — centralized role checks via PermissionManager
+- **ERC-7201 namespaced storage** — collision-safe across upgrades
+- **ReentrancyGuard** — protects buyback execution from reentrancy
+- **Pausable** — emergency stop via `PAUSER_ROLE`
+- **Tiered buyback rates** — per-tier overrides for both standard and protected rates; zero means use global default
+- **Auto-redeposit** — bought-back NFTs automatically returned to the source PackMachine's prize pool
+- **Emergency withdrawal** — admin can drain USDC to financeWallet while paused
+- **NFT rescue** — admin can recover stuck NFTs (e.g. if source PackMachine is deregistered)
 
 ## PermissionManager Contract
 
