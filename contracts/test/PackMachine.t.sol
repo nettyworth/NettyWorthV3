@@ -551,7 +551,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
 
         assertEq(usdc.balanceOf(financeWallet), PRICE);
         assertEq(usdc.balanceOf(user), 0);
@@ -565,7 +565,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
 
         // effectivePrizePoolSize decremented at request time
         assertEq(packMachine.effectivePrizePoolSize(), 0);
@@ -580,7 +580,7 @@ contract PackMachineTest is Test {
         assertEq(packMachine.openNonce(user), 0);
         bytes memory sig0 = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig0, false);
+        packMachine.openPack(user, sig0);
         assertEq(packMachine.openNonce(user), 1);
     }
 
@@ -637,7 +637,7 @@ contract PackMachineTest is Test {
 
         vm.prank(user);
         vm.expectRevert(PackMachine.PackMachine__NotStarted.selector);
-        futureMachine.openPack(user, sig, false);
+        futureMachine.openPack(user, sig);
     }
 
     function test_OpenPack_RevertsWhenFinished() public {
@@ -655,7 +655,7 @@ contract PackMachineTest is Test {
 
         vm.prank(user);
         vm.expectRevert(PackMachine.PackMachine__Finished.selector);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
     }
 
     function test_OpenPack_RevertsWhenPoolInsufficient() public {
@@ -674,7 +674,7 @@ contract PackMachineTest is Test {
                 CARDS_PER_PACK
             )
         );
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
     }
 
     function test_OpenPack_RevertsWhenPaused() public {
@@ -689,7 +689,7 @@ contract PackMachineTest is Test {
 
         vm.prank(user);
         vm.expectRevert();
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
     }
 
     function test_OpenPack_RevertsOnInvalidSignature() public {
@@ -720,7 +720,7 @@ contract PackMachineTest is Test {
 
         vm.prank(user);
         vm.expectRevert(PackMachine.PackMachine__InvalidSignature.selector);
-        packMachine.openPack(user, badSig, false);
+        packMachine.openPack(user, badSig);
     }
 
     function test_OpenPack_RevertsOnReplayedNonce() public {
@@ -731,12 +731,12 @@ contract PackMachineTest is Test {
 
         bytes memory sig0 = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig0, false);
+        packMachine.openPack(user, sig0);
 
         // Replaying same nonce 0 should fail (nonce is now 1)
         vm.prank(user);
         vm.expectRevert(PackMachine.PackMachine__InvalidSignature.selector);
-        packMachine.openPack(user, sig0, false);
+        packMachine.openPack(user, sig0);
     }
 
     // =========================================================================
@@ -758,8 +758,7 @@ contract PackMachineTest is Test {
             0,
             block.timestamp + 3600,
             "",
-            playSig,
-            false
+            playSig
         );
 
         assertEq(usdc.balanceOf(financeWallet), PRICE);
@@ -779,8 +778,7 @@ contract PackMachineTest is Test {
             0,
             block.timestamp + 3600,
             "",
-            playSig,
-            false
+            playSig
         );
 
         assertEq(usdc.balanceOf(user), 0);
@@ -819,8 +817,7 @@ contract PackMachineTest is Test {
             0,
             block.timestamp + 3600,
             "",
-            badSig,
-            false
+            badSig
         );
     }
 
@@ -836,7 +833,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
 
         uint256 requestId = 1; // coordinator returns 1 for first request
         _fulfillPendingRequest(requestId, CARDS_PER_PACK);
@@ -853,7 +850,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
 
         uint256 requestId = 1;
         uint256[] memory words = new uint256[](CARDS_PER_PACK);
@@ -877,7 +874,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
 
         uint256 requestId = 1;
         vm.expectEmit(true, true, false, true, address(packMachine));
@@ -893,7 +890,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
         _fulfillPendingRequest(1, CARDS_PER_PACK);
 
         // Pool should shrink from CARDS_PER_PACK*2 to CARDS_PER_PACK after fulfillment
@@ -908,7 +905,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
 
         uint256[] memory words = new uint256[](CARDS_PER_PACK);
         vm.prank(unauthorized);
@@ -930,7 +927,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
         _fulfillPendingRequest(1, CARDS_PER_PACK);
 
         assertEq(assetNFT.balanceOf(user), CARDS_PER_PACK);
@@ -963,7 +960,7 @@ contract PackMachineTest is Test {
         usdc.approve(address(packMachine), PRICE);
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
         _fulfillPendingRequest(1, CARDS_PER_PACK);
 
         // All cards should have been drawn from Rare tier
@@ -1205,7 +1202,7 @@ contract PackMachineTest is Test {
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
         vm.expectRevert(PackMachine.PackMachine__Finished.selector);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
     }
 
     function test_Stop_Pauses() public {
@@ -1328,7 +1325,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig1 = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig1, false);
+        packMachine.openPack(user, sig1);
 
         // user nonce advanced; user2 nonce still 0
         assertEq(packMachine.openNonce(user), 1);
@@ -1351,7 +1348,7 @@ contract PackMachineTest is Test {
         for (uint256 i; i < 3; i++) {
             bytes memory sig = _signOpenPack(user, i);
             vm.prank(user);
-            packMachine.openPack(user, sig, false);
+            packMachine.openPack(user, sig);
             _fulfillPendingRequest(i + 1, CARDS_PER_PACK);
         }
 
@@ -1398,7 +1395,7 @@ contract PackMachineTest is Test {
         for (uint256 i; i < 3; i++) {
             bytes memory sig = _signOpenPack(user, i);
             vm.prank(user);
-            packMachine.openPack(user, sig, false);
+            packMachine.openPack(user, sig);
             _fulfillPendingRequest(i + 1, CARDS_PER_PACK);
         }
 
@@ -1420,7 +1417,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPackFor(address(machine), user, 0);
         vm.prank(user);
-        machine.openPack(user, sig, false);
+        machine.openPack(user, sig);
 
         // effectivePrizePoolSize decrements at request time (before VRF)
         assertEq(machine.effectivePrizePoolSize(), 9);
@@ -1442,7 +1439,7 @@ contract PackMachineTest is Test {
         for (uint256 i; i < 3; i++) {
             bytes memory sig = _signOpenPackFor(address(machine), user, i);
             vm.prank(user);
-            machine.openPack(user, sig, false);
+            machine.openPack(user, sig);
             _fulfillPendingRequest(i + 1, 1);
         }
 
@@ -1462,7 +1459,7 @@ contract PackMachineTest is Test {
         for (uint256 i; i < 10; i++) {
             bytes memory sig = _signOpenPackFor(address(machine), user, i);
             vm.prank(user);
-            machine.openPack(user, sig, false);
+            machine.openPack(user, sig);
             _fulfillPendingRequest(i + 1, 1);
         }
 
@@ -1482,7 +1479,7 @@ contract PackMachineTest is Test {
         // First play exhausts the pool
         bytes memory sig1 = _signOpenPackFor(address(machine), user, 0);
         vm.prank(user);
-        machine.openPack(user, sig1, false);
+        machine.openPack(user, sig1);
         _fulfillPendingRequest(1, 1);
 
         // Second play reverts — pool empty (0 cards, needs 1)
@@ -1495,7 +1492,7 @@ contract PackMachineTest is Test {
                 1
             )
         );
-        machine.openPack(user, sig2, false);
+        machine.openPack(user, sig2);
     }
 
     // =========================================================================
@@ -1562,7 +1559,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPackFor(address(machine), user, 0);
         vm.prank(user);
-        machine.openPack(user, sig, false);
+        machine.openPack(user, sig);
 
         // tierRand = 0 → Base (tier 0)
         uint256[] memory words = new uint256[](1);
@@ -1606,7 +1603,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPackFor(address(machine), user, 0);
         vm.prank(user);
-        machine.openPack(user, sig, false);
+        machine.openPack(user, sig);
 
         // tierRand = 7500 → Common (cumulative 7500+1950=9450; 7500 < 9450)
         uint256[] memory words = new uint256[](1);
@@ -1646,7 +1643,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPackFor(address(machine), user, 0);
         vm.prank(user);
-        machine.openPack(user, sig, false);
+        machine.openPack(user, sig);
 
         // tierRand = 9450 → Uncommon (cumulative 7500+1950+400=9850; 9450 < 9850)
         uint256[] memory words = new uint256[](1);
@@ -1686,7 +1683,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPackFor(address(machine), user, 0);
         vm.prank(user);
-        machine.openPack(user, sig, false);
+        machine.openPack(user, sig);
 
         // tierRand = 9850 → Rare (cumulative 7500+1950+400+100=9950; 9850 < 9950)
         uint256[] memory words = new uint256[](1);
@@ -1726,7 +1723,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPackFor(address(machine), user, 0);
         vm.prank(user);
-        machine.openPack(user, sig, false);
+        machine.openPack(user, sig);
 
         // tierRand = 9950 → Ultra (cumulative sum = 10000; 9950 < 10000)
         uint256[] memory words = new uint256[](1);
@@ -1769,7 +1766,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPackFor(address(machine), user, 0);
         vm.prank(user);
-        machine.openPack(user, sig, false);
+        machine.openPack(user, sig);
 
         uint256[] memory words = new uint256[](1);
         words[0] = _craftWord(7499, 1); // last Base value
@@ -1814,7 +1811,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPackFor(address(machine), user, 0);
         vm.prank(user);
-        machine.openPack(user, sig, false);
+        machine.openPack(user, sig);
 
         uint256[] memory words = new uint256[](1);
         words[0] = _craftWord(7500, 1); // first Common value
@@ -1864,7 +1861,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPackFor(address(machine), user, 0);
         vm.prank(user);
-        machine.openPack(user, sig, false);
+        machine.openPack(user, sig);
 
         // totalActive = 7500+50 = 7550
         // tierRand = 7500 % 7550 = 7500
@@ -1910,7 +1907,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPackFor(address(machine), user, 0);
         vm.prank(user);
-        machine.openPack(user, sig, false);
+        machine.openPack(user, sig);
 
         // tierRand = 0 → Base. Lower bits = 2 → index = 2 % 3 = 2 → ids[2].
         uint256 upper = 0; // → tierRand = 0 → Base
@@ -1961,7 +1958,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
 
         uint256[] memory words = new uint256[](CARDS_PER_PACK);
         words[0] = _craftWord(0, 2); // tierRand=0    → Base (2 in pool), index=0
@@ -2013,7 +2010,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
 
         // Any tierRand value will land on Rare since totalActive = 10000 = Rare weight
         uint256[] memory words = new uint256[](CARDS_PER_PACK);
@@ -2043,7 +2040,7 @@ contract PackMachineTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
 
         uint256[] memory words = new uint256[](CARDS_PER_PACK);
         for (uint256 i; i < CARDS_PER_PACK; i++) {

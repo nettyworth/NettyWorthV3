@@ -90,10 +90,6 @@ contract PackMachine is
         uint16 buybackAllocationBps;
         /// @dev BuybackPool contract address.
         address buybackPool;
-        /// @dev Protection surcharge in basis points (e.g., 1000 = 10% extra, paid to treasury).
-        uint16 protectionFeeBps;
-        /// @dev Whether buyback protection was purchased for a given VRF request.
-        mapping(uint256 requestId => bool) requestProtection;
     }
 
     struct PendingOpen {
@@ -137,7 +133,6 @@ contract PackMachine is
     event TierWeightsUpdated(uint16[5] weights);
     event BuybackAllocationUpdated(uint16 oldBps, uint16 newBps);
     event BuybackPoolUpdated(address indexed oldPool, address indexed newPool);
-    event ProtectionFeeUpdated(uint16 oldBps, uint16 newBps);
     event RetentionThresholdUpdated(uint16 oldBps, uint16 newBps);
 
     // =========================================================================
@@ -203,8 +198,6 @@ contract PackMachine is
         $.tierWeights = [uint16(7500), 1950, 400, 100, 50];
         // Default 60% machine-wide retention threshold.
         $.retentionThresholdBps = 6000;
-        // Default 10% protection surcharge.
-        $.protectionFeeBps = 1000;
         // buybackAllocationBps defaults to 0 (backwards-compatible; no split until configured).
     }
 
@@ -215,17 +208,15 @@ contract PackMachine is
     /// @notice Open a pack by pulling USDC directly from `msg.sender`.
     /// @param user The recipient of the won cards (subject to blacklist check in AssetNFT).
     /// @param signature EIP-712 `OpenPack(address user, uint256 nonce)` signed by a PACK_OPERATOR_ROLE holder.
-    /// @param withProtection Whether to purchase buyback protection (+protectionFeeBps surcharge to treasury).
     function openPack(
         address user,
-        bytes calldata signature,
-        bool withProtection
+        bytes calldata signature
     ) external nonReentrant whenNotPaused {
         PackMachineStorage storage $ = _getStorage();
         _assertOpenable($);
         _verifySignature($, user, signature);
-        _handlePayment($, _msgSender(), withProtection);
-        _requestVRF($, user, IPackMachineFactory($.factory), withProtection);
+        _handlePayment($, _msgSender());
+        _requestVRF($, user, IPackMachineFactory($.factory));
     }
 
     /// @notice Open a pack paying via Uniswap Permit2 (gasless for user — relayer pays gas).
@@ -234,14 +225,12 @@ contract PackMachine is
     /// @param permit2Deadline Permit2 expiry timestamp.
     /// @param permit2Signature Permit2 authorization signature from `user`.
     /// @param playSignature EIP-712 `OpenPack` signature from a PACK_OPERATOR_ROLE holder.
-    /// @param withProtection Whether to purchase buyback protection (+protectionFeeBps surcharge to treasury).
     function openPackWithPermit2(
         address user,
         uint256 permit2Nonce,
         uint256 permit2Deadline,
         bytes calldata permit2Signature,
-        bytes calldata playSignature,
-        bool withProtection
+        bytes calldata playSignature
     ) external nonReentrant whenNotPaused {
         PackMachineStorage storage $ = _getStorage();
         _assertOpenable($);
@@ -249,11 +238,6 @@ contract PackMachine is
 
         IPackMachineFactory iFactory = IPackMachineFactory($.factory);
         uint256 price = $.pricePerPack;
-        uint256 protectionFee =
-            withProtection
-                ? (price * $.protectionFeeBps) / WEIGHT_PRECISION
-                : 0;
-        uint256 totalAmount = price + protectionFee;
         uint256 buybackAmount =
             (price * $.buybackAllocationBps) / WEIGHT_PRECISION;
         address pool = $.buybackPool;
@@ -263,14 +247,14 @@ contract PackMachine is
             ISignatureTransfer.PermitTransferFrom({
                 permitted: ISignatureTransfer.TokenPermissions({
                     token: iFactory.paymentToken(),
-                    amount: totalAmount
+                    amount: price
                 }),
                 nonce: permit2Nonce,
                 deadline: permit2Deadline
             }),
             ISignatureTransfer.SignatureTransferDetails({
                 to: address(this),
-                requestedAmount: totalAmount
+                requestedAmount: price
             }),
             user,
             permit2Signature
@@ -282,12 +266,9 @@ contract PackMachine is
         } else {
             buybackAmount = 0;
         }
-        token.safeTransfer(
-            iFactory.financeWallet(),
-            totalAmount - buybackAmount
-        );
+        token.safeTransfer(iFactory.financeWallet(), price - buybackAmount);
 
-        _requestVRF($, user, iFactory, withProtection);
+        _requestVRF($, user, iFactory);
     }
 
     // =========================================================================
@@ -307,9 +288,6 @@ contract PackMachine is
 
         PendingOpen memory pending = $.pendingOpens[requestId];
         delete $.pendingOpens[requestId];
-
-        bool hasProtection = $.requestProtection[requestId];
-        if (hasProtection) delete $.requestProtection[requestId];
 
         IPackMachineFactory iFactory = IPackMachineFactory($.factory);
         address assetNFT = $.assetNFT;
@@ -370,7 +348,6 @@ contract PackMachine is
                         tokenId,
                         uint128(uint256($.pricePerPack) / $.cardsPerPack),
                         uint8(selectedTier),
-                        hasProtection,
                         address(this)
                     );
                 }
@@ -546,17 +523,6 @@ contract PackMachine is
         $.buybackAllocationBps = bps;
     }
 
-    /// @notice Set the protection fee surcharge in basis points.
-    /// @param bps Basis points added on top of pricePerPack when withProtection=true (cap: 5000).
-    function setProtectionFee(
-        uint16 bps
-    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
-        if (bps > 5000) revert PackMachine__InvalidBps(bps);
-        PackMachineStorage storage $ = _getStorage();
-        emit ProtectionFeeUpdated($.protectionFeeBps, bps);
-        $.protectionFeeBps = bps;
-    }
-
     /// @notice Set the machine-wide retention threshold.
     /// @param bps Sales are blocked when effectivePrizePoolSize/totalInventory < bps/10000. (0 = disabled).
     function setRetentionThreshold(
@@ -651,10 +617,6 @@ contract PackMachine is
 
     function getBuybackAllocationBps() external view returns (uint16) {
         return _getStorage().buybackAllocationBps;
-    }
-
-    function getProtectionFeeBps() external view returns (uint16) {
-        return _getStorage().protectionFeeBps;
     }
 
     function getRetentionThresholdBps() external view returns (uint16) {
@@ -769,18 +731,11 @@ contract PackMachine is
 
     function _handlePayment(
         PackMachineStorage storage $,
-        address payer,
-        bool withProtection
+        address payer
     ) private {
         IPackMachineFactory iFactory = IPackMachineFactory($.factory);
         IERC20 token = IERC20(iFactory.paymentToken());
         uint256 price = $.pricePerPack;
-
-        uint256 protectionFee =
-            withProtection
-                ? (price * $.protectionFeeBps) / WEIGHT_PRECISION
-                : 0;
-        uint256 totalAmount = price + protectionFee;
 
         uint256 buybackAmount =
             (price * $.buybackAllocationBps) / WEIGHT_PRECISION;
@@ -794,15 +749,14 @@ contract PackMachine is
         token.safeTransferFrom(
             payer,
             iFactory.financeWallet(),
-            totalAmount - buybackAmount
+            price - buybackAmount
         );
     }
 
     function _requestVRF(
         PackMachineStorage storage $,
         address user,
-        IPackMachineFactory factory_,
-        bool withProtection
+        IPackMachineFactory factory_
     ) private {
         uint8 cards = $.cardsPerPack;
         $.effectivePrizePoolSize -= cards;
@@ -813,9 +767,6 @@ contract PackMachine is
             user: user,
             cardsCount: cards
         });
-        if (withProtection) {
-            $.requestProtection[requestId] = true;
-        }
     }
 
     function _swapAndPopTier(

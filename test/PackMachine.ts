@@ -297,7 +297,7 @@ describe("PackMachine Integration", async function () {
         0n,
       );
       const playSig = await walletOperator.signTypedData(typedData);
-
+      // await packMachine.write.unpause({ account: walletAdmin.account });
       // Call openPackWithPermit2 (MockPermit2 skips signature verification)
       const openBlock = await publicClient.getBlockNumber();
       await packMachine.write.openPackWithPermit2(
@@ -307,7 +307,6 @@ describe("PackMachine Integration", async function () {
           BigInt(Math.floor(Date.now() / 1000) + 3600), // deadline
           "0x", // permit2Signature (not verified by mock)
           playSig,
-          false,
         ],
         { account: walletUser.account },
       );
@@ -387,7 +386,7 @@ describe("PackMachine Integration", async function () {
       );
       const playSig = await walletOperator.signTypedData(typedData);
 
-      await packMachine.write.openPack([userAddress, playSig, false], {
+      await packMachine.write.openPack([userAddress, playSig], {
         account: walletUser.account,
       });
 
@@ -640,7 +639,7 @@ describe("PackMachine Integration", async function () {
       const playSig = await walletOperator.signTypedData(typedData);
 
       await assert.rejects(
-        futureMachine.write.openPack([userAddress, playSig, false], {
+        futureMachine.write.openPack([userAddress, playSig], {
           account: walletUser.account,
         }),
       );
@@ -669,7 +668,7 @@ describe("PackMachine Integration", async function () {
       const playSig = await walletOperator.signTypedData(typedData);
 
       await assert.rejects(
-        packMachine.write.openPack([userAddress, playSig, false], {
+        packMachine.write.openPack([userAddress, playSig], {
           account: walletUser.account,
         }),
       );
@@ -704,10 +703,10 @@ describe("PackMachine Integration", async function () {
         buildOpenPackTypedData(packMachine.address, chainId, user2Address, 0n),
       );
 
-      await packMachine.write.openPack([userAddress, sig1, false], {
+      await packMachine.write.openPack([userAddress, sig1], {
         account: walletUser.account,
       });
-      await packMachine.write.openPack([user2Address, sig2, false], {
+      await packMachine.write.openPack([user2Address, sig2], {
         account: walletUser2.account,
       });
 

@@ -36,7 +36,6 @@ contract BuybackPool is
     struct TokenBuybackInfo {
         uint128 pricePerCard;
         uint8 tier;
-        bool hasProtection;
         address sourcePackMachine;
         bool isActive;
     }
@@ -49,27 +48,19 @@ contract BuybackPool is
         address factory;
         /// @dev Default buyback rate (basis points, e.g. 8000 = 80%).
         uint16 defaultBuybackBps;
-        /// @dev Buyback rate when protection was purchased (e.g. 9000 = 90%).
-        uint16 protectedBuybackBps;
-        /// @dev Per-tier buyback rate overrides (0 = use defaultBuybackBps).
-        uint16[5] tierBuybackBps;
-        /// @dev Per-tier protected buyback rate overrides (0 = use protectedBuybackBps).
-        uint16[5] tierProtectedBuybackBps;
         mapping(uint256 tokenId => TokenBuybackInfo) tokenInfo;
         mapping(address packMachine => bool) registeredPackMachines;
         uint256 totalReceived;
         uint256 totalPaidOut;
+        /// @dev Per-PackMachine buyback rate override (0 = use defaultBuybackBps).
+        mapping(address packMachine => uint16) packMachineBuybackBps;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.BuybackPool")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant BUYBACK_POOL_STORAGE_SLOT =
         0x3f1a2b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f00;
 
-    function _getStorage()
-        private
-        pure
-        returns (BuybackPoolStorage storage $)
-    {
+    function _getStorage() private pure returns (BuybackPoolStorage storage $) {
         assembly {
             $.slot := BUYBACK_POOL_STORAGE_SLOT
         }
@@ -83,14 +74,12 @@ contract BuybackPool is
         uint256 indexed tokenId,
         address indexed sourcePackMachine,
         uint128 pricePerCard,
-        uint8 tier,
-        bool hasProtection
+        uint8 tier
     );
     event BuybackExecuted(
         uint256 indexed tokenId,
         address indexed seller,
-        uint256 payout,
-        bool withProtection
+        uint256 payout
     );
     event TokenRedeposited(
         uint256 indexed tokenId,
@@ -98,9 +87,11 @@ contract BuybackPool is
         uint8 tier
     );
     event DefaultBuybackBpsUpdated(uint16 oldBps, uint16 newBps);
-    event ProtectedBuybackBpsUpdated(uint16 oldBps, uint16 newBps);
-    event TierBuybackBpsUpdated(uint8 indexed tier, uint16 oldBps, uint16 newBps);
-    event TierProtectedBuybackBpsUpdated(uint8 indexed tier, uint16 oldBps, uint16 newBps);
+    event PackMachineBuybackBpsUpdated(
+        address indexed machine,
+        uint16 oldBps,
+        uint16 newBps
+    );
     event EmergencyWithdrawal(address indexed to, uint256 amount);
     event PackMachineRegistered(address indexed packMachine, bool registered);
 
@@ -113,14 +104,11 @@ contract BuybackPool is
     error BuybackPool__TokenNotActive(uint256 tokenId);
     error BuybackPool__NotTokenOwner(uint256 tokenId, address caller);
     error BuybackPool__InsufficientBalance(uint256 available, uint256 required);
-    error BuybackPool__ProtectionNotPurchased(uint256 tokenId);
     error BuybackPool__UnauthorizedSource(address caller);
     error BuybackPool__InvalidBps(uint16 bps);
     error BuybackPool__ZeroAddress();
     error BuybackPool__NotPaused();
-    error BuybackPool__InvalidTier(uint8 tier);
 
-    uint256 private constant NUM_TIERS = 5;
     uint16 private constant BPS_PRECISION = 10000;
 
     // =========================================================================
@@ -157,7 +145,6 @@ contract BuybackPool is
         $.financeWallet = financeWallet_;
         $.factory = factory_;
         $.defaultBuybackBps = 8000;
-        $.protectedBuybackBps = 9000;
     }
 
     // =========================================================================
@@ -170,7 +157,6 @@ contract BuybackPool is
         uint256 tokenId,
         uint128 pricePerCard,
         uint8 tier,
-        bool hasProtection,
         address sourcePackMachine
     ) external whenNotPaused {
         BuybackPoolStorage storage $ = _getStorage();
@@ -182,26 +168,17 @@ contract BuybackPool is
         $.tokenInfo[tokenId] = TokenBuybackInfo({
             pricePerCard: pricePerCard,
             tier: tier,
-            hasProtection: hasProtection,
             sourcePackMachine: sourcePackMachine,
             isActive: true
         });
 
-        emit TokenRegistered(tokenId, sourcePackMachine, pricePerCard, tier, hasProtection);
+        emit TokenRegistered(tokenId, sourcePackMachine, pricePerCard, tier);
     }
 
-    /// @notice Sell a token back to the pool at the standard rate (default 80%).
+    /// @notice Sell a token back to the pool at the buyback rate for its source PackMachine.
     /// @dev Caller must own the token and have approved this contract (or use setApprovalForAll).
     function buyback(uint256 tokenId) external nonReentrant whenNotPaused {
-        _executeBuyback(tokenId, false);
-    }
-
-    /// @notice Sell a token back at the protection rate (default 90%).
-    /// @dev Reverts if protection was not purchased for this token's pack.
-    function buybackWithProtection(
-        uint256 tokenId
-    ) external nonReentrant whenNotPaused {
-        _executeBuyback(tokenId, true);
+        _executeBuyback(tokenId);
     }
 
     // =========================================================================
@@ -217,35 +194,20 @@ contract BuybackPool is
         $.defaultBuybackBps = bps;
     }
 
-    function setProtectedBuybackBps(
+    /// @notice Set a per-PackMachine buyback rate override (0 clears the override, falling back to defaultBuybackBps).
+    function setPackMachineBuybackBps(
+        address machine,
         uint16 bps
     ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
+        if (machine == address(0)) revert BuybackPool__ZeroAddress();
         if (bps > BPS_PRECISION) revert BuybackPool__InvalidBps(bps);
         BuybackPoolStorage storage $ = _getStorage();
-        emit ProtectedBuybackBpsUpdated($.protectedBuybackBps, bps);
-        $.protectedBuybackBps = bps;
-    }
-
-    function setTierBuybackBps(
-        uint8 tier,
-        uint16 bps
-    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
-        if (tier >= NUM_TIERS) revert BuybackPool__InvalidTier(tier);
-        if (bps > BPS_PRECISION) revert BuybackPool__InvalidBps(bps);
-        BuybackPoolStorage storage $ = _getStorage();
-        emit TierBuybackBpsUpdated(tier, $.tierBuybackBps[tier], bps);
-        $.tierBuybackBps[tier] = bps;
-    }
-
-    function setTierProtectedBuybackBps(
-        uint8 tier,
-        uint16 bps
-    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
-        if (tier >= NUM_TIERS) revert BuybackPool__InvalidTier(tier);
-        if (bps > BPS_PRECISION) revert BuybackPool__InvalidBps(bps);
-        BuybackPoolStorage storage $ = _getStorage();
-        emit TierProtectedBuybackBpsUpdated(tier, $.tierProtectedBuybackBps[tier], bps);
-        $.tierProtectedBuybackBps[tier] = bps;
+        emit PackMachineBuybackBpsUpdated(
+            machine,
+            $.packMachineBuybackBps[machine],
+            bps
+        );
+        $.packMachineBuybackBps[machine] = bps;
     }
 
     /// @notice Register or deregister a PackMachine as an authorized token source.
@@ -285,7 +247,11 @@ contract BuybackPool is
         address to
     ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
         if (to == address(0)) revert BuybackPool__ZeroAddress();
-        IERC721(_getStorage().assetNFT).transferFrom(address(this), to, tokenId);
+        IERC721(_getStorage().assetNFT).transferFrom(
+            address(this),
+            to,
+            tokenId
+        );
     }
 
     // =========================================================================
@@ -300,7 +266,6 @@ contract BuybackPool is
         returns (
             uint128 pricePerCard,
             uint8 tier,
-            bool hasProtection,
             address sourcePackMachine,
             bool isActive
         )
@@ -309,7 +274,6 @@ contract BuybackPool is
         return (
             info.pricePerCard,
             info.tier,
-            info.hasProtection,
             info.sourcePackMachine,
             info.isActive
         );
@@ -329,8 +293,10 @@ contract BuybackPool is
         return _getStorage().defaultBuybackBps;
     }
 
-    function getProtectedBuybackBps() external view returns (uint16) {
-        return _getStorage().protectedBuybackBps;
+    function getPackMachineBuybackBps(
+        address machine
+    ) external view returns (uint16) {
+        return _getStorage().packMachineBuybackBps[machine];
     }
 
     // =========================================================================
@@ -354,12 +320,14 @@ contract BuybackPool is
     // Internal helpers
     // =========================================================================
 
-    function _executeBuyback(uint256 tokenId, bool useProtection) private {
+    function _executeBuyback(uint256 tokenId) private {
         BuybackPoolStorage storage $ = _getStorage();
         TokenBuybackInfo storage info = $.tokenInfo[tokenId];
 
         if (!info.isActive) {
-            if (info.pricePerCard == 0 && info.sourcePackMachine == address(0)) {
+            if (
+                info.pricePerCard == 0 && info.sourcePackMachine == address(0)
+            ) {
                 revert BuybackPool__TokenNotRegistered(tokenId);
             }
             revert BuybackPool__TokenNotActive(tokenId);
@@ -369,20 +337,12 @@ contract BuybackPool is
         if (IERC721($.assetNFT).ownerOf(tokenId) != caller)
             revert BuybackPool__NotTokenOwner(tokenId, caller);
 
-        if (useProtection && !info.hasProtection)
-            revert BuybackPool__ProtectionNotPurchased(tokenId);
+        // Determine buyback rate: per-machine override, fallback to global default.
+        uint16 buybackBps = $.packMachineBuybackBps[info.sourcePackMachine];
+        if (buybackBps == 0) buybackBps = $.defaultBuybackBps;
 
-        // Determine buyback rate (tier override takes precedence).
-        uint16 buybackBps;
-        if (useProtection) {
-            buybackBps = $.tierProtectedBuybackBps[info.tier];
-            if (buybackBps == 0) buybackBps = $.protectedBuybackBps;
-        } else {
-            buybackBps = $.tierBuybackBps[info.tier];
-            if (buybackBps == 0) buybackBps = $.defaultBuybackBps;
-        }
-
-        uint256 payout = (uint256(info.pricePerCard) * buybackBps) / BPS_PRECISION;
+        uint256 payout =
+            (uint256(info.pricePerCard) * buybackBps) / BPS_PRECISION;
 
         IERC20 paymentToken = IERC20($.paymentToken);
         uint256 balance = paymentToken.balanceOf(address(this));
@@ -402,7 +362,7 @@ contract BuybackPool is
         // Pay user.
         paymentToken.safeTransfer(caller, payout);
 
-        emit BuybackExecuted(tokenId, caller, payout, useProtection);
+        emit BuybackExecuted(tokenId, caller, payout);
 
         // Auto re-deposit the NFT back into its source PackMachine.
         _redeposit($, tokenId, tier, sourceMachine);
@@ -426,7 +386,11 @@ contract BuybackPool is
         tiers[0] = tier;
 
         IERC721($.assetNFT).approve(sourceMachine, tokenId);
-        IPackMachine(sourceMachine).depositFromPool(tokenIds, tiers, address(this));
+        IPackMachine(sourceMachine).depositFromPool(
+            tokenIds,
+            tiers,
+            address(this)
+        );
 
         emit TokenRedeposited(tokenId, sourceMachine, tier);
     }

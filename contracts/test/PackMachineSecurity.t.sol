@@ -194,7 +194,7 @@ contract PackMachineSecurityTest is Test {
         usdc.mint(who, PRICE);
         vm.startPrank(who);
         usdc.approve(address(packMachine), PRICE);
-        packMachine.openPack(who, sig, false);
+        packMachine.openPack(who, sig);
         vm.stopPrank();
     }
 

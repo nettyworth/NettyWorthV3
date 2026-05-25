@@ -17,11 +17,7 @@ interface IPackMachine {
     ) external;
 
     /// @notice Open a pack by pulling USDC directly from msg.sender.
-    function openPack(
-        address user,
-        bytes calldata signature,
-        bool withProtection
-    ) external;
+    function openPack(address user, bytes calldata signature) external;
 
     /// @notice Open a pack paying via Uniswap Permit2.
     function openPackWithPermit2(
@@ -29,8 +25,7 @@ interface IPackMachine {
         uint256 permit2Nonce,
         uint256 permit2Deadline,
         bytes calldata permit2Signature,
-        bytes calldata playSignature,
-        bool withProtection
+        bytes calldata playSignature
     ) external;
 
     /// @notice Deposit tokens into tiered prize pools.

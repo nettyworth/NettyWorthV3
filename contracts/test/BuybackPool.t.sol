@@ -77,7 +77,14 @@ contract BuybackPoolTest is Test {
             address(assetNFTImpl),
             abi.encodeCall(
                 AssetNFT.initialize,
-                (address(pm), "NettyWorth Assets", "NWA", "ipfs://contract", makeAddr("royalty"), 250)
+                (
+                    address(pm),
+                    "NettyWorth Assets",
+                    "NWA",
+                    "ipfs://contract",
+                    makeAddr("royalty"),
+                    250
+                )
             )
         );
         assetNFT = AssetNFT(address(assetNFTProxy));
@@ -90,7 +97,14 @@ contract BuybackPoolTest is Test {
             address(routerImpl),
             abi.encodeCall(
                 PackVRFRouter.initialize,
-                (address(pm), address(coordinator), 1, keccak256("key"), 700_000, 3)
+                (
+                    address(pm),
+                    address(coordinator),
+                    1,
+                    keccak256("key"),
+                    700_000,
+                    3
+                )
             )
         );
         vrfRouter = PackVRFRouter(address(routerProxy));
@@ -128,7 +142,13 @@ contract BuybackPoolTest is Test {
             address(poolImpl),
             abi.encodeCall(
                 BuybackPool.initialize,
-                (address(pm), address(assetNFT), address(usdc), financeWallet, address(factory))
+                (
+                    address(pm),
+                    address(assetNFT),
+                    address(usdc),
+                    financeWallet,
+                    address(factory)
+                )
             )
         );
         pool = BuybackPool(address(poolProxy));
@@ -146,14 +166,15 @@ contract BuybackPoolTest is Test {
         // BuybackPool → PackMachine
         vm.prank(operator);
         pool.registerPackMachine(address(packMachine), true);
-
     }
 
     // =========================================================================
     // Helpers
     // =========================================================================
 
-    function _depositNFTs(uint256 count) internal returns (uint256[] memory tokenIds) {
+    function _depositNFTs(
+        uint256 count
+    ) internal returns (uint256[] memory tokenIds) {
         tokenIds = new uint256[](count);
         uint256 startId = assetNFT.totalSupply() + 1;
         address[] memory recipients = new address[](count);
@@ -172,8 +193,13 @@ contract BuybackPoolTest is Test {
         vm.stopPrank();
     }
 
-    function _signOpenPack(address user_, uint256 nonce) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(abi.encode(OPEN_PACK_TYPEHASH, user_, nonce));
+    function _signOpenPack(
+        address user_,
+        uint256 nonce
+    ) internal view returns (bytes memory) {
+        bytes32 structHash = keccak256(
+            abi.encode(OPEN_PACK_TYPEHASH, user_, nonce)
+        );
         bytes32 domainSeparator = keccak256(
             abi.encode(
                 EIP712_DOMAIN_TYPEHASH,
@@ -183,7 +209,9 @@ contract BuybackPoolTest is Test {
                 address(packMachine)
             )
         );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", domainSeparator, structHash)
+        );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(operatorPk, digest);
         return abi.encodePacked(r, s, v);
     }
@@ -192,17 +220,17 @@ contract BuybackPoolTest is Test {
         usdc.mint(address(pool), amount);
     }
 
-    function _openPackAndFulfill(bool withProtection) internal returns (uint256[] memory wonTokens) {
-        uint256 totalAmount = PRICE;
-        if (withProtection) totalAmount += (uint256(PRICE) * 1000) / 10000; // +10%
-
-        usdc.mint(user, totalAmount);
+    function _openPackAndFulfill()
+        internal
+        returns (uint256[] memory wonTokens)
+    {
+        usdc.mint(user, PRICE);
         vm.prank(user);
-        usdc.approve(address(packMachine), totalAmount);
+        usdc.approve(address(packMachine), PRICE);
 
         bytes memory sig = _signOpenPack(user, packMachine.openNonce(user));
         vm.prank(user);
-        packMachine.openPack(user, sig, withProtection);
+        packMachine.openPack(user, sig);
 
         uint256 requestId = 1; // MockVRFCoordinator assigns sequential IDs
         uint256[] memory words = new uint256[](CARDS_PER_PACK);
@@ -214,7 +242,11 @@ contract BuybackPoolTest is Test {
         // Collect which tokens user received
         wonTokens = new uint256[](CARDS_PER_PACK);
         uint256 found;
-        for (uint256 tokenId = 1; tokenId <= assetNFT.totalSupply(); tokenId++) {
+        for (
+            uint256 tokenId = 1;
+            tokenId <= assetNFT.totalSupply();
+            tokenId++
+        ) {
             if (assetNFT.ownerOf(tokenId) == user) {
                 wonTokens[found++] = tokenId;
                 if (found == CARDS_PER_PACK) break;
@@ -229,60 +261,58 @@ contract BuybackPoolTest is Test {
     function test_RegisterToken_OnlyByRegisteredMachine() public {
         _depositNFTs(CARDS_PER_PACK);
         vm.expectRevert(
-            abi.encodeWithSelector(BuybackPool.BuybackPool__UnauthorizedSource.selector, unauthorized)
+            abi.encodeWithSelector(
+                BuybackPool.BuybackPool__UnauthorizedSource.selector,
+                unauthorized
+            )
         );
         vm.prank(unauthorized);
-        pool.registerToken(1, 5e6, 0, false, address(packMachine));
+        pool.registerToken(1, 5e6, 0, address(packMachine));
     }
 
     function test_RegisterToken_RevertsIfAlreadyActive() public {
         _depositNFTs(CARDS_PER_PACK);
-        _openPackAndFulfill(false);
+        _openPackAndFulfill();
 
         // Find a token owned by user (which was registered)
         uint256 tokenId;
         for (uint256 i = 1; i <= assetNFT.totalSupply(); i++) {
-            if (assetNFT.ownerOf(i) == user) { tokenId = i; break; }
+            if (assetNFT.ownerOf(i) == user) {
+                tokenId = i;
+                break;
+            }
         }
         require(tokenId > 0, "no token found");
 
         vm.expectRevert(
-            abi.encodeWithSelector(BuybackPool.BuybackPool__TokenAlreadyRegistered.selector, tokenId)
+            abi.encodeWithSelector(
+                BuybackPool.BuybackPool__TokenAlreadyRegistered.selector,
+                tokenId
+            )
         );
         vm.prank(address(packMachine));
-        pool.registerToken(tokenId, 5e6, 0, false, address(packMachine));
+        pool.registerToken(tokenId, 5e6, 0, address(packMachine));
     }
 
     function test_RegisterToken_StoresCorrectData() public {
         _depositNFTs(CARDS_PER_PACK);
-        _openPackAndFulfill(false);
+        _openPackAndFulfill();
 
         uint256 tokenId;
         for (uint256 i = 1; i <= assetNFT.totalSupply(); i++) {
-            if (assetNFT.ownerOf(i) == user) { tokenId = i; break; }
+            if (assetNFT.ownerOf(i) == user) {
+                tokenId = i;
+                break;
+            }
         }
         require(tokenId > 0, "no token found");
 
-        (uint128 price, uint8 tier, bool hasProt, address src, bool active) = pool.getTokenInfo(tokenId);
+        (uint128 price, uint8 tier, address src, bool active) = pool
+            .getTokenInfo(tokenId);
         assertEq(price, PRICE_PER_CARD);
         assertEq(tier, 0);
-        assertFalse(hasProt);
         assertEq(src, address(packMachine));
         assertTrue(active);
-    }
-
-    function test_RegisterToken_WithProtection_StoresFlag() public {
-        _depositNFTs(CARDS_PER_PACK);
-        _openPackAndFulfill(true);
-
-        uint256 tokenId;
-        for (uint256 i = 1; i <= assetNFT.totalSupply(); i++) {
-            if (assetNFT.ownerOf(i) == user) { tokenId = i; break; }
-        }
-        require(tokenId > 0, "no token found");
-
-        (, , bool hasProt, , ) = pool.getTokenInfo(tokenId);
-        assertTrue(hasProt);
     }
 
     // =========================================================================
@@ -291,18 +321,25 @@ contract BuybackPoolTest is Test {
 
     function test_Buyback_RevertsIfNotRegistered() public {
         vm.expectRevert(
-            abi.encodeWithSelector(BuybackPool.BuybackPool__TokenNotRegistered.selector, 999)
+            abi.encodeWithSelector(
+                BuybackPool.BuybackPool__TokenNotRegistered.selector,
+                999
+            )
         );
         pool.buyback(999);
     }
 
     function test_Buyback_RevertsIfCallerNotOwner() public {
         _depositNFTs(CARDS_PER_PACK);
-        uint256[] memory wonTokens = _openPackAndFulfill(false);
+        uint256[] memory wonTokens = _openPackAndFulfill();
         uint256 tokenId = wonTokens[0];
 
         vm.expectRevert(
-            abi.encodeWithSelector(BuybackPool.BuybackPool__NotTokenOwner.selector, tokenId, unauthorized)
+            abi.encodeWithSelector(
+                BuybackPool.BuybackPool__NotTokenOwner.selector,
+                tokenId,
+                unauthorized
+            )
         );
         vm.prank(unauthorized);
         pool.buyback(tokenId);
@@ -310,7 +347,7 @@ contract BuybackPoolTest is Test {
 
     function test_Buyback_RevertsIfInsufficientBalance() public {
         _depositNFTs(CARDS_PER_PACK);
-        uint256[] memory wonTokens = _openPackAndFulfill(false);
+        uint256[] memory wonTokens = _openPackAndFulfill();
         uint256 tokenId = wonTokens[0];
 
         // Drain the pool
@@ -325,16 +362,20 @@ contract BuybackPoolTest is Test {
         assetNFT.approve(address(pool), tokenId);
         uint256 expected = (uint256(PRICE_PER_CARD) * 8000) / 10000;
         vm.expectRevert(
-            abi.encodeWithSelector(BuybackPool.BuybackPool__InsufficientBalance.selector, 0, expected)
+            abi.encodeWithSelector(
+                BuybackPool.BuybackPool__InsufficientBalance.selector,
+                0,
+                expected
+            )
         );
         vm.prank(user);
         pool.buyback(tokenId);
     }
 
-    function test_Buyback_Pays80Percent() public {
+    function test_Buyback_Pays80PercentByDefault() public {
         _seedPool(10e6);
         _depositNFTs(CARDS_PER_PACK);
-        uint256[] memory wonTokens = _openPackAndFulfill(false);
+        uint256[] memory wonTokens = _openPackAndFulfill();
         uint256 tokenId = wonTokens[0];
 
         uint256 expectedPayout = (uint256(PRICE_PER_CARD) * 8000) / 10000; // 80% of 5 USDC = 4 USDC
@@ -353,7 +394,7 @@ contract BuybackPoolTest is Test {
     function test_Buyback_TransfersNFTFromUser() public {
         _seedPool(10e6);
         _depositNFTs(CARDS_PER_PACK);
-        uint256[] memory wonTokens = _openPackAndFulfill(false);
+        uint256[] memory wonTokens = _openPackAndFulfill();
         uint256 tokenId = wonTokens[0];
 
         assertEq(assetNFT.ownerOf(tokenId), user);
@@ -370,7 +411,7 @@ contract BuybackPoolTest is Test {
     function test_Buyback_RedepositsNFTIntoPackMachine() public {
         _seedPool(10e6);
         _depositNFTs(CARDS_PER_PACK);
-        uint256[] memory wonTokens = _openPackAndFulfill(false);
+        uint256[] memory wonTokens = _openPackAndFulfill();
         uint256 tokenId = wonTokens[0];
 
         uint256 poolSizeBefore = packMachine.effectivePrizePoolSize();
@@ -388,7 +429,7 @@ contract BuybackPoolTest is Test {
     function test_Buyback_MarksTokenInactive() public {
         _seedPool(10e6);
         _depositNFTs(CARDS_PER_PACK);
-        uint256[] memory wonTokens = _openPackAndFulfill(false);
+        uint256[] memory wonTokens = _openPackAndFulfill();
         uint256 tokenId = wonTokens[0];
 
         vm.prank(user);
@@ -396,14 +437,14 @@ contract BuybackPoolTest is Test {
         vm.prank(user);
         pool.buyback(tokenId);
 
-        (, , , , bool active) = pool.getTokenInfo(tokenId);
+        (, , , bool active) = pool.getTokenInfo(tokenId);
         assertFalse(active);
     }
 
     function test_Buyback_RevertsIfAlreadyBoughtBack() public {
         _seedPool(10e6);
         _depositNFTs(CARDS_PER_PACK);
-        uint256[] memory wonTokens = _openPackAndFulfill(false);
+        uint256[] memory wonTokens = _openPackAndFulfill();
         uint256 tokenId = wonTokens[0];
 
         vm.prank(user);
@@ -413,78 +454,128 @@ contract BuybackPoolTest is Test {
 
         // Token is now in packMachine, user no longer owns it
         vm.expectRevert(
-            abi.encodeWithSelector(BuybackPool.BuybackPool__TokenNotActive.selector, tokenId)
+            abi.encodeWithSelector(
+                BuybackPool.BuybackPool__TokenNotActive.selector,
+                tokenId
+            )
         );
         vm.prank(user);
         pool.buyback(tokenId);
     }
 
     // =========================================================================
-    // buybackWithProtection
+    // Per-PackMachine buyback rate overrides
     // =========================================================================
 
-    function test_BuybackWithProtection_RevertsIfNoProtection() public {
-        _depositNFTs(CARDS_PER_PACK);
-        uint256[] memory wonTokens = _openPackAndFulfill(false);
-        uint256 tokenId = wonTokens[0];
-
-        vm.prank(user);
-        assetNFT.approve(address(pool), tokenId);
-        vm.expectRevert(
-            abi.encodeWithSelector(BuybackPool.BuybackPool__ProtectionNotPurchased.selector, tokenId)
-        );
-        vm.prank(user);
-        pool.buybackWithProtection(tokenId);
-    }
-
-    function test_BuybackWithProtection_Pays90Percent() public {
+    function test_PackMachineBuybackBpsOverride() public {
         _seedPool(10e6);
+        // Set this machine's buyback to 70% (override default 80%)
+        vm.prank(operator);
+        pool.setPackMachineBuybackBps(address(packMachine), 7000);
+
         _depositNFTs(CARDS_PER_PACK);
-        uint256[] memory wonTokens = _openPackAndFulfill(true);
+        uint256[] memory wonTokens = _openPackAndFulfill();
         uint256 tokenId = wonTokens[0];
 
-        uint256 expectedPayout = (uint256(PRICE_PER_CARD) * 9000) / 10000; // 90% of 5 USDC = 4.5 USDC
+        uint256 expectedPayout = (uint256(PRICE_PER_CARD) * 7000) / 10000;
 
         vm.prank(user);
         assetNFT.approve(address(pool), tokenId);
         uint256 userBefore = usdc.balanceOf(user);
         vm.prank(user);
-        pool.buybackWithProtection(tokenId);
+        pool.buyback(tokenId);
 
         assertEq(usdc.balanceOf(user) - userBefore, expectedPayout);
     }
 
-    function test_BuybackWithProtection_AlsoRedeposits() public {
+    function test_PackMachineBuybackBps_FallsBackToDefault() public {
         _seedPool(10e6);
+        // No per-machine override set — should use defaultBuybackBps (80%)
         _depositNFTs(CARDS_PER_PACK);
-        uint256[] memory wonTokens = _openPackAndFulfill(true);
+        uint256[] memory wonTokens = _openPackAndFulfill();
         uint256 tokenId = wonTokens[0];
 
-        uint256 poolSizeBefore = packMachine.effectivePrizePoolSize();
+        uint256 expectedPayout = (uint256(PRICE_PER_CARD) * 8000) / 10000;
+
         vm.prank(user);
         assetNFT.approve(address(pool), tokenId);
+        uint256 userBefore = usdc.balanceOf(user);
         vm.prank(user);
-        pool.buybackWithProtection(tokenId);
+        pool.buyback(tokenId);
 
-        assertEq(packMachine.effectivePrizePoolSize(), poolSizeBefore + 1);
-        assertEq(assetNFT.ownerOf(tokenId), address(packMachine));
+        assertEq(usdc.balanceOf(user) - userBefore, expectedPayout);
     }
 
-    // =========================================================================
-    // Per-tier overrides
-    // =========================================================================
-
-    function test_TierBuybackBpsOverride() public {
-        _seedPool(10e6);
-        // Set tier 0 buyback to 70% (override default 80%)
+    function test_SetPackMachineBuybackBps_Validation() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BuybackPool.BuybackPool__InvalidBps.selector,
+                uint16(10001)
+            )
+        );
         vm.prank(operator);
-        pool.setTierBuybackBps(0, 7000);
+        pool.setPackMachineBuybackBps(address(packMachine), 10001);
+
+        vm.expectRevert(BuybackPool.BuybackPool__ZeroAddress.selector);
+        vm.prank(operator);
+        pool.setPackMachineBuybackBps(address(0), 9000);
+    }
+
+    function test_SetPackMachineBuybackBps_EmitsEvent() public {
+        vm.expectEmit(true, false, false, true);
+        emit BuybackPool.PackMachineBuybackBpsUpdated(
+            address(packMachine),
+            0,
+            9000
+        );
+        vm.prank(operator);
+        pool.setPackMachineBuybackBps(address(packMachine), 9000);
+        assertEq(pool.getPackMachineBuybackBps(address(packMachine)), 9000);
+    }
+
+    function test_DifferentMachines_DifferentRates() public {
+        // Deploy a second PackMachine with a different rate
+        vm.prank(operator);
+        address clone2Addr = factory.createPackMachine(
+            PRICE,
+            CARDS_PER_PACK,
+            uint40(block.timestamp)
+        );
+        PackMachine packMachine2 = PackMachine(clone2Addr);
+
+        vm.prank(operator);
+        vrfRouter.setAuthorizedPackMachine(clone2Addr, true);
+        vm.prank(operator);
+        packMachine2.setBuybackPool(address(pool));
+        vm.prank(operator);
+        packMachine2.setBuybackAllocation(BUYBACK_ALLOC_BPS);
+        vm.prank(operator);
+        packMachine2.setRetentionThreshold(0);
+        vm.prank(operator);
+        pool.registerPackMachine(clone2Addr, true);
+
+        // Set different rates: machine1 = 80% (default), machine2 = 90%
+        vm.prank(operator);
+        pool.setPackMachineBuybackBps(clone2Addr, 9000);
+
+        assertEq(pool.getPackMachineBuybackBps(address(packMachine)), 0); // uses default 80%
+        assertEq(pool.getPackMachineBuybackBps(clone2Addr), 9000);
+    }
+
+    function test_ClearPackMachineBuybackBps_FallsBackToDefault() public {
+        _seedPool(10e6);
+        vm.prank(operator);
+        pool.setPackMachineBuybackBps(address(packMachine), 7000);
+
+        // Clear override by setting to 0
+        vm.prank(operator);
+        pool.setPackMachineBuybackBps(address(packMachine), 0);
 
         _depositNFTs(CARDS_PER_PACK);
-        uint256[] memory wonTokens = _openPackAndFulfill(false);
+        uint256[] memory wonTokens = _openPackAndFulfill();
         uint256 tokenId = wonTokens[0];
 
-        uint256 expectedPayout = (uint256(PRICE_PER_CARD) * 7000) / 10000;
+        uint256 expectedPayout = (uint256(PRICE_PER_CARD) * 8000) / 10000;
 
         vm.prank(user);
         assetNFT.approve(address(pool), tokenId);
@@ -506,32 +597,13 @@ contract BuybackPoolTest is Test {
         vm.prank(user);
         usdc.approve(address(packMachine), PRICE);
 
-        uint256 expectedBuybackAmount = (uint256(PRICE) * BUYBACK_ALLOC_BPS) / 10000; // 20% = 2 USDC
+        uint256 expectedBuybackAmount =
+            (uint256(PRICE) * BUYBACK_ALLOC_BPS) / 10000; // 20% = 2 USDC
         uint256 expectedTreasuryAmount = PRICE - expectedBuybackAmount; // 80% = 8 USDC
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
-
-        assertEq(usdc.balanceOf(address(pool)), expectedBuybackAmount);
-        assertEq(usdc.balanceOf(financeWallet), expectedTreasuryAmount);
-    }
-
-    function test_PaymentSplit_WithProtection_ProtectionFeeGoesToTreasury() public {
-        _depositNFTs(CARDS_PER_PACK);
-
-        uint256 protectionFee = (uint256(PRICE) * 1000) / 10000; // 10%
-        uint256 totalAmount = PRICE + protectionFee;
-        usdc.mint(user, totalAmount);
-        vm.prank(user);
-        usdc.approve(address(packMachine), totalAmount);
-
-        uint256 expectedBuybackAmount = (uint256(PRICE) * BUYBACK_ALLOC_BPS) / 10000; // only on base price
-        uint256 expectedTreasuryAmount = totalAmount - expectedBuybackAmount;
-
-        bytes memory sig = _signOpenPack(user, 0);
-        vm.prank(user);
-        packMachine.openPack(user, sig, true);
+        packMachine.openPack(user, sig);
 
         assertEq(usdc.balanceOf(address(pool)), expectedBuybackAmount);
         assertEq(usdc.balanceOf(financeWallet), expectedTreasuryAmount);
@@ -549,7 +621,7 @@ contract BuybackPoolTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
 
         assertEq(usdc.balanceOf(address(pool)), 0);
         assertEq(usdc.balanceOf(financeWallet), PRICE);
@@ -588,7 +660,10 @@ contract BuybackPoolTest is Test {
 
     function test_SetDefaultBuybackBps_InvalidReverts() public {
         vm.expectRevert(
-            abi.encodeWithSelector(BuybackPool.BuybackPool__InvalidBps.selector, uint16(10001))
+            abi.encodeWithSelector(
+                BuybackPool.BuybackPool__InvalidBps.selector,
+                uint16(10001)
+            )
         );
         vm.prank(operator);
         pool.setDefaultBuybackBps(10001);
@@ -596,7 +671,7 @@ contract BuybackPoolTest is Test {
 
     function test_Pause_BlocksBuyback() public {
         _depositNFTs(CARDS_PER_PACK);
-        uint256[] memory wonTokens = _openPackAndFulfill(false);
+        uint256[] memory wonTokens = _openPackAndFulfill();
         uint256 tokenId = wonTokens[0];
 
         vm.prank(pauser);

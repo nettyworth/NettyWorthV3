@@ -70,20 +70,37 @@ contract PackMachineCutoffTest is Test {
             address(assetNFTImpl),
             abi.encodeCall(
                 AssetNFT.initialize,
-                (address(pm), "NettyWorth Assets", "NWA", "ipfs://contract", makeAddr("royalty"), 250)
+                (
+                    address(pm),
+                    "NettyWorth Assets",
+                    "NWA",
+                    "ipfs://contract",
+                    makeAddr("royalty"),
+                    250
+                )
             )
         );
         assetNFT = AssetNFT(address(assetNFTProxy));
 
         MockPermit2 permit2Impl = new MockPermit2();
-        vm.etch(0x000000000022D473030F116dDEE9F6B43aC78BA3, address(permit2Impl).code);
+        vm.etch(
+            0x000000000022D473030F116dDEE9F6B43aC78BA3,
+            address(permit2Impl).code
+        );
 
         PackVRFRouter routerImpl = new PackVRFRouter();
         ERC1967Proxy routerProxy = new ERC1967Proxy(
             address(routerImpl),
             abi.encodeCall(
                 PackVRFRouter.initialize,
-                (address(pm), address(coordinator), 1, keccak256("key"), 700_000, 3)
+                (
+                    address(pm),
+                    address(coordinator),
+                    1,
+                    keccak256("key"),
+                    700_000,
+                    3
+                )
             )
         );
         vrfRouter = PackVRFRouter(address(routerProxy));
@@ -148,7 +165,9 @@ contract PackMachineCutoffTest is Test {
         address user_,
         uint256 nonce
     ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(abi.encode(OPEN_PACK_TYPEHASH, user_, nonce));
+        bytes32 structHash = keccak256(
+            abi.encode(OPEN_PACK_TYPEHASH, user_, nonce)
+        );
         bytes32 domainSep = keccak256(
             abi.encode(
                 EIP712_DOMAIN_TYPEHASH,
@@ -158,7 +177,9 @@ contract PackMachineCutoffTest is Test {
                 machine
             )
         );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSep, structHash));
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", domainSep, structHash)
+        );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(operatorPk, digest);
         return abi.encodePacked(r, s, v);
     }
@@ -167,9 +188,13 @@ contract PackMachineCutoffTest is Test {
         usdc.mint(who, PRICE);
         vm.prank(who);
         usdc.approve(machine_, PRICE);
-        bytes memory sig = _signOpenPack(machine_, who, PackMachine(machine_).openNonce(who));
+        bytes memory sig = _signOpenPack(
+            machine_,
+            who,
+            PackMachine(machine_).openNonce(who)
+        );
         vm.prank(who);
-        PackMachine(machine_).openPack(who, sig, false);
+        PackMachine(machine_).openPack(who, sig);
     }
 
     function _fulfillRequest(uint256 reqId, uint256 numWords) internal {
@@ -295,12 +320,20 @@ contract PackMachineCutoffTest is Test {
         usdc.mint(user, PRICE);
         vm.prank(user);
         usdc.approve(address(packMachine), PRICE);
-        bytes memory sig = _signOpenPack(address(packMachine), user, packMachine.openNonce(user));
+        bytes memory sig = _signOpenPack(
+            address(packMachine),
+            user,
+            packMachine.openNonce(user)
+        );
         vm.prank(user);
         vm.expectRevert(
-            abi.encodeWithSelector(PackMachine.PackMachine__CutOff.selector, 5, 10)
+            abi.encodeWithSelector(
+                PackMachine.PackMachine__CutOff.selector,
+                5,
+                10
+            )
         );
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
     }
 
     function test_OpenPack_SucceedsWhenCutOffDisabled() public {
@@ -338,12 +371,20 @@ contract PackMachineCutoffTest is Test {
         usdc.mint(user, PRICE);
         vm.prank(user);
         usdc.approve(address(packMachine), PRICE);
-        bytes memory sig = _signOpenPack(address(packMachine), user, packMachine.openNonce(user));
+        bytes memory sig = _signOpenPack(
+            address(packMachine),
+            user,
+            packMachine.openNonce(user)
+        );
         vm.prank(user);
         vm.expectRevert(
-            abi.encodeWithSelector(PackMachine.PackMachine__CutOff.selector, 5, 10)
+            abi.encodeWithSelector(
+                PackMachine.PackMachine__CutOff.selector,
+                5,
+                10
+            )
         );
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
     }
 
     // =========================================================================
@@ -367,7 +408,10 @@ contract PackMachineCutoffTest is Test {
     function test_SetRetentionThreshold_RevertsIfOver10000() public {
         vm.prank(operator);
         vm.expectRevert(
-            abi.encodeWithSelector(PackMachine.PackMachine__InvalidBps.selector, uint16(10001))
+            abi.encodeWithSelector(
+                PackMachine.PackMachine__InvalidBps.selector,
+                uint16(10001)
+            )
         );
         packMachine.setRetentionThreshold(10001);
     }
@@ -396,7 +440,10 @@ contract PackMachineCutoffTest is Test {
         tiers[0] = 0;
         vm.prank(unauthorized);
         vm.expectRevert(
-            abi.encodeWithSelector(PackMachine.PackMachine__OnlyBuybackPool.selector, unauthorized)
+            abi.encodeWithSelector(
+                PackMachine.PackMachine__OnlyBuybackPool.selector,
+                unauthorized
+            )
         );
         packMachine.depositFromPool(tokenIds, tiers, unauthorized);
     }
@@ -450,12 +497,20 @@ contract PackMachineCutoffTest is Test {
         usdc.mint(user, PRICE);
         vm.prank(user);
         usdc.approve(address(packMachine), PRICE);
-        bytes memory sig = _signOpenPack(address(packMachine), user, packMachine.openNonce(user));
+        bytes memory sig = _signOpenPack(
+            address(packMachine),
+            user,
+            packMachine.openNonce(user)
+        );
         vm.prank(user);
         vm.expectRevert(
-            abi.encodeWithSelector(PackMachine.PackMachine__CutOff.selector, 4, 5)
+            abi.encodeWithSelector(
+                PackMachine.PackMachine__CutOff.selector,
+                4,
+                5
+            )
         );
-        packMachine.openPack(user, sig, false);
+        packMachine.openPack(user, sig);
     }
 
     function test_CutOff_With50PercentThreshold() public {
