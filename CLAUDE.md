@@ -81,7 +81,7 @@ When writing new consumer contracts:
 - **EIP-712 play signatures**: `PACK_OPERATOR_ROLE` signs `OpenPack(address user, uint256 nonce)` off-chain; per-user nonces prevent replay; checked on every `openPack` / `openPackWithPermit2` call
 - **Swap-and-pop prize pool**: random card selection in `fulfillRandomness` uses `index = word % poolLen`, swaps selected element with the last, then pops — O(1) removal without preserving order
 - **Effective pool size**: `effectivePrizePoolSize` is decremented on VRF request (not fulfillment) to prevent over-committing cards; `resetEffectivePrizePoolSize()` is an admin escape hatch for stuck requests
-- **Tiered buyback rates**: `BuybackPool` stores per-tier (0–4) buyback rate overrides in basis points for both standard and protected modes; a zero value falls through to the global `defaultBuybackBps` / `protectedBuybackBps`
+- **Per-machine buyback rates**: `BuybackPool` stores a per-PackMachine buyback rate override in basis points via `packMachineBuybackBps` mapping (set by `PACK_OPERATOR_ROLE` via `setPackMachineBuybackBps`); a zero value falls through to the global `defaultBuybackBps` (default 80%); this allows different packages to have different rates (e.g. standard rips = 80%, premium rips = 90%)
 - **Auto-redeposit on buyback**: after a buyback, `BuybackPool` approves the source PackMachine and calls `depositFromPool(tokenId, tier)` to return the NFT to the prize pool in O(1); if the source machine is deregistered, the NFT is held in the pool for admin rescue via `rescueNFT`
 
 ## Project Layout
