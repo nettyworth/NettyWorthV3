@@ -90,6 +90,9 @@ contract PackMachine is
         uint16 buybackAllocationBps;
         /// @dev BuybackPool contract address.
         address buybackPool;
+        // === Authorized Pool Depositors ===
+        /// @dev Addresses permitted to call depositFromPool (BuybackPool + AssetLendingPool).
+        mapping(address depositor => bool) authorizedDepositors;
     }
 
     struct PendingOpen {
@@ -134,6 +137,7 @@ contract PackMachine is
     event BuybackAllocationUpdated(uint16 oldBps, uint16 newBps);
     event BuybackPoolUpdated(address indexed oldPool, address indexed newPool);
     event RetentionThresholdUpdated(uint16 oldBps, uint16 newBps);
+    event AuthorizedDepositorUpdated(address indexed depositor, bool authorized);
 
     // =========================================================================
     // Errors
@@ -152,7 +156,7 @@ contract PackMachine is
     error PackMachine__TokenNotInPool(uint256 tokenId);
     error PackMachine__ArrayLengthMismatch();
     error PackMachine__InvalidBps(uint16 given);
-    error PackMachine__OnlyBuybackPool(address caller);
+    error PackMachine__UnauthorizedDepositor(address caller);
     error PackMachine__CutOff(uint256 retained, uint256 total);
 
     // =========================================================================
@@ -403,18 +407,19 @@ contract PackMachine is
     }
 
     /// @notice Re-deposit NFTs from BuybackPool back into tier pools.
-    /// @dev Only callable by the configured BuybackPool address. Does NOT update peak pool sizes.
+    /// @dev Only callable by authorized pool depositors (BuybackPool or AssetLendingPool).
+    ///      Does NOT update peak pool sizes.
     /// @param tokenIds Array of token IDs to deposit (max 50).
     /// @param tiers Rarity tier for each token (0=Base, 1=Common, 2=Uncommon, 3=Rare, 4=Ultra).
-    /// @param tokensOwner Current owner of the tokens (the BuybackPool, must have approved this contract).
+    /// @param tokensOwner Current owner of the tokens (must have approved this contract).
     function depositFromPool(
         uint256[] calldata tokenIds,
         uint8[] calldata tiers,
         address tokensOwner
     ) external {
         PackMachineStorage storage $ = _getStorage();
-        if (msg.sender != $.buybackPool)
-            revert PackMachine__OnlyBuybackPool(msg.sender);
+        if (msg.sender != $.buybackPool && !$.authorizedDepositors[msg.sender])
+            revert PackMachine__UnauthorizedDepositor(msg.sender);
 
         uint256 count = tokenIds.length;
         if (count != tiers.length) revert PackMachine__ArrayLengthMismatch();
@@ -510,6 +515,16 @@ contract PackMachine is
         PackMachineStorage storage $ = _getStorage();
         emit BuybackPoolUpdated($.buybackPool, pool);
         $.buybackPool = pool;
+    }
+
+    /// @notice Authorize or revoke a pool contract's ability to call depositFromPool.
+    function setAuthorizedDepositor(
+        address depositor,
+        bool authorized
+    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
+        if (depositor == address(0)) revert PackMachine__ZeroAddress();
+        _getStorage().authorizedDepositors[depositor] = authorized;
+        emit AuthorizedDepositorUpdated(depositor, authorized);
     }
 
     /// @notice Set the percentage of pricePerPack routed to BuybackPool.

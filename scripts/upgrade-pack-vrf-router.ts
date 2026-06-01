@@ -5,12 +5,6 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// ERC-2771 trusted forwarder baked into the implementation bytecode at construction.
-// Must match the forwarder used on the current proxy's implementation to avoid
-// silently breaking meta-tx for all users.
-const TRUSTED_FORWARDER = (process.env.TRUSTED_FORWARDER ??
-  "0x0000000000000000000000000000000000000000") as `0x${string}`;
-
 // Optional raw reinitializer calldata for future reinitializers
 const REINITIALIZER_DATA = (process.env.UPGRADE_REINITIALIZER_DATA ??
   "0x") as `0x${string}`;
@@ -32,14 +26,13 @@ async function confirmUpgrade(
 ): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   console.log("\n=== Upgrade Summary ===");
-  console.log(`Network:            ${networkName}`);
-  console.log(`Chain ID:           ${chainId}`);
-  console.log(`Upgrader:           ${upgrader}`);
-  console.log(`Proxy:              ${proxy}`);
-  console.log(`Current Impl:       ${oldImpl}`);
-  console.log(`New Impl:           ${newImpl}`);
-  console.log(`Trusted Forwarder:  ${TRUSTED_FORWARDER}`);
-  console.log(`Upgrade Calldata:   ${callData === "0x" ? "(none)" : callData}`);
+  console.log(`Network:          ${networkName}`);
+  console.log(`Chain ID:         ${chainId}`);
+  console.log(`Upgrader:         ${upgrader}`);
+  console.log(`Proxy:            ${proxy}`);
+  console.log(`Current Impl:     ${oldImpl}`);
+  console.log(`New Impl:         ${newImpl}`);
+  console.log(`Upgrade Calldata: ${callData === "0x" ? "(none)" : callData}`);
   console.log("=======================\n");
   const answer = await rl.question("Proceed with upgrade? (yes/no): ");
   rl.close();
@@ -60,12 +53,12 @@ const deploymentsDir = join(
 );
 const deploymentPath = join(deploymentsDir, `${connection.networkName}.json`);
 
-// Load deployment JSON, falling back to ASSET_NFT_PROXY env var for local networks
+// Load deployment JSON, falling back to PACK_VRF_ROUTER_PROXY env var for local networks
 let deploymentData: Record<string, unknown> = {};
 let proxyAddress: `0x${string}`;
 
-if (process.env.ASSET_NFT_PROXY) {
-  proxyAddress = getAddress(process.env.ASSET_NFT_PROXY) as `0x${string}`;
+if (process.env.PACK_VRF_ROUTER_PROXY) {
+  proxyAddress = getAddress(process.env.PACK_VRF_ROUTER_PROXY) as `0x${string}`;
   try {
     deploymentData = JSON.parse(await readFile(deploymentPath, "utf8"));
   } catch {
@@ -77,16 +70,16 @@ if (process.env.ASSET_NFT_PROXY) {
   } catch {
     console.error(`No deployment file found at ${deploymentPath}`);
     console.error(
-      "Deploy first using deploy-asset-nft.ts, or set ASSET_NFT_PROXY to specify the proxy address.",
+      "Deploy first using deploy-pack-machine.ts, or set PACK_VRF_ROUTER_PROXY to specify the proxy address.",
     );
     process.exit(1);
   }
-  const entry = deploymentData["AssetNFT"] as
+  const entry = deploymentData["PackVRFRouter"] as
     | Record<string, unknown>
     | undefined;
   if (!entry?.proxy) {
-    console.error("AssetNFT proxy address not found in deployment file.");
-    console.error("Set ASSET_NFT_PROXY to override.");
+    console.error("PackVRFRouter proxy address not found in deployment file.");
+    console.error("Set PACK_VRF_ROUTER_PROXY to override.");
     process.exit(1);
   }
   proxyAddress = getAddress(entry.proxy as string) as `0x${string}`;
@@ -105,11 +98,11 @@ if (!implSlotValue || implSlotValue === `0x${"0".repeat(64)}`) {
 }
 const currentImplAddress = getAddress(`0x${implSlotValue.slice(26)}`);
 
-const nft = await viem.getContractAt("AssetNFT", proxyAddress);
+const router = await viem.getContractAt("PackVRFRouter", proxyAddress);
 let hasUpgraderRole = false;
 
 try {
-  const pmAddress = await nft.read.getPermissionManager();
+  const pmAddress = await router.read.getPermissionManager();
   const pm = await viem.getContractAt("PermissionManager", pmAddress);
   hasUpgraderRole = await pm.read.hasProtocolRole([
     UPGRADER_ROLE,
@@ -131,8 +124,8 @@ if (!hasUpgraderRole) {
 
 const upgradeCalldata: `0x${string}` = REINITIALIZER_DATA;
 
-console.log("\n[1/3] Deploying new AssetNFT implementation...");
-const newImpl = await viem.deployContract("AssetNFT", [TRUSTED_FORWARDER]);
+console.log("\n[1/3] Deploying new PackVRFRouter implementation...");
+const newImpl = await viem.deployContract("PackVRFRouter");
 console.log(`  New implementation: ${newImpl.address}`);
 
 if (connection.networkConfig.type === "http") {
@@ -152,7 +145,7 @@ if (connection.networkConfig.type === "http") {
 }
 
 console.log("[2/3] Calling upgradeToAndCall on proxy...");
-const txHash = await nft.write.upgradeToAndCall(
+const txHash = await router.write.upgradeToAndCall(
   [newImpl.address, upgradeCalldata],
   { account: upgraderClient.account },
 );
@@ -173,25 +166,23 @@ if (postImplAddress.toLowerCase() !== newImpl.address.toLowerCase()) {
   process.exit(1);
 }
 
-const actualName = await nft.read.name();
-const actualSymbol = await nft.read.symbol();
-const actualContractURI = await nft.read.contractURI();
+const actualVrfCoordinator = await router.read.vrfCoordinator();
+const actualSubscriptionId = await router.read.subscriptionId();
 
 console.log("\n=== Upgrade Successful ===");
-console.log(`Network:      ${connection.networkName} (chainId: ${chainId})`);
-console.log(`Proxy:        ${proxyAddress}`);
-console.log(`Old Impl:     ${currentImplAddress}`);
-console.log(`New Impl:     ${newImpl.address}`);
-console.log(`Name:         ${actualName}`);
-console.log(`Symbol:       ${actualSymbol}`);
-console.log(`Contract URI: ${actualContractURI}`);
+console.log(`Network:        ${connection.networkName} (chainId: ${chainId})`);
+console.log(`Proxy:          ${proxyAddress}`);
+console.log(`Old Impl:       ${currentImplAddress}`);
+console.log(`New Impl:       ${newImpl.address}`);
+console.log(`VRF Coordinator: ${actualVrfCoordinator}`);
+console.log(`Subscription ID: ${actualSubscriptionId}`);
 console.log("==========================\n");
 
 if (connection.networkConfig.type === "http") {
-  const assetEntry =
-    (deploymentData["AssetNFT"] as Record<string, unknown>) ?? {};
+  const routerEntry =
+    (deploymentData["PackVRFRouter"] as Record<string, unknown>) ?? {};
   const upgradeHistory = (
-    (assetEntry.upgradeHistory as unknown[]) ?? []
+    (routerEntry.upgradeHistory as unknown[]) ?? []
   ).concat({
     previousImplementation: currentImplAddress,
     newImplementation: newImpl.address,
@@ -200,8 +191,8 @@ if (connection.networkConfig.type === "http") {
     upgradeCalldata,
   });
 
-  deploymentData["AssetNFT"] = {
-    ...assetEntry,
+  deploymentData["PackVRFRouter"] = {
+    ...routerEntry,
     implementation: newImpl.address,
     upgradedAt: new Date().toISOString(),
     upgradeHistory,
