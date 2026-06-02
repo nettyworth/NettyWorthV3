@@ -22,7 +22,7 @@
     "vrfCoordinator": "0x9DdfaCa8183c41ad55329BdeeD9F6A8d53168B1B",
     "subscriptionId": "101211738899578841133020544028266753490633834266748596589815508937050143498738",
     "keyHash": "0x787d74caea10b2b357790d5b5247c2f63d1d91572a9846f780606e4d953677ae",
-    "callbackGasLimit": 2500000,
+    "callbackGasLimit": 250000,
     "requestConfirmations": 3,
     "deployedAt": "2026-05-31T10:18:49.607Z",
     "upgradedAt": "2026-06-01T04:25:26.570Z",
@@ -34,7 +34,8 @@
         "txHash": "0x929a2214907b875cadfb901c5bfb0bdadafd5d3ac6d9cdfb7da9646e18c40a8e",
         "upgradeCalldata": "0x"
       }
-    ]
+    ],
+    "callbackGasLimitUpdatedAt": "2026-06-01T16:33:12.957Z"
   },
   "PackMachineImplementation": {
     "implementation": "0x4c093a7a62113af0201bb9e54e332e460be1c23f",

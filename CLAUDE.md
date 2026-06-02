@@ -42,7 +42,7 @@ Config: `.solhint.json` (extends `solhint:recommended`), `.prettierrc.json` (plu
 All V3 contracts must implement these patterns consistently:
 
 - **Upgradeability**: inherit `UUPSUpgradeable` (EIP-1822) — logic upgrades without changing proxy address; upgrade authorized by `UPGRADER_ROLE` (or `DEFAULT_ADMIN_ROLE` on PermissionManager itself). Exception: `PackMachine` uses EIP-1167 minimal clones instead of UUPS — it is not upgradeable by design.
-- **Access control**: use `PermissionManager` + `PermissionConsumer` — do NOT use per-contract `AccessControl` or `Ownable`; see _Access Control Architecture_ below
+- **Access control**: use `PermissionManager` + `PermissionConsumer` — do NOT use per-contract `AccessControl` or `Ownable`; see _Access Control Architecture_ below. Exception: `AssetLendingPool` uses `Ownable2StepUpgradeable` (single admin) and interacts with `PermissionManager` only via an external `STATE_MANAGER_ROLE` grant.
 - **Reentrancy protection**: apply `nonReentrant` (from `ReentrancyGuard`, non-upgradeable variant) on state-changing functions that move assets or funds
 - **Initializer pattern**: replace `constructor()` with `initialize()` protected by `initializer`; constructor contains only `_disableInitializers()`
 - **Namespaced storage (ERC-7201)**: all mutable state in a `@custom:storage-location erc7201:nettyworth.storage.<ContractName>` struct with a deterministic slot — prevents collision across upgrades
@@ -59,6 +59,7 @@ The protocol uses a hub-and-spoke permission model:
 5. **PackVRFRouter** (spoke) — UUPS-upgradeable; inherits `PermissionConsumer`; gates `requestRandomWords` and admin setters.
 6. **PackMachine** (clone spoke) — EIP-1167 clone; does not store the manager address itself; delegates role checks to the factory via `IPackMachineFactory.hasProtocolRole(role, caller)`.
 7. **BuybackPool** (spoke) — UUPS-upgradeable singleton; inherits `PermissionConsumer`; gates admin functions (`setDefaultBuybackBps`, `registerPackMachine`, etc.) with `PACK_OPERATOR_ROLE`; gates emergency operations with `DEFAULT_ADMIN_ROLE`; token registration authorized via internal `registeredPackMachines` mapping (not a role).
+8. **AssetLendingPool** (independent admin) — UUPS-upgradeable singleton; uses `Ownable2StepUpgradeable` (single admin), **NOT** `PermissionConsumer` — the one protocol contract outside the hub-and-spoke model. Its only tie to PermissionManager is external: the deployed pool address must be granted `STATE_MANAGER_ROLE` so it can call `assetNFT.batchSetAssetState()` to move collateral between `Held` and `Loaned`.
 
 When writing new consumer contracts:
 
@@ -83,11 +84,15 @@ When writing new consumer contracts:
 - **Effective pool size**: `effectivePrizePoolSize` is decremented on VRF request (not fulfillment) to prevent over-committing cards; `resetEffectivePrizePoolSize()` is an admin escape hatch for stuck requests
 - **Per-machine buyback rates**: `BuybackPool` stores a per-PackMachine buyback rate override in basis points via `packMachineBuybackBps` mapping (set by `PACK_OPERATOR_ROLE` via `setPackMachineBuybackBps`); a zero value falls through to the global `defaultBuybackBps` (default 80%); this allows different packages to have different rates (e.g. standard rips = 80%, premium rips = 90%)
 - **Auto-redeposit on buyback**: after a buyback, `BuybackPool` approves the source PackMachine and calls `depositFromPool(tokenId, tier)` to return the NFT to the prize pool in O(1); if the source machine is deregistered, the NFT is held in the pool for admin rescue via `rescueNFT`
+- **Asset-collateralized lending**: `AssetLendingPool` accepts AssetNFT as collateral; max loan = `LTV × Σ(appraisal values)`; interest fixed upfront (`principal × aprBps × duration / (365d × BPS)`); bundle loans up to 50 NFTs with `tokenIdToActiveLoan` double-collateralization guard; includes atomic marketplace-financing path (`financeMarketplacePurchase`)
+- **3-phase default lifecycle**: defaulted loans pass through Acquisition (owner recycles asset into a PackMachine via `depositFromPool`) → public Auction (anyone buys at outstanding value) → perpetual FixedListing; phase computed from timestamps in `getDefaultPhase`; default accounting debits `totalDeposited` at default and re-credits on recovery
+- **Synthetix reward-per-share lender interest**: external lender capital earns a configurable share (`lenderShareBps`) of loan interest via `accInterestPerShare` accumulator + per-lender `lenderRewardDebt`; remainder accrues to protocol; lender withdraw and claim are intentionally unpaused so lenders can always exit
+- **Split config/logic via abstract base**: `AssetLendingPoolConfig` owns the ERC-7201 storage struct + all admin config setters; `AssetLendingPool` inherits it and contains only business logic — keeps the storage layout in one auditable place
 
 ## Project Layout
 
 - `contracts/` — Solidity source files
-  - `contracts/interfaces/` — Interface definitions (`IPermissionManager`, `ITransferValidator`, `IPackMachine`, `IPackMachineFactory`, `IPackVRFRouter`, `IBuybackPool`, `ISignatureTransfer`)
+  - `contracts/interfaces/` — Interface definitions (`IPermissionManager`, `ITransferValidator`, `IPackMachine`, `IPackMachineFactory`, `IPackVRFRouter`, `IBuybackPool`, `ISignatureTransfer`, `IAssetLendingPool`, `IAssetNFT`)
   - `contracts/lib/` — Libraries (`Roles.sol` — protocol role constants)
   - `contracts/test-helpers/` — Mocks for testing (`MockPermit2`, `MockVRFCoordinatorV2Plus`, etc.)
   - `contracts/test/` — Foundry-style `.t.sol` test files
