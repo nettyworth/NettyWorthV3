@@ -48,6 +48,9 @@ interface IPackMachine {
     /// @notice Update weighted probability table. Weights must sum to 10000.
     function setTierWeights(uint16[5] calldata weights) external;
 
+    /// @notice Authorize or revoke a pool contract's ability to call depositFromPool.
+    function setAuthorizedDepositor(address depositor, bool authorized) external;
+
     function pricePerPack() external view returns (uint128);
     function cardsPerPack() external view returns (uint8);
     function effectivePrizePoolSize() external view returns (uint256);

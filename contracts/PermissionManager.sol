@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
-import {AccessControlEnumerableUpgradeable} from
-    "@openzeppelin/contracts-upgradeable/access/extensions/AccessControlEnumerableUpgradeable.sol";
+import {AccessControlEnumerableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/extensions/AccessControlEnumerableUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {IPermissionManager} from "./interfaces/IPermissionManager.sol";
 import {Roles} from "./lib/Roles.sol";
@@ -14,7 +13,11 @@ import {Roles} from "./lib/Roles.sol";
 /// @dev UUPS upgradeable. All role constants are re-exported here as public constants for off-chain readability.
 ///      Role admin hierarchy uses default OpenZeppelin behaviour: DEFAULT_ADMIN_ROLE administers all roles.
 /// @custom:security-contact security@nettyworth.io
-contract PermissionManager is AccessControlEnumerableUpgradeable, UUPSUpgradeable, IPermissionManager {
+contract PermissionManager is
+    AccessControlEnumerableUpgradeable,
+    UUPSUpgradeable,
+    IPermissionManager
+{
     // =========================================================================
     // Role constants (re-exported from Roles library for external readability)
     // =========================================================================
@@ -66,7 +69,10 @@ contract PermissionManager is AccessControlEnumerableUpgradeable, UUPSUpgradeabl
     // =========================================================================
 
     /// @inheritdoc IPermissionManager
-    function hasProtocolRole(bytes32 role, address account) external view returns (bool) {
+    function hasProtocolRole(
+        bytes32 role,
+        address account
+    ) external view returns (bool) {
         return hasRole(role, account);
     }
 
@@ -74,5 +80,7 @@ contract PermissionManager is AccessControlEnumerableUpgradeable, UUPSUpgradeabl
     // UUPS upgrade authorization
     // =========================================================================
 
-    function _authorizeUpgrade(address newImplementation) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
 }

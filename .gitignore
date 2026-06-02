@@ -30,3 +30,4 @@
 # Snapshot cheatcodes output
 /snapshots
 .claude
+/asset-frontend/

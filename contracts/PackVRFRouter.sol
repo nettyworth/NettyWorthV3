@@ -6,7 +6,9 @@ import {PermissionConsumer} from "./PermissionConsumer.sol";
 import {Roles} from "./lib/Roles.sol";
 import {IPackMachine} from "./interfaces/IPackMachine.sol";
 import {IVRFCoordinatorV2Plus} from "@chainlink/contracts/src/v0.8/vrf/dev/interfaces/IVRFCoordinatorV2Plus.sol";
+import {IVRFMigratableConsumerV2Plus} from "@chainlink/contracts/src/v0.8/vrf/dev/interfaces/IVRFMigratableConsumerV2Plus.sol";
 import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
+import {IPermissionManager} from "./interfaces/IPermissionManager.sol";
 
 /// @title PackVRFRouter
 /// @author NettyWorth
@@ -18,7 +20,11 @@ import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/V
 ///      compatible with UUPS upgradeability — VRFConsumerBaseV2Plus inherits ConfirmedOwner which uses
 ///      constructor-based initialization incompatible with the proxy pattern.
 /// @custom:security-contact security@nettyworth.io
-contract PackVRFRouter is UUPSUpgradeable, PermissionConsumer {
+contract PackVRFRouter is
+    UUPSUpgradeable,
+    PermissionConsumer,
+    IVRFMigratableConsumerV2Plus
+{
     // =========================================================================
     // Storage (ERC-7201)
     // =========================================================================
@@ -79,9 +85,11 @@ contract PackVRFRouter is UUPSUpgradeable, PermissionConsumer {
     // =========================================================================
 
     error PackVRFRouter__OnlyCoordinator(address caller);
+    error PackVRFRouter__OnlyCoordinatorOrAdmin(address caller);
     error PackVRFRouter__UnauthorizedPackMachine(address caller);
     error PackVRFRouter__UnknownRequest(uint256 requestId);
     error PackVRFRouter__ZeroAddress();
+    error PackVRFRouter__InvalidConfirmations(uint16 confirmations);
 
     // =========================================================================
     // Constructor & initializer
@@ -198,13 +206,24 @@ contract PackVRFRouter is UUPSUpgradeable, PermissionConsumer {
     }
 
     /// @notice Update the Chainlink VRF coordinator address (e.g. after Chainlink migration).
+    /// @dev Admin-only convenience wrapper around setCoordinator.
     function setVRFCoordinator(
         address newCoordinator
     ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
+        _setCoordinator(newCoordinator);
+    }
+
+    /// @inheritdoc IVRFMigratableConsumerV2Plus
+    /// @notice Called by the Chainlink coordinator during automated subscription migration,
+    ///         or by a DEFAULT_ADMIN_ROLE holder for manual migration.
+    function setCoordinator(address newCoordinator) external override {
         if (newCoordinator == address(0)) revert PackVRFRouter__ZeroAddress();
         PackVRFRouterStorage storage $ = _getStorage();
-        emit VRFCoordinatorUpdated(address($.vrfCoordinator), newCoordinator);
-        $.vrfCoordinator = IVRFCoordinatorV2Plus(newCoordinator);
+        bool isCoordinator = msg.sender == address($.vrfCoordinator);
+        if (!isCoordinator && !_hasAdminRole(msg.sender)) {
+            revert PackVRFRouter__OnlyCoordinatorOrAdmin(msg.sender);
+        }
+        _setCoordinator(newCoordinator);
     }
 
     function setSubscriptionId(
@@ -219,15 +238,26 @@ contract PackVRFRouter is UUPSUpgradeable, PermissionConsumer {
         _getStorage().keyHash = keyHash_;
     }
 
+    /// @notice Set the gas limit forwarded to PackMachine.fulfillRandomness.
+    /// @dev Must cover router overhead PLUS the full PackMachine fulfillment loop over
+    ///      cardsPerPack random words. Undersizing causes the callback to revert while
+    ///      the subscription is still charged for VRF work already performed.
     function setCallbackGasLimit(
         uint32 limit
     ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
         _getStorage().callbackGasLimit = limit;
     }
 
+    /// @notice Set the number of block confirmations before VRF fulfillment.
+    /// @dev Coordinator accepts [minimumRequestBlockConfirmations, 200]; the per-network
+    ///      minimum is enforced at request time. This function guards the absolute bounds
+    ///      (nonzero and ≤ 200) to catch obvious misconfigurations early.
     function setRequestConfirmations(
         uint16 confirmations
     ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
+        if (confirmations == 0 || confirmations > 200) {
+            revert PackVRFRouter__InvalidConfirmations(confirmations);
+        }
         _getStorage().requestConfirmations = confirmations;
     }
 
@@ -235,6 +265,28 @@ contract PackVRFRouter is UUPSUpgradeable, PermissionConsumer {
         bool nativePayment_
     ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
         _getStorage().nativePayment = nativePayment_;
+    }
+
+    // =========================================================================
+    // Internal helpers
+    // =========================================================================
+
+    /// @dev Shared coordinator update logic used by setVRFCoordinator and setCoordinator.
+    function _setCoordinator(address newCoordinator) private {
+        if (newCoordinator == address(0)) revert PackVRFRouter__ZeroAddress();
+        PackVRFRouterStorage storage $ = _getStorage();
+        emit VRFCoordinatorUpdated(address($.vrfCoordinator), newCoordinator);
+        $.vrfCoordinator = IVRFCoordinatorV2Plus(newCoordinator);
+        emit CoordinatorSet(newCoordinator);
+    }
+
+    /// @dev Returns true if `account` holds DEFAULT_ADMIN_ROLE on the PermissionManager.
+    function _hasAdminRole(address account) private view returns (bool) {
+        return
+            IPermissionManager(getPermissionManager()).hasProtocolRole(
+                Roles.DEFAULT_ADMIN_ROLE,
+                account
+            );
     }
 
     // =========================================================================

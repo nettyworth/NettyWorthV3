@@ -5,6 +5,8 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const TRUSTED_FORWARDER = (process.env.TRUSTED_FORWARDER ??
+  "0x0000000000000000000000000000000000000000") as `0x${string}`;
 const NFT_NAME = process.env.ASSET_NFT_NAME ?? "NettyWorth Assets";
 const NFT_SYMBOL = process.env.ASSET_NFT_SYMBOL ?? "NWA";
 const CONTRACT_URI =
@@ -24,6 +26,7 @@ async function confirm(
   console.log(`Chain ID:           ${chainId}`);
   console.log(`Deployer:           ${deployer}`);
   console.log(`PermissionManager:  ${permissionManagerProxy}`);
+  console.log(`Trusted Forwarder:  ${TRUSTED_FORWARDER}`);
   console.log(`NFT Name:           ${NFT_NAME}`);
   console.log(`NFT Symbol:         ${NFT_SYMBOL}`);
   console.log(`Contract URI:       ${CONTRACT_URI}`);
@@ -92,7 +95,7 @@ if (connection.networkConfig.type === "http") {
 }
 
 console.log("\n[1/4] Deploying AssetNFT implementation...");
-const impl = await viem.deployContract("AssetNFT");
+const impl = await viem.deployContract("AssetNFT", [TRUSTED_FORWARDER]);
 console.log(`  Implementation: ${impl.address}`);
 
 console.log("[2/4] Encoding initialize calldata...");
@@ -175,6 +178,7 @@ if (connection.networkConfig.type === "http") {
     proxy: proxy.address,
     implementation: impl.address,
     permissionManager: permissionManagerProxy,
+    trustedForwarder: TRUSTED_FORWARDER,
     name: actualName,
     symbol: actualSymbol,
     contractURI: actualContractURI,

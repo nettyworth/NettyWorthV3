@@ -441,7 +441,7 @@ contract PackMachineCutoffTest is Test {
         vm.prank(unauthorized);
         vm.expectRevert(
             abi.encodeWithSelector(
-                PackMachine.PackMachine__OnlyBuybackPool.selector,
+                PackMachine.PackMachine__UnauthorizedDepositor.selector,
                 unauthorized
             )
         );

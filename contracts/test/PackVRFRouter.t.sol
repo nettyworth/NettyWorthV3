@@ -393,6 +393,80 @@ contract PackVRFRouterTest is Test {
     }
 
     // =========================================================================
+    // setCoordinator (IVRFMigratableConsumerV2Plus)
+    // =========================================================================
+
+    function test_SetCoordinator_CoordinatorCanCall() public {
+        address newCoord = makeAddr("newCoord");
+        vm.expectEmit(true, true, false, false, address(router));
+        emit VRFCoordinatorUpdated(address(coordinator), newCoord);
+        vm.expectEmit(true, false, false, false, address(router));
+        emit CoordinatorSet(newCoord);
+        vm.prank(address(coordinator));
+        router.setCoordinator(newCoord);
+        assertEq(router.vrfCoordinator(), newCoord);
+    }
+
+    function test_SetCoordinator_AdminCanCall() public {
+        address newCoord = makeAddr("newCoord");
+        vm.expectEmit(true, true, false, false, address(router));
+        emit VRFCoordinatorUpdated(address(coordinator), newCoord);
+        vm.expectEmit(true, false, false, false, address(router));
+        emit CoordinatorSet(newCoord);
+        vm.prank(admin);
+        router.setCoordinator(newCoord);
+        assertEq(router.vrfCoordinator(), newCoord);
+    }
+
+    function test_SetCoordinator_UnauthorizedReverts() public {
+        vm.prank(unauthorized);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                PackVRFRouter.PackVRFRouter__OnlyCoordinatorOrAdmin.selector,
+                unauthorized
+            )
+        );
+        router.setCoordinator(makeAddr("newCoord"));
+    }
+
+    function test_SetCoordinator_ZeroAddressReverts() public {
+        vm.prank(admin);
+        vm.expectRevert(PackVRFRouter.PackVRFRouter__ZeroAddress.selector);
+        router.setCoordinator(address(0));
+    }
+
+    // =========================================================================
+    // setRequestConfirmations bounds
+    // =========================================================================
+
+    function test_SetRequestConfirmations_RevertsOnZero() public {
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                PackVRFRouter.PackVRFRouter__InvalidConfirmations.selector,
+                uint16(0)
+            )
+        );
+        router.setRequestConfirmations(0);
+    }
+
+    function test_SetRequestConfirmations_RevertsAboveMax() public {
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                PackVRFRouter.PackVRFRouter__InvalidConfirmations.selector,
+                uint16(201)
+            )
+        );
+        router.setRequestConfirmations(201);
+    }
+
+    function test_SetRequestConfirmations_MaxValueSucceeds() public {
+        vm.prank(admin);
+        router.setRequestConfirmations(200);
+    }
+
+    // =========================================================================
     // Event declarations
     // =========================================================================
 
@@ -410,4 +484,5 @@ contract PackVRFRouterTest is Test {
         address indexed oldCoordinator,
         address indexed newCoordinator
     );
+    event CoordinatorSet(address vrfCoordinator);
 }
