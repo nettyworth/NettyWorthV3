@@ -92,6 +92,11 @@ abstract contract AssetLendingPoolConfig is
         address packMachineFactory;
         address defaultPackMachine;
         mapping(uint256 tokenId => uint8) defaultTokenTiers;
+        // =====================================================================
+        // V3: Marketplace Integration
+        // =====================================================================
+        /// @dev Address of the authorized marketplace contract allowed to call settleLoanRepaymentOnSale.
+        address marketplace;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.AssetLendingPool")) - 1)) & ~bytes32(uint256(0xff))
@@ -410,6 +415,43 @@ abstract contract AssetLendingPoolConfig is
                 ++i;
             }
         }
+    }
+
+    // =========================================================================
+    // V3: Marketplace integration setters + views
+    // =========================================================================
+
+    /// @notice Set the authorized marketplace contract address.
+    /// @dev onlyOwner. After deploying the marketplace proxy, call this to enable
+    ///      the atomic loan-settlement path (settleLoanRepaymentOnSale).
+    /// @param marketplace_ Address of the NettyWorthMarketplace proxy.
+    function setMarketplace(address marketplace_) external override onlyOwner {
+        if (marketplace_ == address(0)) revert AssetLendingPool__ZeroAddress();
+        _getStorage().marketplace = marketplace_;
+        emit MarketplaceUpdated(marketplace_);
+    }
+
+    /// @inheritdoc IAssetLendingPool
+    function getMarketplace() external view override returns (address) {
+        return _getStorage().marketplace;
+    }
+
+    /// @inheritdoc IAssetLendingPool
+    function getActiveLoanId(uint256 tokenId) external view override returns (uint256) {
+        return _getStorage().tokenIdToActiveLoan[tokenId];
+    }
+
+    /// @inheritdoc IAssetLendingPool
+    function getLoanDebt(
+        uint256 tokenId
+    ) external view override returns (uint256 principal, uint256 interest, uint256 total) {
+        AssetLendingPoolStorage storage $ = _getStorage();
+        uint256 loanId = $.tokenIdToActiveLoan[tokenId];
+        if (loanId == 0) return (0, 0, 0);
+        Loan storage loan = $.loans[loanId];
+        principal = loan.principal;
+        interest = loan.interest;
+        total = principal + interest;
     }
 
     // =========================================================================

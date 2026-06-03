@@ -16,4 +16,5 @@ library Roles {
         "PACK_OPERATOR_ROLE"
     );
     bytes32 internal constant BUYBACK_POOL_ROLE = keccak256("BUYBACK_POOL_ROLE");
+    bytes32 internal constant MARKETPLACE_ROLE = keccak256("MARKETPLACE_ROLE");
 }

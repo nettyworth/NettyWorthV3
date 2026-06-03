@@ -94,6 +94,18 @@ contract AssetLendingPool is
     }
 
     // =========================================================================
+    // Modifiers
+    // =========================================================================
+
+    /// @dev Restricts a function to the authorized marketplace address only.
+    modifier onlyMarketplace() {
+        if (msg.sender != _getStorage().marketplace) {
+            revert AssetLendingPool__NotMarketplace();
+        }
+        _;
+    }
+
+    // =========================================================================
     // Borrower: borrow / borrowBundle
     // =========================================================================
 
@@ -183,6 +195,66 @@ contract AssetLendingPool is
         }
 
         emit LoanRepaid(loanId, borrower, principal, interest);
+    }
+
+    // =========================================================================
+    // Marketplace: atomic loan settlement on sale
+    // =========================================================================
+
+    /// @notice Atomically settle a loan from marketplace sale proceeds and release collateral to the buyer.
+    /// @dev Only callable by the authorized marketplace (set via setMarketplace). Mirrors repay()
+    ///      accounting exactly — totalBorrowed -=, activeLoanCount--, _distributeInterest —
+    ///      with three differences: (1) funds are pulled from `payer` (the marketplace, which already
+    ///      holds the buyer's gross payment); (2) collateral NFTs are delivered to `buyer`, not the
+    ///      borrower; (3) authorized by onlyMarketplace, not onlyBorrower.
+    ///      CEI: all state writes complete before external token transfers.
+    /// @param loanId Loan to settle.
+    /// @param payer  Address from which principal+interest is pulled (the marketplace contract).
+    /// @param buyer  Address that receives the released collateral NFT(s).
+    function settleLoanRepaymentOnSale(
+        uint256 loanId,
+        address payer,
+        address buyer
+    ) external override nonReentrant whenNotPaused onlyMarketplace {
+        if (buyer == address(0)) revert AssetLendingPool__ZeroAddress();
+        AssetLendingPoolStorage storage $ = _getStorage();
+        Loan storage loan = _requireActiveLoan($, loanId);
+
+        uint256 principal = loan.principal;
+        uint256 interest = loan.interest;
+        uint256[] memory tokenIds = loan.tokenIds;
+        address borrower = loan.borrower;
+
+        // ---- State writes (CEI) ----
+        loan.isPaid = true;
+        $.totalBorrowed -= principal;
+        $.activeLoanCount--;
+
+        for (uint256 i; i < tokenIds.length; ) {
+            $.tokenIdToActiveLoan[tokenIds[i]] = 0;
+            unchecked {
+                ++i;
+            }
+        }
+
+        // Distribute interest between lenders and protocol
+        _distributeInterest($, interest);
+
+        // ---- External interactions ----
+        // Pull total debt from the marketplace (which holds buyer funds and has approved the pool)
+        $.paymentToken.safeTransferFrom(payer, address(this), principal + interest);
+
+        // Release collateral: Loaned -> Held, then transfer each NFT to the buyer
+        _setAssetStateBatch($, tokenIds, IAssetNFT.AssetState.Held);
+        for (uint256 i; i < tokenIds.length; ) {
+            $.assetNFT.transferFrom(address(this), buyer, tokenIds[i]);
+            unchecked {
+                ++i;
+            }
+        }
+
+        emit LoanRepaid(loanId, borrower, principal, interest);
+        emit LoanSettledOnSale(loanId, borrower, buyer, principal + interest);
     }
 
     // =========================================================================
