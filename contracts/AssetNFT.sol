@@ -12,7 +12,11 @@ import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Pau
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ContextUpgradeable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ITransferValidator} from "./interfaces/ITransferValidator.sol";
+import {IFeeController} from "./interfaces/IFeeController.sol";
+import {IAssetLendingPool} from "./interfaces/IAssetLendingPool.sol";
 import {PermissionConsumer} from "./PermissionConsumer.sol";
 import {Roles} from "./lib/Roles.sol";
 
@@ -33,6 +37,8 @@ contract AssetNFT is
     UUPSUpgradeable,
     ReentrancyGuard
 {
+    using SafeERC20 for IERC20;
+
     // =========================================================================
     // State machine
     // =========================================================================
@@ -73,6 +79,17 @@ contract AssetNFT is
         mapping(address => bool) isBlacklisted;
         /// @dev External transfer validator contract (address(0) = disabled).
         address transferValidator;
+        // =====================================================================
+        // V3: Physical redemption / shipment fee config
+        // =====================================================================
+        /// @dev ERC20 payment token used to collect the redemption fee (e.g. USDC).
+        IERC20 paymentToken;
+        /// @dev Platform treasury that receives the redemption fee.
+        address treasury;
+        /// @dev FeeController that supplies the redemptionFeeBps and enabled flag.
+        address feeController;
+        /// @dev AssetLendingPool used to look up appraisal value for fee calculation.
+        address lendingPool;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.AssetNFT")) - 1)) & ~bytes32(uint256(0xff))
@@ -126,6 +143,21 @@ contract AssetNFT is
         address indexed newValidator
     );
 
+    /// @notice Emitted when a user initiates physical shipment of their asset.
+    event ShipmentInitiated(uint256 indexed tokenId, address indexed owner, uint256 fee);
+
+    /// @notice Emitted when the payment token for redemption fees is updated.
+    event PaymentTokenUpdated(address indexed oldToken, address indexed newToken);
+
+    /// @notice Emitted when the platform treasury address is updated.
+    event TreasuryUpdated(address indexed oldTreasury, address indexed newTreasury);
+
+    /// @notice Emitted when the FeeController address is updated.
+    event FeeControllerUpdated(address indexed oldController, address indexed newController);
+
+    /// @notice Emitted when the AssetLendingPool address is updated.
+    event LendingPoolUpdated(address indexed oldPool, address indexed newPool);
+
     // =========================================================================
     // Errors
     // =========================================================================
@@ -152,6 +184,10 @@ contract AssetNFT is
     error AssetNFT__TokenNotFound(uint256 tokenId);
 
     error AssetNFT__UserBlacklisted(address account);
+
+    error AssetNFT__NotTokenOwner(uint256 tokenId, address caller);
+
+    error AssetNFT__ShipmentConfigNotSet();
 
     // =========================================================================
     // Constructor & initializer
@@ -453,6 +489,103 @@ contract AssetNFT is
     /// @notice Returns the current transfer validator address.
     function getTransferValidator() external view returns (address) {
         return _getAssetNFTStorage().transferValidator;
+    }
+
+    // =========================================================================
+    // Physical redemption / shipment
+    // =========================================================================
+
+    /// @notice Pay the redemption fee and transition the caller's asset into physical shipment.
+    /// @dev Caller must own the token. Token must be in Held state (Loaned / Listed tokens are
+    ///      blocked by the state check). Fee = appraisalValue * redemptionFeeBps / BPS, pulled
+    ///      in paymentToken from the caller to the treasury. If appraisal value is 0 (not appraised),
+    ///      fee is 0 and the asset ships free. Requires feeController and lendingPool to be set.
+    /// @param tokenId AssetNFT token to ship.
+    function initiateShipment(
+        uint256 tokenId
+    ) external nonReentrant whenNotPaused {
+        if (!_exists(tokenId)) revert AssetNFT__TokenNotFound(tokenId);
+        address caller = _msgSender();
+        if (ownerOf(tokenId) != caller) revert AssetNFT__NotTokenOwner(tokenId, caller);
+
+        AssetNFTStorage storage $ = _getAssetNFTStorage();
+
+        // Validate current state is Held (transition check mirrors _isValidTransition)
+        AssetState current = $.assetStates[tokenId];
+        if (current != AssetState.Held) {
+            revert AssetNFT__InvalidStateTransition(tokenId, current, AssetState.InShipment);
+        }
+
+        if ($.feeController == address(0) || $.lendingPool == address(0)) {
+            revert AssetNFT__ShipmentConfigNotSet();
+        }
+
+        // Compute fee: base = appraisal value from lending pool; fee = 0 when appraisal is 0
+        uint256 appraisalValue = IAssetLendingPool($.lendingPool)
+            .getAppraisal(tokenId)
+            .value;
+        (uint256 fee, bool enabled) = IFeeController($.feeController).getRedemptionFee(
+            appraisalValue
+        );
+
+        if (enabled && fee > 0) {
+            if (address($.paymentToken) == address(0) || $.treasury == address(0)) {
+                revert AssetNFT__ShipmentConfigNotSet();
+            }
+            $.paymentToken.safeTransferFrom(caller, $.treasury, fee);
+        }
+
+        // Transition Held -> InShipment (internal write; no batchSetAssetState needed)
+        $.assetStates[tokenId] = AssetState.InShipment;
+        emit AssetStateChanged(tokenId, current, AssetState.InShipment);
+        emit ShipmentInitiated(tokenId, caller, fee);
+    }
+
+    // =========================================================================
+    // Shipment config setters (DEFAULT_ADMIN_ROLE)
+    // =========================================================================
+
+    /// @notice Set the ERC20 payment token used to collect redemption fees (e.g. USDC).
+    function setPaymentToken(
+        address token_
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
+        AssetNFTStorage storage $ = _getAssetNFTStorage();
+        address old = address($.paymentToken);
+        $.paymentToken = IERC20(token_);
+        emit PaymentTokenUpdated(old, token_);
+    }
+
+    /// @notice Set the platform treasury that receives the redemption fee.
+    function setTreasury(
+        address treasury_
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
+        if (treasury_ == address(0)) revert AssetNFT__ZeroAddress();
+        AssetNFTStorage storage $ = _getAssetNFTStorage();
+        address old = $.treasury;
+        $.treasury = treasury_;
+        emit TreasuryUpdated(old, treasury_);
+    }
+
+    /// @notice Set the FeeController that supplies the redemption fee rate.
+    function setFeeController(
+        address feeController_
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
+        if (feeController_ == address(0)) revert AssetNFT__ZeroAddress();
+        AssetNFTStorage storage $ = _getAssetNFTStorage();
+        address old = $.feeController;
+        $.feeController = feeController_;
+        emit FeeControllerUpdated(old, feeController_);
+    }
+
+    /// @notice Set the AssetLendingPool used to look up appraisal values for the redemption fee.
+    function setLendingPool(
+        address lendingPool_
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
+        if (lendingPool_ == address(0)) revert AssetNFT__ZeroAddress();
+        AssetNFTStorage storage $ = _getAssetNFTStorage();
+        address old = $.lendingPool;
+        $.lendingPool = lendingPool_;
+        emit LendingPoolUpdated(old, lendingPool_);
     }
 
     // =========================================================================

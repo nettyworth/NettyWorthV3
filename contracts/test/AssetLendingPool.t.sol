@@ -1132,6 +1132,34 @@ contract AssetLendingPoolTest is Test {
         pool.setLenderConfig(8000, true); // already set in initializeV2 but enable deposits
     }
 
+    /// @dev Mints `amount` USDC to `lender` and deposits it into the pool.
+    function _lenderDeposit(address lender, uint256 amount) internal {
+        usdc.mint(lender, amount);
+        vm.startPrank(lender);
+        usdc.approve(address(pool), amount);
+        pool.lenderDeposit(amount);
+        vm.stopPrank();
+    }
+
+    /// @dev Originates a loan for `borrower` and immediately repays it, realizing
+    ///      its fixed interest into the distribution accumulator. Returns the loan.
+    function _borrowAndRepay(
+        uint256 principal,
+        uint8 termId
+    ) internal returns (IAssetLendingPool.Loan memory loan) {
+        uint256 tokenId = _mintNFT(borrower);
+        _appraise(tokenId);
+        uint256 loanId = _borrow(borrower, tokenId, principal, termId);
+        loan = pool.getLoan(loanId);
+
+        uint256 repayAmount = loan.principal + loan.interest;
+        usdc.mint(borrower, repayAmount);
+        vm.startPrank(borrower);
+        usdc.approve(address(pool), repayAmount);
+        pool.repay(loanId);
+        vm.stopPrank();
+    }
+
     /// @dev Creates an active loan and warps past its expiry, then calls initiateDefault.
     function _createDefaultedLoan(
         uint256 principal
@@ -1383,6 +1411,147 @@ contract AssetLendingPoolTest is Test {
         );
         vm.prank(lender1);
         pool.claimLenderInterest();
+    }
+
+    // =========================================================================
+    // Lender: pro-rata distribution — requirement worked example
+    // =========================================================================
+
+    /// @dev Mirrors the requirement's 5-lender example exactly:
+    ///      Deposits A=50, B=100, C=250, D=600, E=1000 (total 2000); a 100 loan
+    ///      pays 20 interest; NettyWorth keeps 10% (lenderShareBps=9000) → 18 to
+    ///      lenders, split pro-rata: 0.45 / 0.90 / 2.25 / 5.40 / 9.00.
+    function test_LenderInterest_FiveLenderProRata_RequirementExample() public {
+        // 90% to lenders so the protocol fee on 20 interest is exactly 2.
+        vm.prank(admin);
+        pool.setLenderConfig(9000, true);
+
+        // Owner seed would otherwise co-fund loans and earn nothing (it isn't a
+        // lender); withdraw it so totalLenderDeposits == total pool capital and
+        // the shares match the requirement table exactly.
+        vm.prank(admin);
+        pool.withdraw(POOL_SEED);
+
+        address lA = makeAddr("lenderA");
+        address lB = makeAddr("lenderB");
+        address lC = makeAddr("lenderC");
+        address lD = makeAddr("lenderD");
+        address lE = makeAddr("lenderE");
+
+        _lenderDeposit(lA, 50e6);
+        _lenderDeposit(lB, 100e6);
+        _lenderDeposit(lC, 250e6);
+        _lenderDeposit(lD, 600e6);
+        _lenderDeposit(lE, 1000e6);
+
+        assertEq(pool.getPoolInfo().totalLenderDeposits, 2000e6);
+
+        // A 100 loan whose fixed interest is exactly 20 (20% over the term).
+        // Term 2 = 30d @ 20% APR → interest = 100 * 2000 * 30d / (365d*1e4),
+        // which is not exactly 20, so set a custom term of 365d @ 20% APR.
+        vm.prank(admin);
+        pool.setTermConfig(3, 365 days, 2000, true); // 20% over exactly one year
+
+        IAssetLendingPool.Loan memory loan = _borrowAndRepay(100e6, 3);
+        assertEq(loan.interest, 20e6); // sanity: interest is exactly $20
+
+        // Protocol fee = 10% of 20 = 2; lenders share 18.
+        assertEq(pool.getPoolInfo().totalInterestEarned, 2e6);
+
+        // Pro-rata earnings per the requirement table (1 wei tolerance for the
+        // per-share truncation).
+        assertApproxEqAbs(pool.getLenderInfo(lA).claimableInterest, 0.45e6, 1);
+        assertApproxEqAbs(pool.getLenderInfo(lB).claimableInterest, 0.90e6, 1);
+        assertApproxEqAbs(pool.getLenderInfo(lC).claimableInterest, 2.25e6, 1);
+        assertApproxEqAbs(pool.getLenderInfo(lD).claimableInterest, 5.40e6, 1);
+        assertApproxEqAbs(pool.getLenderInfo(lE).claimableInterest, 9.00e6, 1);
+
+        // The five shares sum to the full 18 lender portion.
+        uint256 sum = pool.getLenderInfo(lA).claimableInterest +
+            pool.getLenderInfo(lB).claimableInterest +
+            pool.getLenderInfo(lC).claimableInterest +
+            pool.getLenderInfo(lD).claimableInterest +
+            pool.getLenderInfo(lE).claimableInterest;
+        assertApproxEqAbs(sum, 18e6, 5);
+    }
+
+    /// @dev A lender who deposits AFTER interest is already distributed must not
+    ///      retroactively capture that past interest (reward-debt seeding).
+    function test_LenderInterest_LateDepositorEarnsNoPastInterest() public {
+        _enableLenders();
+        _lenderDeposit(lender1, 1000e6);
+
+        // First loan repaid — interest distributed to lender1 only.
+        _borrowAndRepay(400e6, 0);
+        uint256 lender1AfterFirst = pool
+            .getLenderInfo(lender1)
+            .claimableInterest;
+        assertGt(lender1AfterFirst, 0);
+
+        // lender2 arrives only now, equal size.
+        _lenderDeposit(lender2, 1000e6);
+        // No interest distributed yet → lender2 has zero.
+        assertEq(pool.getLenderInfo(lender2).claimableInterest, 0);
+        // lender1's already-earned interest is untouched by the new deposit.
+        assertEq(
+            pool.getLenderInfo(lender1).claimableInterest,
+            lender1AfterFirst
+        );
+
+        // Second loan, equal interest, now split 50/50 between the two lenders.
+        IAssetLendingPool.Loan memory loan2 = _borrowAndRepay(400e6, 0);
+        uint256 secondLenderPortion = (loan2.interest * 8000) / 10_000;
+
+        // lender2 earns only half of the SECOND loan's interest, nothing of the first.
+        assertApproxEqAbs(
+            pool.getLenderInfo(lender2).claimableInterest,
+            secondLenderPortion / 2,
+            1
+        );
+        // lender1 = first loan (full) + half of second loan.
+        assertApproxEqAbs(
+            pool.getLenderInfo(lender1).claimableInterest,
+            lender1AfterFirst + secondLenderPortion / 2,
+            1
+        );
+    }
+
+    /// @dev Withdrawing principal auto-claims accrued interest and stops further
+    ///      accrual on the withdrawn capital.
+    function test_LenderInterest_WithdrawAutoClaimsAndStopsAccrual() public {
+        _enableLenders();
+        _lenderDeposit(lender1, 1000e6);
+
+        // First loan accrues interest to lender1.
+        _borrowAndRepay(400e6, 0);
+        uint256 earned = pool.getLenderInfo(lender1).claimableInterest;
+        assertGt(earned, 0);
+
+        // Full withdrawal auto-claims the earned interest into lender1's wallet.
+        uint256 balBefore = usdc.balanceOf(lender1);
+        vm.prank(lender1);
+        pool.lenderWithdraw(1000e6);
+        assertEq(usdc.balanceOf(lender1), balBefore + 1000e6 + earned);
+        assertEq(pool.getLenderInfo(lender1).deposited, 0);
+        assertEq(pool.getLenderInfo(lender1).claimableInterest, 0);
+
+        // A subsequent loan must not accrue anything to the exited lender.
+        _borrowAndRepay(400e6, 0);
+        assertEq(pool.getLenderInfo(lender1).claimableInterest, 0);
+    }
+
+    /// @dev Documents intended economics: a defaulted loan distributes NO interest
+    ///      to lenders, even though its fixed interest was set at origination.
+    function test_LenderInterest_DefaultDistributesNoInterest() public {
+        _enableLenders();
+        _lenderDeposit(lender1, POOL_SEED);
+
+        (uint256 loanId, ) = _createDefaultedLoan(400e6);
+        assertTrue(pool.getLoan(loanId).isDefaulted);
+
+        // No interest realized on default → lender has nothing to claim.
+        assertEq(pool.getLenderInfo(lender1).claimableInterest, 0);
+        assertEq(pool.getPoolInfo().totalInterestEarned, 0);
     }
 
     // =========================================================================

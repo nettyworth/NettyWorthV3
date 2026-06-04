@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const TRUSTED_FORWARDER = (process.env.TRUSTED_FORWARDER ??
   "0x0000000000000000000000000000000000000000") as `0x${string}`;
 const VRF_CALLBACK_GAS_LIMIT = Number(
-  process.env.VRF_CALLBACK_GAS_LIMIT ?? "2500000",
+  process.env.VRF_CALLBACK_GAS_LIMIT ?? "250000",
 );
 const VRF_REQUEST_CONFIRMATIONS = Number(
   process.env.VRF_REQUEST_CONFIRMATIONS ?? "3",

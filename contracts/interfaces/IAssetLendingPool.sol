@@ -187,6 +187,17 @@ interface IAssetLendingPool {
     event TokenTierSet(uint256 indexed tokenId, uint8 tier);
     event NFTRescued(uint256 indexed tokenId, address indexed recipient);
 
+    /// @notice Emitted when the authorized marketplace address is updated.
+    event MarketplaceUpdated(address indexed marketplace);
+
+    /// @notice Emitted when a loan is settled atomically as part of a marketplace sale.
+    event LoanSettledOnSale(
+        uint256 indexed loanId,
+        address indexed borrower,
+        address indexed buyer,
+        uint256 totalRepaid
+    );
+
     // =========================================================================
     // Errors
     // =========================================================================
@@ -227,6 +238,7 @@ interface IAssetLendingPool {
     error AssetLendingPool__NotInPurchasePhase();
     error AssetLendingPool__InvalidPackMachine();
     error AssetLendingPool__OwnerWithdrawExceedsOwnerDeposits();
+    error AssetLendingPool__NotMarketplace();
 
     // =========================================================================
     // Borrower functions
@@ -385,4 +397,36 @@ interface IAssetLendingPool {
     function getDefaultRecord(
         uint256 loanId
     ) external view returns (DefaultRecord memory);
+
+    // =========================================================================
+    // Marketplace integration
+    // =========================================================================
+
+    /// @notice Set the authorized marketplace address allowed to call settleLoanRepaymentOnSale.
+    /// @dev onlyOwner. Pass the marketplace proxy address after deployment.
+    function setMarketplace(address marketplace_) external;
+
+    /// @notice Returns the currently authorized marketplace address (0 if not set).
+    function getMarketplace() external view returns (address);
+
+    /// @notice Atomically repay a loan from sale proceeds and release the collateral to the buyer.
+    /// @dev Only callable by the authorized marketplace. Mirrors repay() accounting but pulls funds
+    ///      from `payer` (the marketplace) and delivers NFT(s) to `buyer` instead of the borrower.
+    ///      Reverts if the loan is not active, not found, or the pool is paused.
+    /// @param loanId Loan to settle.
+    /// @param payer  Address from which principal+interest is pulled (the marketplace contract).
+    /// @param buyer  Address that receives the released collateral NFT(s).
+    function settleLoanRepaymentOnSale(uint256 loanId, address payer, address buyer) external;
+
+    /// @notice Active loan ID for a given token (0 if no active loan).
+    function getActiveLoanId(uint256 tokenId) external view returns (uint256);
+
+    /// @notice Debt components for the active loan collateralized by `tokenId`.
+    /// @return principal Loan principal.
+    /// @return interest  Fixed upfront interest (pre-calculated at origination).
+    /// @return total     principal + interest (amount required to settle).
+    ///                   Returns (0, 0, 0) if the token has no active loan.
+    function getLoanDebt(
+        uint256 tokenId
+    ) external view returns (uint256 principal, uint256 interest, uint256 total);
 }

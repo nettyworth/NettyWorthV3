@@ -24,4 +24,15 @@ interface IAssetNFT {
     function transferFrom(address from, address to, uint256 tokenId) external;
 
     function approve(address to, uint256 tokenId) external;
+
+    /// @notice Pay the redemption fee and transition the caller's asset into physical shipment.
+    /// @dev Fee = redemptionFeeBps * appraisalValue / BPS, pulled in payment token from caller → treasury.
+    ///      Fee is 0 (free shipment) when appraisal value is 0. Token must be in Held state.
+    function initiateShipment(uint256 tokenId) external;
+
+    /// @notice Returns ERC-2981 royalty info for a given sale price (implemented by AssetNFT via ERC2981).
+    function royaltyInfo(
+        uint256 tokenId,
+        uint256 salePrice
+    ) external view returns (address receiver, uint256 royaltyAmount);
 }
