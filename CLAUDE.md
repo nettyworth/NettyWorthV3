@@ -42,7 +42,7 @@ Config: `.solhint.json` (extends `solhint:recommended`), `.prettierrc.json` (plu
 All V3 contracts must implement these patterns consistently:
 
 - **Upgradeability**: inherit `UUPSUpgradeable` (EIP-1822) — logic upgrades without changing proxy address; upgrade authorized by `UPGRADER_ROLE` (or `DEFAULT_ADMIN_ROLE` on PermissionManager itself). Exception: `PackMachine` uses EIP-1167 minimal clones instead of UUPS — it is not upgradeable by design.
-- **Access control**: use `PermissionManager` + `PermissionConsumer` — do NOT use per-contract `AccessControl` or `Ownable`; see _Access Control Architecture_ below. Exception: `AssetLendingPool` uses `Ownable2StepUpgradeable` (single admin) and interacts with `PermissionManager` only via an external `STATE_MANAGER_ROLE` grant.
+- **Access control**: use `PermissionManager` + `PermissionConsumer` — do NOT use per-contract `AccessControl` or `Ownable`; see _Access Control Architecture_ below. Exceptions: `AssetLendingPool` uses `Ownable2StepUpgradeable` (single admin) and interacts with `PermissionManager` only via an external `STATE_MANAGER_ROLE` grant; `P2PTradeEscrow` uses `Ownable2StepUpgradeable` with no `PermissionManager` tie at all.
 - **Reentrancy protection**: apply `nonReentrant` (from `ReentrancyGuard`, non-upgradeable variant) on state-changing functions that move assets or funds
 - **Initializer pattern**: replace `constructor()` with `initialize()` protected by `initializer`; constructor contains only `_disableInitializers()`
 - **Namespaced storage (ERC-7201)**: all mutable state in a `@custom:storage-location erc7201:nettyworth.storage.<ContractName>` struct with a deterministic slot — prevents collision across upgrades
@@ -60,6 +60,9 @@ The protocol uses a hub-and-spoke permission model:
 6. **PackMachine** (clone spoke) — EIP-1167 clone; does not store the manager address itself; delegates role checks to the factory via `IPackMachineFactory.hasProtocolRole(role, caller)`.
 7. **BuybackPool** (spoke) — UUPS-upgradeable singleton; inherits `PermissionConsumer`; gates admin functions (`setDefaultBuybackBps`, `registerPackMachine`, etc.) with `PACK_OPERATOR_ROLE`; gates emergency operations with `DEFAULT_ADMIN_ROLE`; token registration authorized via internal `registeredPackMachines` mapping (not a role).
 8. **AssetLendingPool** (independent admin) — UUPS-upgradeable singleton; uses `Ownable2StepUpgradeable` (single admin), **NOT** `PermissionConsumer` — the one protocol contract outside the hub-and-spoke model. Its only tie to PermissionManager is external: the deployed pool address must be granted `STATE_MANAGER_ROLE` so it can call `assetNFT.batchSetAssetState()` to move collateral between `Held` and `Loaned`.
+9. **FeeController** (spoke) — UUPS-upgradeable singleton; inherits `PermissionConsumer`; all config setters gated by `DEFAULT_ADMIN_ROLE`; upgrade gated by `UPGRADER_ROLE`. Manages two independent fee types (collectible sale fee, redemption/shipment fee) with independent enable flags.
+10. **NettyWorthMarketplace** (spoke) — UUPS-upgradeable singleton; inherits `PermissionConsumer`; **not** ERC-2771 (`_msgSender() == msg.sender`). `MARKETPLACE_ROLE` gates force-close/cancel auction operations and is the role the marketplace contract itself must hold so `AssetLendingPool.settleLoanRepaymentOnSale` authorizes its calls. Config setters gated by `DEFAULT_ADMIN_ROLE`; pause by `PAUSER_ROLE`; upgrade by `UPGRADER_ROLE`.
+11. **P2PTradeEscrow** (independent admin) — UUPS-upgradeable singleton; uses `Ownable2StepUpgradeable` (single owner), **NOT** `PermissionConsumer` and no `Roles.sol` roles. Fully standalone — no `PermissionManager` tie (treats `AssetNFT` as a generic ERC721). Owner gates `pause`/`unpause` and UUPS upgrades; trade actions gated by initiator/counterparty identity, not roles.
 
 When writing new consumer contracts:
 
@@ -88,13 +91,19 @@ When writing new consumer contracts:
 - **3-phase default lifecycle**: defaulted loans pass through Acquisition (owner recycles asset into a PackMachine via `depositFromPool`) → public Auction (anyone buys at outstanding value) → perpetual FixedListing; phase computed from timestamps in `getDefaultPhase`; default accounting debits `totalDeposited` at default and re-credits on recovery
 - **Synthetix reward-per-share lender interest**: external lender capital earns a configurable share (`lenderShareBps`) of loan interest via `accInterestPerShare` accumulator + per-lender `lenderRewardDebt`; remainder accrues to protocol; lender withdraw and claim are intentionally unpaused so lenders can always exit
 - **Split config/logic via abstract base**: `AssetLendingPoolConfig` owns the ERC-7201 storage struct + all admin config setters; `AssetLendingPool` inherits it and contains only business logic — keeps the storage layout in one auditable place
+- **Two-fee FeeController with independent toggles**: `FeeController` exposes `getCollectibleFee(amount)` and `getRedemptionFee(baseValue)` (each returns `(fee, enabled)`); collectible sale fee defaults 5% (max 10%), redemption fee defaults 5% (max 100%); each has its own enable flag so one can be paused without affecting the other
+- **Hybrid no-escrow marketplace auctions**: `NettyWorthMarketplace` uses off-chain EIP-712 `SignedAuction` + `SignedBid` messages; `commitBid` materialises on-chain `AuctionState` on first valid bid (enforces reserve price, min increment, last-minute time extension); funds pulled from winner only at `settleAuction` — no upfront escrow; three typehashes: `SignedListing`, `SignedAuction`, `SignedBid`
+- **Loan-aware atomic sale settlement**: on marketplace sale, if the token is collateralised in `AssetLendingPool`, the minimum price is principal + outstanding interest; the marketplace calls `settleLoanRepaymentOnSale(loanId, marketplace, buyer)` — the pool pulls its debt from the marketplace, releases the NFT to the buyer, and the seller receives only net proceeds; the marketplace must hold `MARKETPLACE_ROLE` for this call to be authorized
+- **Safe royalty handling**: `NettyWorthMarketplace` queries ERC-2981 royalties via `try/catch` so a non-compliant collection cannot revert a sale; royalty is capped so `royalty + collectibleFee ≤ gross − loanDebt`
+- **Atomic P2P asset swap escrow**: `P2PTradeEscrow` lets an initiator escrow an offered bundle (ERC20/721/1155, ≤50 assets per side) for a named counterparty; `acceptTrade` atomically pulls the requested bundle counterparty→initiator directly and releases the escrowed bundle contract→counterparty — only one side is ever held in escrow; no fees, no signatures, on-chain offers only; `deadline = 0` means never expires
+- **Recoverable-while-paused escrow**: `P2PTradeEscrow` gates `createTrade`/`acceptTrade` with `whenNotPaused` but intentionally omits it on `cancelTrade`/`expireTrade` so escrowed assets are always reclaimable even when the contract is paused
 
 ## Project Layout
 
 - `contracts/` — Solidity source files
-  - `contracts/interfaces/` — Interface definitions (`IPermissionManager`, `ITransferValidator`, `IPackMachine`, `IPackMachineFactory`, `IPackVRFRouter`, `IBuybackPool`, `ISignatureTransfer`, `IAssetLendingPool`, `IAssetNFT`)
+  - `contracts/interfaces/` — Interface definitions (`IPermissionManager`, `ITransferValidator`, `IPackMachine`, `IPackMachineFactory`, `IPackVRFRouter`, `IBuybackPool`, `ISignatureTransfer`, `IAssetLendingPool`, `IAssetNFT`, `IFeeController`, `INettyWorthMarketplace`, `IP2PTradeEscrow`)
   - `contracts/lib/` — Libraries (`Roles.sol` — protocol role constants)
-  - `contracts/test-helpers/` — Mocks for testing (`MockPermit2`, `MockVRFCoordinatorV2Plus`, etc.)
+  - `contracts/test-helpers/` — Mocks for testing (`MockPermit2`, `MockVRFCoordinatorV2Plus`, `MockERC1155`, etc.)
   - `contracts/test/` — Foundry-style `.t.sol` test files
 - `test/` — TypeScript integration tests using `node:test` and `viem`
 - `scripts/` — TypeScript deployment/upgrade scripts

@@ -24,6 +24,9 @@ contracts/
   BuybackPool.sol                 # Guaranteed buyback pool for AssetNFTs (UUPS)
   AssetLendingPool.sol            # Asset-collateralized lending pool (UUPS, Ownable2Step)
   AssetLendingPoolConfig.sol      # Lending pool storage layout + admin config (abstract base)
+  FeeController.sol               # Marketplace & redemption fee rates (UUPS)
+  NettyWorthMarketplace.sol       # AssetNFT marketplace: fixed-price + English auctions (UUPS)
+  P2PTradeEscrow.sol              # Atomic P2P asset-swap escrow: ERC20/721/1155 bundles (UUPS, Ownable2Step)
   PermissionManager.sol           # Centralized role registry (AccessControlEnumerable)
   PermissionConsumer.sol          # Abstract base for role-gated contracts
   interfaces/
@@ -34,8 +37,11 @@ contracts/
     IPermissionManager.sol        # Permission manager interface
     ISignatureTransfer.sol        # Uniswap Permit2 signature transfer interface
     ITransferValidator.sol        # External transfer validation hook
+    IFeeController.sol            # FeeController interface
+    INettyWorthMarketplace.sol    # Marketplace interface (structs, events, errors)
     IAssetLendingPool.sol         # Lending pool interface (structs, events, errors)
     IAssetNFT.sol                 # Minimal AssetNFT interface used by the lending pool
+    IP2PTradeEscrow.sol           # P2P escrow interface (Asset/Trade structs, enums, events, errors)
   lib/
     Roles.sol                     # Protocol role constants library
   test-helpers/                   # Mocks (MockPermit2, MockVRFCoordinatorV2Plus, etc.)
@@ -51,6 +57,9 @@ scripts/
   set-callback-gas-limit.ts       # Update PackVRFRouter Chainlink callback gas limit
   upgrade-pack-vrf-router.ts      # UUPS upgrade for PackVRFRouter proxy
   deploy-asset-lending-pool.ts    # Deploy AssetLendingPool + ERC1967 proxy; grant STATE_MANAGER_ROLE
+  deploy-fee-controller.ts        # Deploy FeeController + ERC1967 proxy
+  deploy-marketplace.ts           # Deploy NettyWorthMarketplace + ERC1967 proxy; wire pool + AssetNFT
+  deploy-p2p-trade-escrow.ts      # Deploy P2PTradeEscrow + ERC1967 proxy; standalone (no protocol deps)
   seed-asset-nft.ts               # Dev helper: mint sample AssetNFT cards and seed appraisals
   send-op-tx.ts                   # OP chain transaction example
 ```
@@ -73,6 +82,7 @@ All roles are defined in `Roles.sol` and administered by `PermissionManager`.
 | `PAUSER_ROLE` | Pause and unpause transfers |
 | `UPGRADER_ROLE` | Authorize UUPS contract upgrades |
 | `BLACKLIST_ROLE` | Manage address blacklist |
+| `MARKETPLACE_ROLE` | Protocol-wide marketplace operator — force-close/cancel auctions; authorizes `AssetLendingPool.settleLoanRepaymentOnSale` |
 
 ### Asset Lifecycle States
 
@@ -247,6 +257,132 @@ The pool's only dependency on `PermissionManager` is external: the deployed pool
 - **PackMachine recycle integration** — defaulted assets can be deposited directly into any registered PackMachine via `depositFromPool`
 - **NFT rescue** — `rescueNFT` admin escape hatch for stuck tokens
 
+## FeeController Contract
+
+`FeeController` is a UUPS-upgradeable contract that manages two independent fee types for the protocol: a collectible sale fee (charged by the marketplace on every sale) and a redemption/shipment fee (charged when a physical asset is redeemed). Each fee type has its own enable/disable toggle, so one can be adjusted or paused without affecting the other. Access control is via `PermissionConsumer` / `PermissionManager`.
+
+### Fee Types
+
+| Fee | Default | Maximum | Toggle |
+| --- | ------- | ------- | ------ |
+| Collectible sale fee | 5% (500 bps) | 10% (1000 bps) | `collectibleFeesEnabled` |
+| Redemption / shipment fee | 5% (500 bps) | 100% (10 000 bps) | `redemptionFeeEnabled` |
+
+All fees route to the `protocolFeeRecipient` (platform treasury). Views `getCollectibleFee(amount)` and `getRedemptionFee(baseValue)` each return `(fee, enabled)` so callers can skip the transfer when a fee type is disabled.
+
+### FeeController Roles
+
+| Role | Permission |
+| ---- | ---------- |
+| `DEFAULT_ADMIN_ROLE` | Set fee rates, toggle enable flags, update fee recipient |
+| `UPGRADER_ROLE` | Authorize UUPS contract upgrades |
+
+### FeeController Features
+
+- **UUPS upgradeable** (EIP-1822) — logic upgrades without changing the proxy address
+- **PermissionConsumer access control** — centralized role checks via PermissionManager
+- **ERC-7201 namespaced storage** — collision-safe across upgrades
+- **Independent fee toggles** — collectible and redemption fees can be enabled/disabled separately
+- **Capped rates** — collectible fee hard-capped at 10%; redemption fee at 100%
+- **Atomic fee queries** — `getCollectibleFee` / `getRedemptionFee` return both the computed amount and whether the fee is active in one call
+
+---
+
+## NettyWorthMarketplace Contract
+
+`NettyWorthMarketplace` is a UUPS-upgradeable marketplace for `AssetNFT` tokens. It supports two trade modes: **fixed-price sales** (off-chain EIP-712 signed listings) and **hybrid English auctions** (seller and bidders sign messages off-chain; minimal on-chain state enforces rules at commitment/settlement). USDC / ERC-20 only — no native ETH. Access control is via `PermissionConsumer` / `PermissionManager`.
+
+### Trade Flows
+
+#### Fixed-price sales
+
+1. The seller signs a `SignedListing` EIP-712 message off-chain (collection, tokenId, price, payment token, expiry, nonce).
+2. The buyer calls `buyWithSignature(listing, sig)` — the marketplace verifies the signature, marks the nonce used (CEI), then executes the sale atomically.
+
+#### Hybrid English auctions
+
+1. The seller signs a `SignedAuction` off-chain (reserve price, min increment, start/end times, extension window + duration, nonce).
+2. Bidders sign `SignedBid` messages off-chain (auctionId, amount, nonce, expiry).
+3. `commitBid(auctionSig, bidSig)` is called on-chain — the first valid bid **materialises** an `AuctionState` (reserve enforced); subsequent bids must exceed `highestBid + minIncrement`. If a bid lands within `extensionWindow` of `endTime`, the auction extends by `extensionDuration`. No funds move at commitment.
+4. After `endTime`, anyone calls `settleAuction(auctionId)` — or `MARKETPLACE_ROLE` can force-close early. The winner's payment is pulled and the NFT is delivered atomically.
+
+#### Loan-aware settlement
+
+If the token is collateralised in `AssetLendingPool`, the minimum acceptable sale price equals principal + outstanding interest. On sale, the loan debt is repaid atomically via `settleLoanRepaymentOnSale` — the pool releases the NFT directly to the buyer, and the seller receives only the net proceeds.
+
+### Fees & Royalties
+
+Fees are deducted from gross proceeds before the seller receives anything:
+
+1. **Collectible fee** — queried from `FeeController.getCollectibleFee(gross)` (default 5%), sent to `treasury`.
+2. **ERC-2981 royalty** — queried via `try/catch` so a non-compliant collection cannot revert the sale; royalty is capped so `royalty + collectibleFee ≤ gross − loanDebt`.
+
+### NettyWorthMarketplace Roles
+
+| Role | Permission |
+| ---- | ---------- |
+| `MARKETPLACE_ROLE` | Force-close or cancel any auction; contract itself must hold this role for `AssetLendingPool` to authorize `settleLoanRepaymentOnSale` |
+| `DEFAULT_ADMIN_ROLE` | Update FeeController, LendingPool, treasury, allowed collections, allowed payment tokens |
+| `PAUSER_ROLE` | Pause and unpause the contract |
+| `UPGRADER_ROLE` | Authorize UUPS contract upgrades |
+
+### Marketplace Features
+
+- **UUPS upgradeable** (EIP-1822) — logic upgrades without changing the proxy address
+- **PermissionConsumer access control** — centralized role checks via PermissionManager; not ERC-2771 (`_msgSender() == msg.sender`)
+- **ERC-7201 namespaced storage** — collision-safe across upgrades
+- **ReentrancyGuard** — protects `buyWithSignature`, `commitBid`, and `settleAuction`
+- **Pausable** — emergency stop via `PAUSER_ROLE`
+- **EIP-712 signatures** — three typehashes: `SignedListing`, `SignedAuction`, `SignedBid`; domain `("NettyWorthMarketplace", "1")`
+- **No-escrow hybrid auctions** — funds pulled from winner at settlement only; last-minute extension prevents sniping
+- **Per-signer nonce replay protection** — `usedNonces` mapping consumed CEI-style; user-cancellable via `cancelNonce`
+- **Collection + payment-token whitelists** — `allowedCollections` and `allowedPaymentTokens` mappings
+- **Loan-aware settlement** — atomic loan repayment on sale; min price enforced against outstanding debt
+- **Safe royalty handling** — ERC-2981 queried in `try/catch`; royalty capped against net proceeds
+- **USDC / ERC-20 only** — no native ETH accepted
+
+---
+
+## P2PTradeEscrow Contract
+
+`P2PTradeEscrow` is a UUPS-upgradeable, escrow-based atomic swap contract. An `initiator` locks an offered bundle of assets on-chain for a named `counterparty`, who can accept by providing a requested bundle in return. Unlike the no-escrow marketplace, the initiator's offered assets are held in the contract until the trade is accepted, cancelled, or expired. Access control uses `Ownable2StepUpgradeable` (single owner) — this contract is **fully standalone** and has no dependency on `PermissionManager` or protocol roles.
+
+Supports any combination of **ERC20, ERC721, and ERC1155** assets, up to 50 assets per side. No fees, no signatures, no native ETH.
+
+### Trade Flow
+
+1. **`createTrade(counterparty, offered, requested, deadline)`** — Initiator specifies a designated counterparty, an offered bundle, a requested bundle, and an optional deadline (`0` = never expires). Offered assets are immediately pulled from the initiator into the contract. Status: `Active`.
+2. **`acceptTrade(tradeId)`** — Only the designated `counterparty` may call. Atomically: (a) pulls the requested bundle from the counterparty directly to the initiator (never escrowed), then (b) releases the escrowed offered bundle from the contract to the counterparty. Status: `Accepted`.
+3. **`cancelTrade(tradeId)`** — Only the `initiator`. Returns all escrowed offered assets to the initiator. Status: `Cancelled`. Available even when the contract is paused.
+4. **`expireTrade(tradeId)`** — Callable by anyone once `deadline` has passed (and `deadline != 0`). Returns escrowed assets to the initiator. Status: `Expired`. Available even when the contract is paused.
+
+### Access Control
+
+| Actor | Permission |
+| ----- | ---------- |
+| Owner (`Ownable2StepUpgradeable`) | `pause` / `unpause`; authorize UUPS upgrades |
+| Initiator | `cancelTrade` |
+| Counterparty | `acceptTrade` |
+| Anyone (post-deadline) | `expireTrade` |
+
+> **No protocol roles.** This contract does not inherit `PermissionConsumer` and does not use any `Roles.sol` constants. It is independent of `PermissionManager`.
+
+### P2PTradeEscrow Features
+
+- **UUPS upgradeable** (EIP-1822) — logic upgrades without changing the proxy address
+- **Ownable2Step single owner** — NOT `PermissionConsumer`; upgrade and pause gated by owner only
+- **ERC-7201 namespaced storage** — collision-safe across upgrades (`erc7201:nettyworth.storage.P2PTradeEscrow`)
+- **ReentrancyGuard** — protects `createTrade`, `acceptTrade`, `cancelTrade`, and `expireTrade`
+- **Pausable with safe cancel/expire** — `createTrade`/`acceptTrade` respect `whenNotPaused`; `cancelTrade`/`expireTrade` intentionally omit it so escrowed assets are always reclaimable
+- **ERC20 / ERC721 / ERC1155** — ERC20 via `SafeERC20`; ERC1155 via `safeTransferFrom` with `ERC1155Holder`; ERC721 via `transferFrom`
+- **Bundle cap `MAX_BUNDLE = 50`** — per side; both offered and requested bundles must be non-empty
+- **Deadline** — `uint64`; `0` means no expiry; anyone can call `expireTrade` once expired
+- **No fees, no signatures, no ETH** — pure on-chain atomic swap; no EIP-712 off-chain flow
+- **CEI ordering** — trade status written before all external transfers in every function
+- **Standalone** — no `PermissionManager`, no `FeeController`, no lending pool integration; treats `AssetNFT` as a generic ERC721
+
+---
+
 ## PermissionManager Contract
 
 `PermissionManager` is the centralized role registry for the protocol. It inherits `AccessControlEnumerableUpgradeable` and exposes `hasProtocolRole(bytes32 role, address account)` for consumers to query.
@@ -313,6 +449,19 @@ BUYBACK_ALLOCATION_BPS=           # Fraction of pack price allocated to buyback 
 # PAYMENT_TOKEN reused from above
 LTV_BPS=                          # Max loan-to-value in basis points (default 5000 = 50%)
 LENDER_SHARE_BPS=                 # Lender share of interest in bps (default 8000 = 80%)
+
+# --- deploy-fee-controller.ts (required) ---
+TREASURY=                         # Platform fee recipient address
+
+# --- deploy-marketplace.ts (required) ---
+# PAYMENT_TOKEN and TREASURY reused from above
+FEE_CONTROLLER_PROXY=             # (optional) Override FeeController proxy; falls back to deployments/<network>.json
+LENDING_POOL_PROXY=               # (optional) Override AssetLendingPool proxy; falls back to deployments/<network>.json
+ASSET_NFT_PROXY=                  # (optional) Override AssetNFT proxy; falls back to deployments/<network>.json
+SKIP_NFT_WIRING=                  # Set to true to skip AssetNFT wiring (call setters manually)
+
+# --- deploy-p2p-trade-escrow.ts ---
+OWNER=                            # (optional) Owner address; defaults to deployer
 ```
 
 ## Commands
@@ -350,8 +499,13 @@ PermissionManager          (deploy FIRST — no protocol deps)
   ├── PackMachineFactory   depends on PermissionManager + AssetNFT
   │     └── PackMachine clones  EIP-1167, created by the factory
   ├── BuybackPool          depends on PermissionManager + AssetNFT + PackMachineFactory
-  └── AssetLendingPool     depends on AssetNFT + PackMachineFactory
-                           ⚠ must be granted STATE_MANAGER_ROLE on PermissionManager post-deploy
+  ├── AssetLendingPool     depends on AssetNFT + PackMachineFactory
+  │                        ⚠ must be granted STATE_MANAGER_ROLE on PermissionManager post-deploy
+  ├── FeeController        depends on PermissionManager
+  └── NettyWorthMarketplace  depends on PermissionManager + FeeController + AssetLendingPool + AssetNFT
+                             ⚠ marketplace contract address must be granted MARKETPLACE_ROLE for force-close
+
+P2PTradeEscrow             (standalone — no protocol deps; deploy independently at any time)
 ```
 
 > **Note:** `deploy-pack-machine.ts` is a composite script — it deploys `PackVRFRouter`, the `PackMachine` logic contract, `PackMachineFactory`, and `BuybackPool` in a single run, then wires the factory (`setImplementation` / `setPackVRFRouter` / `setBuybackPool`) automatically.
@@ -366,6 +520,9 @@ PermissionManager          (deploy FIRST — no protocol deps)
 | 4 | Create a pack | `create-pack-machine.ts` | PackMachine clone (EIP-1167) | PackMachineFactory, PackVRFRouter, BuybackPool |
 | 5 | Configure pack | `setup-pack-machine.ts` | — (deposits NFTs, sets buyback rate) | PackMachine clone, BuybackPool, AssetNFT |
 | 6 | Lending pool | `deploy-asset-lending-pool.ts` | AssetLendingPool (UUPS) | AssetNFT, PackMachineFactory |
+| 7 | Fee controller | `deploy-fee-controller.ts` | FeeController (UUPS) | PermissionManager |
+| 8 | Marketplace | `deploy-marketplace.ts` | NettyWorthMarketplace (UUPS) | PermissionManager, FeeController, AssetLendingPool, AssetNFT |
+| 9 | P2P escrow | `deploy-p2p-trade-escrow.ts` | P2PTradeEscrow (UUPS) | — |
 
 ---
 
@@ -487,6 +644,64 @@ npx hardhat run scripts/deploy-asset-lending-pool.ts --network <network>
 Deploys `AssetLendingPool` implementation and ERC1967 proxy, then **automatically** grants the pool address `STATE_MANAGER_ROLE` on `PermissionManager` so it can call `assetNFT.batchSetAssetState()` to flip collateral tokens between `Held` and `Loaned`.
 
 > To enable the default-asset recycling path (where defaulted collateral is re-deposited into a PackMachine), call `targetClone.setAuthorizedDepositor(lendingPoolProxy, true)` on each target machine, and configure `pool.setDefaultPackMachine(cloneAddress)` or `pool.setPackMachineFactory(...)` via the pool owner.
+
+---
+
+### Step 7 — Deploy FeeController
+
+**Prerequisites:** PermissionManager deployed. Required env vars:
+
+| Variable | Description |
+|----------|-------------|
+| `TREASURY` | Platform fee recipient address |
+| `PERMISSION_MANAGER_PROXY` | *(optional)* Override PermissionManager proxy; falls back to `deployments/<network>.json` |
+
+```bash
+npx hardhat run scripts/deploy-fee-controller.ts --network <network>
+```
+
+Deploys `FeeController` implementation and ERC1967 proxy, initialising both fees at 5% (500 bps) with both fee types enabled. Saves `FeeController.proxy` and `.implementation` to `deployments/<network>.json`.
+
+---
+
+### Step 8 — Deploy NettyWorthMarketplace
+
+**Prerequisites:** PermissionManager, FeeController, AssetLendingPool, and AssetNFT deployed. Required env vars:
+
+| Variable | Description |
+|----------|-------------|
+| `PAYMENT_TOKEN` | ERC-20 payment token address (e.g. USDC) |
+| `TREASURY` | Platform treasury that receives collectible fees |
+| `FEE_CONTROLLER_PROXY` | *(optional)* Override FeeController proxy; falls back to `deployments/<network>.json` |
+| `LENDING_POOL_PROXY` | *(optional)* Override AssetLendingPool proxy; falls back to `deployments/<network>.json` |
+| `ASSET_NFT_PROXY` | *(optional)* Override AssetNFT proxy; falls back to `deployments/<network>.json` |
+| `PERMISSION_MANAGER_PROXY` | *(optional)* Override PermissionManager proxy; falls back to `deployments/<network>.json` |
+| `SKIP_NFT_WIRING` | Set to `true` to skip auto-wiring AssetNFT (call setters manually) |
+
+```bash
+npx hardhat run scripts/deploy-marketplace.ts --network <network>
+```
+
+Deploys `NettyWorthMarketplace` implementation and ERC1967 proxy, then automatically:
+
+- `pool.setMarketplace(marketplaceProxy)` — authorizes the marketplace to call `settleLoanRepaymentOnSale`
+- `assetNFT.setPaymentToken / setTreasury / setFeeController / setLendingPool` — wires AssetNFT to the fee and lending subsystems (skipped if `SKIP_NFT_WIRING=true`)
+
+Saves `NettyWorthMarketplace.proxy` and `.implementation` to `deployments/<network>.json`.
+
+> ⚠ **Manual step after this script:** Grant `MARKETPLACE_ROLE` to the marketplace proxy address on `PermissionManager` to enable auction force-close and loan repayment authorization. The keeper bot (or admin) that calls `settleAuction` for forced closes also needs this role.
+
+---
+
+### Step 9 — Deploy P2PTradeEscrow
+
+**Prerequisites:** none — fully standalone, no protocol deps.
+
+```bash
+npx hardhat run scripts/deploy-p2p-trade-escrow.ts --network <network>
+```
+
+Deploys the `P2PTradeEscrow` implementation and ERC1967 proxy. `initialize(owner)` is called with the `OWNER` env var, or the deployer address if unset — set `OWNER` to a multi-sig for production. Saves `P2PTradeEscrow.proxy`, `.implementation`, and `.owner` to `deployments/<network>.json`.
 
 ---
 
