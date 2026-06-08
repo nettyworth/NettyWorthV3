@@ -17,6 +17,7 @@ import {IPackMachineFactory} from "./interfaces/IPackMachineFactory.sol";
 import {IPackVRFRouter} from "./interfaces/IPackVRFRouter.sol";
 import {ISignatureTransfer} from "./interfaces/ISignatureTransfer.sol";
 import {IBuybackPool} from "./interfaces/IBuybackPool.sol";
+import {IPromoCodeRegistry} from "./interfaces/IPromoCodeRegistry.sol";
 
 /// @title PackMachine
 /// @author NettyWorth
@@ -158,6 +159,11 @@ contract PackMachine is
     error PackMachine__InvalidBps(uint16 given);
     error PackMachine__UnauthorizedDepositor(address caller);
     error PackMachine__CutOff(uint256 retained, uint256 total);
+    error PackMachine__PromoRegistryNotSet();
+    error PackMachine__DiscountExceedsBuyback(
+        uint256 discountedPrice,
+        uint256 buybackAmount
+    );
 
     // =========================================================================
     // Constructor (disables initializers on the implementation)
@@ -210,7 +216,7 @@ contract PackMachine is
     // =========================================================================
 
     /// @notice Open a pack by pulling USDC directly from `msg.sender`.
-    /// @param user The recipient of the won cards (subject to blacklist check in AssetNFT).
+    /// @param user      The recipient of the won cards (subject to blacklist check in AssetNFT).
     /// @param signature EIP-712 `OpenPack(address user, uint256 nonce)` signed by a PACK_OPERATOR_ROLE holder.
     function openPack(
         address user,
@@ -219,16 +225,35 @@ contract PackMachine is
         PackMachineStorage storage $ = _getStorage();
         _assertOpenable($);
         _verifySignature($, user, signature);
-        _handlePayment($, _msgSender());
+        _handlePayment($, _msgSender(), user, bytes32(0));
+        _requestVRF($, user, IPackMachineFactory($.factory));
+    }
+
+    /// @notice Open a pack by pulling USDC directly from `msg.sender`, applying a promo discount code.
+    /// @dev    The PromoCodeRegistry is queried on-chain to validate and consume the code.
+    ///         Reverts if the registry is not configured or the code is invalid.
+    ///         Pass bytes32(0) as codeId to open without a discount (equivalent to the no-code overload).
+    /// @param user      The recipient of the won cards.
+    /// @param signature EIP-712 `OpenPack(address user, uint256 nonce)` signed by a PACK_OPERATOR_ROLE holder.
+    /// @param codeId    keccak256 of the off-chain promo-code string; bytes32(0) means no discount.
+    function openPack(
+        address user,
+        bytes calldata signature,
+        bytes32 codeId
+    ) external nonReentrant whenNotPaused {
+        PackMachineStorage storage $ = _getStorage();
+        _assertOpenable($);
+        _verifySignature($, user, signature);
+        _handlePayment($, _msgSender(), user, codeId);
         _requestVRF($, user, IPackMachineFactory($.factory));
     }
 
     /// @notice Open a pack paying via Uniswap Permit2 (gasless for user — relayer pays gas).
-    /// @param user The recipient of the won cards.
-    /// @param permit2Nonce Permit2 nonce (unique per permit).
-    /// @param permit2Deadline Permit2 expiry timestamp.
+    /// @param user             The recipient of the won cards.
+    /// @param permit2Nonce     Permit2 nonce (unique per permit).
+    /// @param permit2Deadline  Permit2 expiry timestamp.
     /// @param permit2Signature Permit2 authorization signature from `user`.
-    /// @param playSignature EIP-712 `OpenPack` signature from a PACK_OPERATOR_ROLE holder.
+    /// @param playSignature    EIP-712 `OpenPack` signature from a PACK_OPERATOR_ROLE holder.
     function openPackWithPermit2(
         address user,
         uint256 permit2Nonce,
@@ -236,29 +261,97 @@ contract PackMachine is
         bytes calldata permit2Signature,
         bytes calldata playSignature
     ) external nonReentrant whenNotPaused {
+        _openPackWithPermit2Internal(
+            user,
+            permit2Nonce,
+            permit2Deadline,
+            permit2Signature,
+            playSignature,
+            bytes32(0)
+        );
+    }
+
+    /// @notice Open a pack via Uniswap Permit2 with a promo discount code.
+    /// @dev    IMPORTANT: the Permit2 signature must be produced over the DISCOUNTED amount.
+    ///         Use IPromoCodeRegistry.previewDiscount off-chain to compute the correct amount
+    ///         before the user signs the Permit2 authorization.
+    ///         The contract independently recomputes the discounted price from the code and uses
+    ///         that as the Permit2 requestedAmount — the on-chain registry is the source of truth.
+    /// @param codeId           keccak256 of the off-chain promo-code string; bytes32(0) means no discount.
+    function openPackWithPermit2(
+        address user,
+        uint256 permit2Nonce,
+        uint256 permit2Deadline,
+        bytes calldata permit2Signature,
+        bytes calldata playSignature,
+        bytes32 codeId
+    ) external nonReentrant whenNotPaused {
+        _openPackWithPermit2Internal(
+            user,
+            permit2Nonce,
+            permit2Deadline,
+            permit2Signature,
+            playSignature,
+            codeId
+        );
+    }
+
+    /// @dev Shared Permit2 implementation for both code-aware and codeless overloads.
+    function _openPackWithPermit2Internal(
+        address user,
+        uint256 permit2Nonce,
+        uint256 permit2Deadline,
+        bytes calldata permit2Signature,
+        bytes calldata playSignature,
+        bytes32 codeId
+    ) private {
         PackMachineStorage storage $ = _getStorage();
         _assertOpenable($);
         _verifySignature($, user, playSignature);
 
         IPackMachineFactory iFactory = IPackMachineFactory($.factory);
         uint256 price = $.pricePerPack;
+
+        // Buyback allocation computed on the FULL price — pool always receives its configured share.
         uint256 buybackAmount =
             (price * $.buybackAllocationBps) / WEIGHT_PRECISION;
         address pool = $.buybackPool;
 
-        // Pull full amount to this contract, then distribute.
+        // Resolve discount and compute the amount the user will pay.
+        uint16 discountBps = 0;
+        if (codeId != bytes32(0)) {
+            address registry = iFactory.promoCodeRegistry();
+            if (registry == address(0))
+                revert PackMachine__PromoRegistryNotSet();
+            discountBps = IPromoCodeRegistry(registry).redeemDiscount(
+                codeId,
+                user
+            );
+        }
+        uint256 discountedPrice = price - (price * discountBps) / WEIGHT_PRECISION;
+
+        // Guard: NettyWorth (finance wallet) absorbs the discount; the pool is unaffected.
+        // If the discount makes the user's payment less than the pool's share, revert.
+        if (discountedPrice < buybackAmount)
+            revert PackMachine__DiscountExceedsBuyback(
+                discountedPrice,
+                buybackAmount
+            );
+
+        // Pull the discounted amount from the user via Permit2.
+        // The user's off-chain Permit2 signature must cover exactly discountedPrice.
         PERMIT2.permitTransferFrom(
             ISignatureTransfer.PermitTransferFrom({
                 permitted: ISignatureTransfer.TokenPermissions({
                     token: iFactory.paymentToken(),
-                    amount: price
+                    amount: discountedPrice
                 }),
                 nonce: permit2Nonce,
                 deadline: permit2Deadline
             }),
             ISignatureTransfer.SignatureTransferDetails({
                 to: address(this),
-                requestedAmount: price
+                requestedAmount: discountedPrice
             }),
             user,
             permit2Signature
@@ -270,7 +363,7 @@ contract PackMachine is
         } else {
             buybackAmount = 0;
         }
-        token.safeTransfer(iFactory.financeWallet(), price - buybackAmount);
+        token.safeTransfer(iFactory.financeWallet(), discountedPrice - buybackAmount);
 
         _requestVRF($, user, iFactory);
     }
@@ -744,17 +837,49 @@ contract PackMachine is
             revert PackMachine__InvalidSignature();
     }
 
+    /// @dev Pull payment from `payer`, applying an optional promo discount code.
+    ///      Buyback allocation is always computed on the FULL price so the pool's share is unaffected.
+    ///      NettyWorth (finance wallet) absorbs the discount — it receives discountedPrice - buybackAmount.
+    ///      Reverts with PackMachine__DiscountExceedsBuyback if the buyback allocation exceeds the
+    ///      discounted price (can only happen with extreme buybackAllocationBps + max discount).
+    /// @param payer   Address the USDC is pulled from (msg.sender for direct opens).
+    /// @param user    Economic beneficiary / pack recipient — used for allowlist checks in the registry.
+    /// @param codeId  keccak256 promo code to apply; bytes32(0) = no discount.
     function _handlePayment(
         PackMachineStorage storage $,
-        address payer
+        address payer,
+        address user,
+        bytes32 codeId
     ) private {
         IPackMachineFactory iFactory = IPackMachineFactory($.factory);
         IERC20 token = IERC20(iFactory.paymentToken());
         uint256 price = $.pricePerPack;
 
+        // Buyback allocation computed on FULL price — pool always receives its configured share.
         uint256 buybackAmount =
             (price * $.buybackAllocationBps) / WEIGHT_PRECISION;
         address pool = $.buybackPool;
+
+        // Resolve discount; revert (not silent) if registry is unset with a non-zero code.
+        uint16 discountBps = 0;
+        if (codeId != bytes32(0)) {
+            address registry = iFactory.promoCodeRegistry();
+            if (registry == address(0))
+                revert PackMachine__PromoRegistryNotSet();
+            discountBps = IPromoCodeRegistry(registry).redeemDiscount(
+                codeId,
+                user
+            );
+        }
+        uint256 discountedPrice = price - (price * discountBps) / WEIGHT_PRECISION;
+
+        // Guard: finance wallet absorbs the discount.  If buyback allocation exceeds the
+        // discounted price the payout would underflow — revert clearly instead of wrapping.
+        if (discountedPrice < buybackAmount)
+            revert PackMachine__DiscountExceedsBuyback(
+                discountedPrice,
+                buybackAmount
+            );
 
         if (buybackAmount > 0 && pool != address(0)) {
             token.safeTransferFrom(payer, pool, buybackAmount);
@@ -764,7 +889,7 @@ contract PackMachine is
         token.safeTransferFrom(
             payer,
             iFactory.financeWallet(),
-            price - buybackAmount
+            discountedPrice - buybackAmount
         );
     }
 
