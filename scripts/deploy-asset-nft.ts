@@ -10,7 +10,8 @@ const TRUSTED_FORWARDER = (process.env.TRUSTED_FORWARDER ??
 const NFT_NAME = process.env.ASSET_NFT_NAME ?? "NettyWorth Assets";
 const NFT_SYMBOL = process.env.ASSET_NFT_SYMBOL ?? "NWA";
 const CONTRACT_URI =
-  process.env.ASSET_NFT_CONTRACT_URI ?? "ipfs://contract-metadata";
+  process.env.ASSET_NFT_CONTRACT_URI ??
+  "https://staging-v2-api.nettyworth.io/asset-nfts";
 const ROYALTY_RECEIVER = process.env.ASSET_NFT_ROYALTY_RECEIVER;
 const ROYALTY_FEE = BigInt(process.env.ASSET_NFT_ROYALTY_FEE ?? "0");
 
