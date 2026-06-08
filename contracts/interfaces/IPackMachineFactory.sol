@@ -21,5 +21,6 @@ interface IPackMachineFactory {
     function assetNFT() external view returns (address);
     function packVRFRouter() external view returns (address);
     function buybackPool() external view returns (address);
+    function promoCodeRegistry() external view returns (address);
     function getAllPackMachines() external view returns (address[] memory);
 }

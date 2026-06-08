@@ -19,6 +19,14 @@ interface IBuybackPool {
     /// @param tokenId The AssetNFT token ID to sell back.
     function buyback(uint256 tokenId) external;
 
+    /// @notice Sell a token back to the pool applying a buyback-boost promo code.
+    /// @dev The PromoCodeRegistry is queried to validate and consume the code.
+    ///      Reverts if the registry is not configured or the code is invalid.
+    ///      Pass bytes32(0) as codeId to sell back without a boost (equivalent to the no-code overload).
+    /// @param tokenId The AssetNFT token ID to sell back.
+    /// @param codeId  keccak256 of the off-chain promo-code string; bytes32(0) means no boost.
+    function buyback(uint256 tokenId, bytes32 codeId) external;
+
     function getTokenInfo(
         uint256 tokenId
     )

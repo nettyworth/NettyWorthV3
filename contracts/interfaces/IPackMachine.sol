@@ -19,6 +19,14 @@ interface IPackMachine {
     /// @notice Open a pack by pulling USDC directly from msg.sender.
     function openPack(address user, bytes calldata signature) external;
 
+    /// @notice Open a pack by pulling USDC directly from msg.sender, applying a promo discount code.
+    /// @param codeId keccak256 of the promo-code string; bytes32(0) means no discount.
+    function openPack(
+        address user,
+        bytes calldata signature,
+        bytes32 codeId
+    ) external;
+
     /// @notice Open a pack paying via Uniswap Permit2.
     function openPackWithPermit2(
         address user,
@@ -26,6 +34,18 @@ interface IPackMachine {
         uint256 permit2Deadline,
         bytes calldata permit2Signature,
         bytes calldata playSignature
+    ) external;
+
+    /// @notice Open a pack via Uniswap Permit2 with a promo discount code.
+    /// @dev The Permit2 signature must cover the discounted amount (use previewDiscount view off-chain).
+    /// @param codeId keccak256 of the promo-code string; bytes32(0) means no discount.
+    function openPackWithPermit2(
+        address user,
+        uint256 permit2Nonce,
+        uint256 permit2Deadline,
+        bytes calldata permit2Signature,
+        bytes calldata playSignature,
+        bytes32 codeId
     ) external;
 
     /// @notice Deposit tokens into tiered prize pools.

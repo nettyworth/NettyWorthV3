@@ -13,6 +13,7 @@ import {PermissionConsumer} from "./PermissionConsumer.sol";
 import {Roles} from "./lib/Roles.sol";
 import {IPackMachine} from "./interfaces/IPackMachine.sol";
 import {IPackMachineFactory} from "./interfaces/IPackMachineFactory.sol";
+import {IPromoCodeRegistry} from "./interfaces/IPromoCodeRegistry.sol";
 
 /// @title BuybackPool
 /// @author NettyWorth
@@ -54,6 +55,9 @@ contract BuybackPool is
         uint256 totalPaidOut;
         /// @dev Per-PackMachine buyback rate override (0 = use defaultBuybackBps).
         mapping(address packMachine => uint16) packMachineBuybackBps;
+        // ── Appended ──────────────────────────────────────────────────────────
+        /// @dev PromoCodeRegistry proxy address for buyback-boost code redemption.
+        address promoCodeRegistry;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.BuybackPool")) - 1)) & ~bytes32(uint256(0xff))
@@ -94,6 +98,17 @@ contract BuybackPool is
     );
     event EmergencyWithdrawal(address indexed to, uint256 amount);
     event PackMachineRegistered(address indexed packMachine, bool registered);
+    /// @notice Emitted when a buyback-boost promo code is applied.
+    event BuybackBoosted(
+        uint256 indexed tokenId,
+        address indexed seller,
+        bytes32 indexed codeId,
+        uint16 boostedBps
+    );
+    event PromoCodeRegistryUpdated(
+        address indexed oldRegistry,
+        address indexed newRegistry
+    );
 
     // =========================================================================
     // Errors
@@ -108,6 +123,7 @@ contract BuybackPool is
     error BuybackPool__InvalidBps(uint16 bps);
     error BuybackPool__ZeroAddress();
     error BuybackPool__NotPaused();
+    error BuybackPool__PromoRegistryNotSet();
 
     uint16 private constant BPS_PRECISION = 10000;
 
@@ -178,7 +194,21 @@ contract BuybackPool is
     /// @notice Sell a token back to the pool at the buyback rate for its source PackMachine.
     /// @dev Caller must own the token and have approved this contract (or use setApprovalForAll).
     function buyback(uint256 tokenId) external nonReentrant whenNotPaused {
-        _executeBuyback(tokenId);
+        _executeBuyback(tokenId, bytes32(0));
+    }
+
+    /// @notice Sell a token back to the pool applying a buyback-boost promo code.
+    /// @dev    The PromoCodeRegistry is queried to validate and consume the code.
+    ///         Reverts if the registry is not configured or the code is invalid/expired/exhausted.
+    ///         Boosted rates (90/95/98%) are always higher than the configured default (80%) so the
+    ///         code bps is used directly — the pool must hold sufficient USDC to cover the higher payout.
+    ///         Pass bytes32(0) as codeId to sell back without a boost (equivalent to the no-code overload).
+    /// @param codeId keccak256 of the off-chain promo-code string; bytes32(0) means no boost.
+    function buyback(
+        uint256 tokenId,
+        bytes32 codeId
+    ) external nonReentrant whenNotPaused {
+        _executeBuyback(tokenId, codeId);
     }
 
     // =========================================================================
@@ -208,6 +238,16 @@ contract BuybackPool is
             bps
         );
         $.packMachineBuybackBps[machine] = bps;
+    }
+
+    /// @notice Set the PromoCodeRegistry proxy address for buyback-boost code redemption.
+    function setPromoCodeRegistry(
+        address registry
+    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
+        if (registry == address(0)) revert BuybackPool__ZeroAddress();
+        BuybackPoolStorage storage $ = _getStorage();
+        emit PromoCodeRegistryUpdated($.promoCodeRegistry, registry);
+        $.promoCodeRegistry = registry;
     }
 
     /// @notice Register or deregister a PackMachine as an authorized token source.
@@ -299,6 +339,10 @@ contract BuybackPool is
         return _getStorage().packMachineBuybackBps[machine];
     }
 
+    function getPromoCodeRegistry() external view returns (address) {
+        return _getStorage().promoCodeRegistry;
+    }
+
     // =========================================================================
     // UUPS
     // =========================================================================
@@ -320,7 +364,7 @@ contract BuybackPool is
     // Internal helpers
     // =========================================================================
 
-    function _executeBuyback(uint256 tokenId) private {
+    function _executeBuyback(uint256 tokenId, bytes32 codeId) private {
         BuybackPoolStorage storage $ = _getStorage();
         TokenBuybackInfo storage info = $.tokenInfo[tokenId];
 
@@ -340,6 +384,21 @@ contract BuybackPool is
         // Determine buyback rate: per-machine override, fallback to global default.
         uint16 buybackBps = $.packMachineBuybackBps[info.sourcePackMachine];
         if (buybackBps == 0) buybackBps = $.defaultBuybackBps;
+
+        // Apply a buyback-boost promo code if provided.
+        // Boosted rates (9000/9500/9800) are always higher than the configured default/override,
+        // so the code bps is used directly rather than taking the max.
+        if (codeId != bytes32(0)) {
+            address registry = $.promoCodeRegistry;
+            if (registry == address(0))
+                revert BuybackPool__PromoRegistryNotSet();
+            uint16 boostedBps = IPromoCodeRegistry(registry).redeemBuyback(
+                codeId,
+                caller
+            );
+            buybackBps = boostedBps;
+            emit BuybackBoosted(tokenId, caller, codeId, boostedBps);
+        }
 
         uint256 payout =
             (uint256(info.pricePerCard) * buybackBps) / BPS_PRECISION;

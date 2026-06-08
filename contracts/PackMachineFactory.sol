@@ -34,6 +34,10 @@ contract PackMachineFactory is
         address[] allPackMachines;
         mapping(address => bool) trustedForwarders;
         address buybackPool;
+        // ── Appended ──────────────────────────────────────────────────────────
+        /// @dev PromoCodeRegistry proxy address.  Passed to PackMachine clones via
+        ///      IPackMachineFactory.promoCodeRegistry() so they can call redeemDiscount.
+        address promoCodeRegistry;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.PackMachineFactory")) - 1)) & ~bytes32(uint256(0xff))
@@ -73,6 +77,10 @@ contract PackMachineFactory is
     );
     event TrustedForwarderUpdated(address indexed forwarder, bool trusted);
     event BuybackPoolUpdated(address indexed oldPool, address indexed newPool);
+    event PromoCodeRegistryUpdated(
+        address indexed oldRegistry,
+        address indexed newRegistry
+    );
 
     // =========================================================================
     // Errors
@@ -289,6 +297,15 @@ contract PackMachineFactory is
         $.buybackPool = pool;
     }
 
+    function setPromoCodeRegistry(
+        address registry
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
+        if (registry == address(0)) revert PackMachineFactory__ZeroAddress();
+        PackMachineFactoryStorage storage $ = _getStorage();
+        emit PromoCodeRegistryUpdated($.promoCodeRegistry, registry);
+        $.promoCodeRegistry = registry;
+    }
+
     // =========================================================================
     // Views
     // =========================================================================
@@ -315,6 +332,10 @@ contract PackMachineFactory is
 
     function buybackPool() external view returns (address) {
         return _getStorage().buybackPool;
+    }
+
+    function promoCodeRegistry() external view returns (address) {
+        return _getStorage().promoCodeRegistry;
     }
 
     function getAllPackMachines() external view returns (address[] memory) {
