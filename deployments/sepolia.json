@@ -103,6 +103,27 @@
       "grantedBy": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
       "txHash": "0xc2fb12a853bcf0300110a5951a734bed709f7cdf9729e1c35f80f9de54b796bc",
       "grantedAt": "2026-06-11T14:05:26.827Z"
+    },
+    {
+      "role": "BURNER_ROLE",
+      "roleHash": "0x3c11d16cbaffd01df69ce1c404f6340ee057498f5f00246190ea54220576a848",
+      "account": "0xA89Da886BAc2A60a99847E7e97e9b4ab047b0E3f",
+      "grantedBy": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
+      "txHash": "0x6e71751a39b34e4c5cf51bbeeb86d0867385dd0872a4d6ae5243aa482b6bf416",
+      "grantedAt": "2026-06-11T14:28:01.290Z"
+    }
+  ],
+  "BurnHistory": [
+    {
+      "burnedBy": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
+      "tokenIds": [
+        "1",
+        "2"
+      ],
+      "txHashes": [
+        "0x90af8d242344b0eeb7965a0be9bc345402247a6cdc29a171385122dbe63c5524"
+      ],
+      "burnedAt": "2026-06-11T15:22:40.047Z"
     }
   ]
 }

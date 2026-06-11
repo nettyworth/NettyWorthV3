@@ -138,7 +138,10 @@ contract PackMachine is
     event BuybackAllocationUpdated(uint16 oldBps, uint16 newBps);
     event BuybackPoolUpdated(address indexed oldPool, address indexed newPool);
     event RetentionThresholdUpdated(uint16 oldBps, uint16 newBps);
-    event AuthorizedDepositorUpdated(address indexed depositor, bool authorized);
+    event AuthorizedDepositorUpdated(
+        address indexed depositor,
+        bool authorized
+    );
 
     // =========================================================================
     // Errors
@@ -328,7 +331,8 @@ contract PackMachine is
                 user
             );
         }
-        uint256 discountedPrice = price - (price * discountBps) / WEIGHT_PRECISION;
+        uint256 discountedPrice =
+            price - (price * discountBps) / WEIGHT_PRECISION;
 
         // Guard: NettyWorth (finance wallet) absorbs the discount; the pool is unaffected.
         // If the discount makes the user's payment less than the pool's share, revert.
@@ -363,7 +367,10 @@ contract PackMachine is
         } else {
             buybackAmount = 0;
         }
-        token.safeTransfer(iFactory.financeWallet(), discountedPrice - buybackAmount);
+        token.safeTransfer(
+            iFactory.financeWallet(),
+            discountedPrice - buybackAmount
+        );
 
         _requestVRF($, user, iFactory);
     }
@@ -871,7 +878,8 @@ contract PackMachine is
                 user
             );
         }
-        uint256 discountedPrice = price - (price * discountBps) / WEIGHT_PRECISION;
+        uint256 discountedPrice =
+            price - (price * discountBps) / WEIGHT_PRECISION;
 
         // Guard: finance wallet absorbs the discount.  If buyback allocation exceeds the
         // discounted price the payout would underflow — revert clearly instead of wrapping.

@@ -712,6 +712,8 @@ Deploys the `P2PTradeEscrow` implementation and ERC1967 proxy. `initialize(owner
 | `upgrade-asset-nft.ts` | Deploy new AssetNFT impl and call `upgradeToAndCall` on the proxy | `UPGRADER_ROLE` |
 | `upgrade-pack-vrf-router.ts` | Deploy new PackVRFRouter impl and upgrade proxy | `UPGRADER_ROLE` |
 | `set-callback-gas-limit.ts` | Update the Chainlink VRF callback gas limit on PackVRFRouter | `DEFAULT_ADMIN_ROLE` |
+| `grant-role.ts` | Grant any protocol role to any wallet via PermissionManager | `DEFAULT_ADMIN_ROLE` |
+| `burn-asset-nft.ts` | Permanently burn AssetNFT tokens by token ID | `BURNER_ROLE` |
 | `seed-asset-nft.ts` | Dev/test helper — mint sample AssetNFT cards and set appraisals | `MINTER_ROLE` |
 
 ```bash
@@ -721,6 +723,66 @@ CALLBACK_GAS_LIMIT=250000 npx hardhat run scripts/set-callback-gas-limit.ts --ne
 # Example: upgrade AssetNFT
 npx hardhat run scripts/upgrade-asset-nft.ts --network <network>
 ```
+
+---
+
+### `grant-role.ts` — Grant a protocol role
+
+Grants any role defined in `contracts/lib/Roles.sol` to a wallet address via `PermissionManager.grantRole`. The caller must hold `DEFAULT_ADMIN_ROLE`. Idempotent — exits cleanly if the account already holds the role.
+
+**Environment variables:**
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `ROLE` | Yes | Role name: `MINTER_ROLE`, `BURNER_ROLE`, `STATE_MANAGER_ROLE`, `URI_SETTER_ROLE`, `PAUSER_ROLE`, `UPGRADER_ROLE`, `BLACKLIST_ROLE`, `PACK_OPERATOR_ROLE`, `BUYBACK_POOL_ROLE`, `MARKETPLACE_ROLE`, `DEFAULT_ADMIN_ROLE` |
+| `ACCOUNT` | Yes | Wallet address to grant the role to |
+| `PERMISSION_MANAGER_PROXY` | No | Override PermissionManager proxy; falls back to `deployments/<network>.json` |
+
+```bash
+# Grant MINTER_ROLE to a backend signer
+ROLE=MINTER_ROLE ACCOUNT=0x<wallet> \
+  npx hardhat run scripts/grant-role.ts --network sepolia
+
+# Grant MARKETPLACE_ROLE to the marketplace contract
+ROLE=MARKETPLACE_ROLE ACCOUNT=0x<marketplace-proxy> \
+  npx hardhat run scripts/grant-role.ts --network sepolia
+
+# Grant PACK_OPERATOR_ROLE with an explicit PermissionManager override
+ROLE=PACK_OPERATOR_ROLE ACCOUNT=0x<wallet> PERMISSION_MANAGER_PROXY=0x<proxy> \
+  npx hardhat run scripts/grant-role.ts --network sepolia
+```
+
+On live networks (`sepolia`, `mainnet`, `base`) the script prints a confirmation summary and requires `yes` before sending. It appends an audit entry `{ role, roleHash, account, grantedBy, txHash, grantedAt }` to the `RoleGrants` array in `deployments/<network>.json`.
+
+---
+
+### `burn-asset-nft.ts` — Burn AssetNFT tokens
+
+Permanently destroys AssetNFT tokens by calling `batchBurn` in batches of ≤ 50. Only tokens in `Held` or `RemovedFromPlatform` state can be burned (contract enforces this). The caller must hold `BURNER_ROLE`.
+
+**Environment variables:**
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `TOKEN_IDS` | Yes | Token IDs to burn. Accepts ranges (`1-50`), comma lists (`1,2,5`), or combinations (`1-10,15,20-25`) |
+| `ASSET_NFT_PROXY` | No | Override AssetNFT proxy; falls back to `deployments/<network>.json` |
+| `PERMISSION_MANAGER_PROXY` | No | Override PermissionManager proxy; falls back to `deployments/<network>.json` |
+
+```bash
+# Burn a range of tokens
+TOKEN_IDS=1-10 npx hardhat run scripts/burn-asset-nft.ts --network sepolia
+
+# Burn specific token IDs
+TOKEN_IDS=5,12,37 npx hardhat run scripts/burn-asset-nft.ts --network sepolia
+
+# Burn with explicit proxy addresses
+TOKEN_IDS=1-50 ASSET_NFT_PROXY=0x<proxy> PERMISSION_MANAGER_PROXY=0x<proxy> \
+  npx hardhat run scripts/burn-asset-nft.ts --network sepolia
+```
+
+On live networks the script prints a confirmation summary (with an irreversibility warning) and requires `yes` before sending. It appends a `BurnHistory` entry `{ burnedBy, tokenIds, txHashes, burnedAt }` to `deployments/<network>.json`.
+
+> **Note:** If a token is in `Loaned` or `InPack` state the contract reverts with `AssetNFT__TokenNotBurnable`. Ensure collateral is released and pack deposits are withdrawn before burning.
 
 ## Networks
 
