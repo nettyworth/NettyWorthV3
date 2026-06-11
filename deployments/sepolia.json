@@ -124,6 +124,25 @@
         "0x90af8d242344b0eeb7965a0be9bc345402247a6cdc29a171385122dbe63c5524"
       ],
       "burnedAt": "2026-06-11T15:22:40.047Z"
+    },
+    {
+      "burnedBy": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
+      "tokenIds": [
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12"
+      ],
+      "txHashes": [
+        "0x9a55e036b310da389ecadd4d5debc4320a3b2019d3fa31c94b134b1ebf64c16b"
+      ],
+      "burnedAt": "2026-06-11T15:29:27.683Z"
     }
   ]
 }
