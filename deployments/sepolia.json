@@ -94,5 +94,15 @@
     "implementation": "0xdb291a0dc971f38b801d85aaa8a2e89309825be1",
     "owner": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
     "deployedAt": "2026-06-08T16:30:03.817Z"
-  }
+  },
+  "RoleGrants": [
+    {
+      "role": "MINTER_ROLE",
+      "roleHash": "0x9f2df0fed2c77648de5860a4cc508cd0818c85b8b8a1ab4ceeef8d981c8956a6",
+      "account": "0xA89Da886BAc2A60a99847E7e97e9b4ab047b0E3f",
+      "grantedBy": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
+      "txHash": "0xc2fb12a853bcf0300110a5951a734bed709f7cdf9729e1c35f80f9de54b796bc",
+      "grantedAt": "2026-06-11T14:05:26.827Z"
+    }
+  ]
 }
