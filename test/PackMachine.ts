@@ -163,6 +163,29 @@ describe("PackMachine Integration", async function () {
       account: walletAdmin.account,
     });
 
+    // PackRegistry (UUPS proxy) — must be wired before createPackMachine
+    const registryImpl = await viem.deployContract("PackRegistry");
+    const registryInitData = encodeFunctionData({
+      abi: registryImpl.abi,
+      functionName: "initialize",
+      args: [permissionManager.address],
+    });
+    const registryProxy = await viem.deployContract("ERC1967ProxyHelper", [
+      registryImpl.address,
+      registryInitData,
+    ]);
+    const packRegistry = await viem.getContractAt(
+      "PackRegistry",
+      registryProxy.address,
+    );
+
+    await factory.write.setPackRegistry([packRegistry.address], {
+      account: walletAdmin.account,
+    });
+    await packRegistry.write.setFactory([factory.address], {
+      account: walletAdmin.account,
+    });
+
     // Create a PackMachine clone
     const startBlock = await publicClient.getBlockNumber();
     await factory.write.createPackMachine(
@@ -197,6 +220,7 @@ describe("PackMachine Integration", async function () {
       vrfRouter,
       factory,
       packMachine,
+      packRegistry,
     };
   }
 
@@ -220,10 +244,11 @@ describe("PackMachine Integration", async function () {
       BigInt(startId + i),
     );
     const tiers = Array(count).fill(0) as number[]; // all Base
+    const masks = Array(count).fill(1n) as bigint[]; // eligible for pack 0
     await assetNFT.write.setApprovalForAll([packMachine.address, true], {
       account: walletOperator.account,
     });
-    await packMachine.write.deposit([tokenIds, tiers, operatorAddress], {
+    await packMachine.write.deposit([tokenIds, tiers, masks, operatorAddress], {
       account: walletOperator.account,
     });
     return tokenIds;
@@ -256,11 +281,12 @@ describe("PackMachine Integration", async function () {
       types: {
         OpenPack: [
           { name: "user", type: "address" },
+          { name: "packId", type: "uint256" },
           { name: "nonce", type: "uint256" },
         ],
       },
       primaryType: "OpenPack" as const,
-      message: { user: userAddr, nonce },
+      message: { user: userAddr, packId: 0n, nonce },
     };
   }
 
@@ -303,6 +329,7 @@ describe("PackMachine Integration", async function () {
       await packMachine.write.openPackWithPermit2(
         [
           userAddress,
+          0n, // packId
           0n, // permit2Nonce
           BigInt(Math.floor(Date.now() / 1000) + 3600), // deadline
           "0x", // permit2Signature (not verified by mock)
@@ -386,7 +413,7 @@ describe("PackMachine Integration", async function () {
       );
       const playSig = await walletOperator.signTypedData(typedData);
 
-      await packMachine.write.openPack([userAddress, playSig], {
+      await packMachine.write.openPack([userAddress, 0n, playSig], {
         account: walletUser.account,
       });
 
@@ -418,7 +445,7 @@ describe("PackMachine Integration", async function () {
   describe("Tier weights", async function () {
     it("should initialize with default weights summing to 10000", async function () {
       const { packMachine } = await deployFullStack();
-      const weights = await packMachine.read.getTierWeights();
+      const weights = await packMachine.read.getPackTierWeights([0n]);
       const sum = (weights as readonly number[]).reduce((a, b) => a + b, 0);
       assert.equal(sum, 10000);
       assert.equal(weights[0], 7500); // Base 75%
@@ -429,33 +456,37 @@ describe("PackMachine Integration", async function () {
     });
 
     it("operator can update tier weights", async function () {
-      const { packMachine } = await deployFullStack();
+      const { packMachine, packRegistry } = await deployFullStack();
       const newWeights = [5000, 2000, 1500, 1000, 500] as const;
-      await packMachine.write.setTierWeights([newWeights], {
-        account: walletOperator.account,
-      });
-      const stored = await packMachine.read.getTierWeights();
+      await packRegistry.write.setPackTierWeights(
+        [packMachine.address, 0n, newWeights],
+        { account: walletOperator.account },
+      );
+      // Read back via clone pass-through
+      const stored = await packMachine.read.getPackTierWeights([0n]);
       assert.equal(stored[0], 5000);
       assert.equal(stored[4], 500);
     });
 
     it("rejects weights that do not sum to 10000", async function () {
-      const { packMachine } = await deployFullStack();
+      const { packMachine, packRegistry } = await deployFullStack();
       const badWeights = [5000, 2000, 1500, 1000, 100] as const; // sums to 9600
       await assert.rejects(
-        packMachine.write.setTierWeights([badWeights], {
-          account: walletOperator.account,
-        }),
+        packRegistry.write.setPackTierWeights(
+          [packMachine.address, 0n, badWeights],
+          { account: walletOperator.account },
+        ),
       );
     });
 
     it("non-operator cannot update tier weights", async function () {
-      const { packMachine } = await deployFullStack();
+      const { packMachine, packRegistry } = await deployFullStack();
       const weights = [5000, 2000, 1500, 1000, 500] as const;
       await assert.rejects(
-        packMachine.write.setTierWeights([weights], {
-          account: walletUser.account,
-        }),
+        packRegistry.write.setPackTierWeights(
+          [packMachine.address, 0n, weights],
+          { account: walletUser.account },
+        ),
       );
     });
   });
@@ -481,10 +512,11 @@ describe("PackMachine Integration", async function () {
       );
       // 2 Base, 2 Common, 1 Rare
       const tiers = [0, 0, 1, 1, 3] as const;
+      const masks = Array(count).fill(1n) as bigint[]; // eligible for pack 0
       await assetNFT.write.setApprovalForAll([packMachine.address, true], {
         account: walletOperator.account,
       });
-      await packMachine.write.deposit([tokenIds, tiers, operatorAddress], {
+      await packMachine.write.deposit([tokenIds, tiers, masks, operatorAddress], {
         account: walletOperator.account,
       });
 
@@ -499,7 +531,7 @@ describe("PackMachine Integration", async function () {
     it("rejects mismatched array lengths", async function () {
       const { packMachine } = await deployFullStack();
       await assert.rejects(
-        packMachine.write.deposit([[1n, 2n], [0], operatorAddress], {
+        packMachine.write.deposit([[1n, 2n], [0], [1n], operatorAddress], {
           account: walletOperator.account,
         }),
       );
@@ -516,7 +548,7 @@ describe("PackMachine Integration", async function () {
         account: walletOperator.account,
       });
       await assert.rejects(
-        packMachine.write.deposit([[BigInt(startId)], [5], operatorAddress], {
+        packMachine.write.deposit([[BigInt(startId)], [5], [1n], operatorAddress], {
           account: walletOperator.account,
         }),
       );
@@ -534,7 +566,7 @@ describe("PackMachine Integration", async function () {
         account: walletAdmin.account,
       });
       await assert.rejects(
-        packMachine.write.deposit([[1n], [0], userAddress], {
+        packMachine.write.deposit([[1n], [0], [1n], userAddress], {
           account: walletUser.account,
         }),
       );
@@ -615,10 +647,11 @@ describe("PackMachine Integration", async function () {
         BigInt(Number(currentSupply) - CARDS_PER_PACK + 1 + i),
       );
       const tiers = Array(CARDS_PER_PACK).fill(0) as number[];
+      const masks = Array(CARDS_PER_PACK).fill(1n) as bigint[]; // eligible for pack 0
       await assetNFT.write.setApprovalForAll([futureMachineAddr, true], {
         account: walletOperator.account,
       });
-      await futureMachine.write.deposit([ids, tiers, operatorAddress], {
+      await futureMachine.write.deposit([ids, tiers, masks, operatorAddress], {
         account: walletOperator.account,
       });
 
@@ -639,7 +672,7 @@ describe("PackMachine Integration", async function () {
       const playSig = await walletOperator.signTypedData(typedData);
 
       await assert.rejects(
-        futureMachine.write.openPack([userAddress, playSig], {
+        futureMachine.write.openPack([userAddress, 0n, playSig], {
           account: walletUser.account,
         }),
       );
@@ -668,7 +701,7 @@ describe("PackMachine Integration", async function () {
       const playSig = await walletOperator.signTypedData(typedData);
 
       await assert.rejects(
-        packMachine.write.openPack([userAddress, playSig], {
+        packMachine.write.openPack([userAddress, 0n, playSig], {
           account: walletUser.account,
         }),
       );
@@ -703,10 +736,10 @@ describe("PackMachine Integration", async function () {
         buildOpenPackTypedData(packMachine.address, chainId, user2Address, 0n),
       );
 
-      await packMachine.write.openPack([userAddress, sig1], {
+      await packMachine.write.openPack([userAddress, 0n, sig1], {
         account: walletUser.account,
       });
-      await packMachine.write.openPack([user2Address, sig2], {
+      await packMachine.write.openPack([user2Address, 0n, sig2], {
         account: walletUser2.account,
       });
 

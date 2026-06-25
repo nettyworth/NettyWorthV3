@@ -230,8 +230,10 @@ console.log("⚠️  Remaining steps before packs can open:");
 console.log(
   `  1. (Optional) Configure buyback on the clone (PACK_OPERATOR_ROLE):`,
 );
-console.log(`       clone.setBuybackPool(${buybackProxy})`);
-console.log(`       clone.setBuybackAllocation(<bps>)  // e.g. 2000 = 20%`);
+console.log(`       clone.setBuybackPool(${buybackProxy})             // stays on clone`);
+console.log(
+  `       packRegistry.setPackBuybackAllocation(${cloneAddress}, 0, <bps>)  // e.g. 2000 = 20%`,
+);
 console.log(`  2. Deposit NFT inventory into the clone (PACK_OPERATOR_ROLE):`);
 console.log(
   `       assetNFT.setApprovalForAll(${cloneAddress}, true)  // from token owner`,

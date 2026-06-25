@@ -6,6 +6,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {PackMachine} from "../PackMachine.sol";
 import {PackMachineFactory} from "../PackMachineFactory.sol";
 import {PackVRFRouter} from "../PackVRFRouter.sol";
+import {PackRegistry} from "../PackRegistry.sol";
 import {BuybackPool} from "../BuybackPool.sol";
 import {PromoCodeRegistry} from "../PromoCodeRegistry.sol";
 import {IPromoCodeRegistry} from "../interfaces/IPromoCodeRegistry.sol";
@@ -38,6 +39,7 @@ contract PromoCodeSecurityTest is Test {
     PackMachine internal packMachine;
     PackMachineFactory internal factory;
     PackVRFRouter internal vrfRouter;
+    PackRegistry internal packRegistry;
     BuybackPool internal pool;
     PromoCodeRegistry internal registry;
     PermissionManager internal pm;
@@ -70,7 +72,7 @@ contract PromoCodeSecurityTest is Test {
         0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     bytes32 internal constant OPEN_PACK_TYPEHASH = keccak256(
-        "OpenPack(address user,uint256 nonce)"
+        "OpenPack(address user,uint256 packId,uint256 nonce)"
     );
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -157,6 +159,18 @@ contract PromoCodeSecurityTest is Test {
         factory.setPackVRFRouter(address(vrfRouter));
         vm.stopPrank();
 
+        PackRegistry registryImpl2 = new PackRegistry();
+        ERC1967Proxy registryProxy2 = new ERC1967Proxy(
+            address(registryImpl2),
+            abi.encodeCall(PackRegistry.initialize, (address(pm)))
+        );
+        packRegistry = PackRegistry(address(registryProxy2));
+
+        vm.startPrank(admin);
+        factory.setPackRegistry(address(packRegistry));
+        packRegistry.setFactory(address(factory));
+        vm.stopPrank();
+
         vm.prank(operator);
         address cloneAddr = factory.createPackMachine(PRICE, CARDS_PER_PACK, uint40(block.timestamp));
         packMachine = PackMachine(cloneAddr);
@@ -180,7 +194,7 @@ contract PromoCodeSecurityTest is Test {
         vm.prank(operator);
         packMachine.setBuybackPool(address(pool));
         vm.prank(operator);
-        packMachine.setBuybackAllocation(BUYBACK_ALLOC_BPS);
+        packRegistry.setPackBuybackAllocation(address(packMachine), 0, BUYBACK_ALLOC_BPS);
         vm.prank(operator);
         pool.registerPackMachine(address(packMachine), true);
 
@@ -256,9 +270,11 @@ contract PromoCodeSecurityTest is Test {
         }
         vm.prank(operator);
         assetNFT.batchMint(recipients, uris);
+        uint256[] memory masks = new uint256[](count);
+        for (uint256 i; i < count; i++) masks[i] = 1;
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(tokenIds, tiers, operator);
+        packMachine.deposit(tokenIds, tiers, masks, operator);
         vm.stopPrank();
     }
 
@@ -269,7 +285,7 @@ contract PromoCodeSecurityTest is Test {
         uint256 nonce,
         uint256 signerPk
     ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(abi.encode(OPEN_PACK_TYPEHASH, user_, nonce));
+        bytes32 structHash = keccak256(abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce));
         bytes32 domainSeparator = keccak256(
             abi.encode(
                 EIP712_DOMAIN_TYPEHASH,
@@ -298,9 +314,9 @@ contract PromoCodeSecurityTest is Test {
         vm.startPrank(who);
         usdc.approve(address(packMachine), PRICE);
         if (codeId == bytes32(0)) {
-            packMachine.openPack(who, sig);
+            packMachine.openPack(who, 0, sig);
         } else {
-            packMachine.openPack(who, sig, codeId);
+            packMachine.openPack(who, 0, sig, codeId);
         }
         vm.stopPrank();
 
@@ -425,7 +441,7 @@ contract PromoCodeSecurityTest is Test {
         vm.startPrank(attacker);
         usdc.approve(address(packMachine), PRICE);
         vm.expectRevert(PackMachine.PackMachine__InvalidSignature.selector);
-        packMachine.openPack(attacker, forgedSig, DISCOUNT_CODE);
+        packMachine.openPack(attacker, 0, forgedSig, DISCOUNT_CODE);
         vm.stopPrank();
 
         assertEq(registry.getCode(DISCOUNT_CODE).redeemedCount, countBefore,
@@ -460,7 +476,7 @@ contract PromoCodeSecurityTest is Test {
         usdc.mint(attacker, PRICE); // attacker pays (they're the msg.sender / payer)
         vm.startPrank(attacker);
         usdc.approve(address(packMachine), PRICE);
-        packMachine.openPack(victim, sig, DISCOUNT_CODE); // attacker relays, victim is user
+        packMachine.openPack(victim, 0, sig, DISCOUNT_CODE); // attacker relays, victim is user
         vm.stopPrank();
 
         // VRF fulfillment — request 1
@@ -482,7 +498,7 @@ contract PromoCodeSecurityTest is Test {
         vm.startPrank(attacker);
         usdc.approve(address(packMachine), PRICE);
         vm.expectRevert(PackMachine.PackMachine__InvalidSignature.selector);
-        packMachine.openPack(victim, sig, DISCOUNT_CODE); // same stale sig
+        packMachine.openPack(victim, 0, sig, DISCOUNT_CODE); // same stale sig
         vm.stopPrank();
 
         // Count must not increment on the rejected replay.
@@ -557,7 +573,7 @@ contract PromoCodeSecurityTest is Test {
                 attacker
             )
         );
-        packMachine.openPack(attacker, sig, RESTRICTED_CODE);
+        packMachine.openPack(attacker, 0, sig, RESTRICTED_CODE);
         vm.stopPrank();
 
         assertEq(registry.getCode(RESTRICTED_CODE).redeemedCount, countBefore,
@@ -584,7 +600,7 @@ contract PromoCodeSecurityTest is Test {
         usdc.mint(victim, PRICE);
         vm.startPrank(victim);
         usdc.approve(address(packMachine), PRICE);
-        packMachine.openPack(victim, sig, RESTRICTED_CODE); // must not revert
+        packMachine.openPack(victim, 0, sig, RESTRICTED_CODE); // must not revert
         vm.stopPrank();
 
         assertEq(registry.getCode(RESTRICTED_CODE).redeemedCount, 1,

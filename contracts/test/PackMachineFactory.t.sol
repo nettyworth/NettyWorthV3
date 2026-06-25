@@ -6,6 +6,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {PackMachine} from "../PackMachine.sol";
 import {PackMachineFactory} from "../PackMachineFactory.sol";
 import {PackVRFRouter} from "../PackVRFRouter.sol";
+import {PackRegistry} from "../PackRegistry.sol";
 import {PermissionManager} from "../PermissionManager.sol";
 import {PermissionConsumer} from "../PermissionConsumer.sol";
 import {Roles} from "../lib/Roles.sol";
@@ -16,6 +17,7 @@ import {MockVRFCoordinatorV2Plus} from "../test-helpers/MockVRFCoordinatorV2Plus
 contract PackMachineFactoryTest is Test {
     PackMachineFactory internal factory;
     PackVRFRouter internal vrfRouter;
+    PackRegistry internal packRegistry;
     PermissionManager internal pm;
     MockERC20 internal usdc;
     MockERC721 internal assetNFT;
@@ -79,6 +81,18 @@ contract PackMachineFactoryTest is Test {
         vm.startPrank(admin);
         factory.setImplementation(address(packMachineImpl));
         factory.setPackVRFRouter(address(vrfRouter));
+        vm.stopPrank();
+
+        PackRegistry registryImpl = new PackRegistry();
+        ERC1967Proxy registryProxy = new ERC1967Proxy(
+            address(registryImpl),
+            abi.encodeCall(PackRegistry.initialize, (address(pm)))
+        );
+        packRegistry = PackRegistry(address(registryProxy));
+
+        vm.startPrank(admin);
+        factory.setPackRegistry(address(packRegistry));
+        packRegistry.setFactory(address(factory));
         vm.stopPrank();
     }
 
@@ -194,8 +208,8 @@ contract PackMachineFactoryTest is Test {
         address machine = factory.createPackMachine(price, cards, start);
 
         PackMachine pm_ = PackMachine(machine);
-        assertEq(pm_.pricePerPack(), price);
-        assertEq(pm_.cardsPerPack(), cards);
+        assertEq(pm_.getPackPrice(0), price);
+        assertEq(pm_.getPackCardsPerPack(0), cards);
         assertEq(pm_.factory(), address(factory));
     }
 
@@ -244,6 +258,39 @@ contract PackMachineFactoryTest is Test {
             PackMachineFactory.PackMachineFactory__VRFRouterNotSet.selector
         );
         freshFactory.createPackMachine(10e6, 5, uint40(block.timestamp));
+    }
+
+    function test_CreatePackMachine_RevertsIfPackRegistryNotSet() public {
+        PackMachineFactory impl = new PackMachineFactory(forwarder);
+        ERC1967Proxy proxy = new ERC1967Proxy(
+            address(impl),
+            abi.encodeCall(
+                PackMachineFactory.initialize,
+                (address(pm), address(assetNFT), address(usdc), financeWallet)
+            )
+        );
+        PackMachineFactory freshFactory = PackMachineFactory(address(proxy));
+        vm.startPrank(admin);
+        freshFactory.setImplementation(address(packMachineImpl));
+        freshFactory.setPackVRFRouter(address(vrfRouter));
+        vm.stopPrank();
+
+        vm.prank(operator);
+        vm.expectRevert(
+            PackMachineFactory.PackMachineFactory__PackRegistryNotSet.selector
+        );
+        freshFactory.createPackMachine(10e6, 5, uint40(block.timestamp));
+    }
+
+    function test_RegisterMachine_OnlyFactoryCanCall() public {
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                PackRegistry.PackRegistry__OnlyFactory.selector,
+                operator
+            )
+        );
+        packRegistry.registerMachine(makeAddr("machine"), 10e6, 3, 0);
     }
 
     function test_CreatePackMachine_MultipleCreationsTracked() public {

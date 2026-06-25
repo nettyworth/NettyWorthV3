@@ -415,7 +415,8 @@ const hasMinter = await pm.read.hasProtocolRole([MINTER_ROLE, deployerAddress]);
 if (!hasMinter) {
   console.log("\n[3/4] Granting MINTER_ROLE to deployer...");
   try {
-    await pm.write.grantRole([MINTER_ROLE, deployerAddress]);
+    const hash = await pm.write.grantRole([MINTER_ROLE, deployerAddress]);
+    await publicClient.waitForTransactionReceipt({ hash });
     console.log("  ✓ MINTER_ROLE granted");
   } catch (e) {
     console.error(
@@ -505,9 +506,15 @@ if (poolProxy !== null) {
     const grades = POKEMON_CARDS.map((c) => BigInt(c.psaGrade));
     const categories = POKEMON_CARDS.map(() => 0n); // 0 = uncategorized
 
-    await pool.write.batchSetAppraisals([tokenIds, values, grades, categories]);
+    const hash = await pool.write.batchSetAppraisals([
+      tokenIds,
+      values,
+      grades,
+      categories,
+    ]);
     console.log(`  ✓ Appraisals set for ${tokenIds.length} tokens`);
 
+    await publicClient.waitForTransactionReceipt({ hash });
     // Spot-check first token
     const firstId = tokenIds[0];
     const isEligible = await pool.read.isEligible([firstId]);

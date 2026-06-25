@@ -226,6 +226,36 @@ if (configureBuyback) {
   }
 }
 
+// ─── Resolve PACK_REGISTRY (only needed if configuring buyback allocation) ────
+let packRegistryProxy: `0x${string}` | undefined;
+if (configureBuyback) {
+  if (process.env.PACK_REGISTRY) {
+    packRegistryProxy = getAddress(process.env.PACK_REGISTRY) as `0x${string}`;
+  } else if (connection.networkConfig.type === "http") {
+    const data = await readDeployments();
+    const entry = data["PackRegistry"] as Record<string, unknown> | undefined;
+    if (!entry?.proxy) {
+      console.error(
+        "PackRegistry proxy not found. Set PACK_REGISTRY env var or run deploy-pack-machine first.",
+      );
+      process.exit(1);
+    }
+    packRegistryProxy = getAddress(entry.proxy as string) as `0x${string}`;
+  } else {
+    // For non-http networks (e.g. hardhat local), resolve via factory.packRegistry()
+    const factoryData = await readDeployments();
+    const factoryEntry = factoryData["PackMachineFactory"] as Record<string, unknown> | undefined;
+    if (factoryEntry?.packRegistry) {
+      packRegistryProxy = getAddress(factoryEntry.packRegistry as string) as `0x${string}`;
+    } else {
+      console.error(
+        "Set PACK_REGISTRY env var to the deployed PackRegistry proxy address.",
+      );
+      process.exit(1);
+    }
+  }
+}
+
 // ─── Resolve ASSET_NFT_PROXY (only needed for deposit) ───────────────────────
 let assetNFTProxy: `0x${string}` | undefined;
 if (!SKIP_DEPOSIT) {
@@ -272,18 +302,25 @@ if (connection.networkConfig.type === "http") {
 const clone = await viem.getContractAt("PackMachine", cloneAddress);
 
 // ─── Step A: Configure buyback (optional) ────────────────────────────────────
-if (configureBuyback && buybackProxy !== undefined) {
-  console.log("\n[Buyback] Configuring buyback on clone...");
+if (configureBuyback && buybackProxy !== undefined && packRegistryProxy !== undefined) {
+  console.log("\n[Buyback] Configuring buyback...");
 
+  // setBuybackPool stays on the clone (machine-wide custody config).
   const setBuybackPoolHash = await clone.write.setBuybackPool([buybackProxy]);
   await publicClient.waitForTransactionReceipt({ hash: setBuybackPoolHash });
-  console.log(`  setBuybackPool(${buybackProxy}) ✓`);
+  console.log(`  clone.setBuybackPool(${buybackProxy}) ✓`);
 
-  const setBuybackAllocHash = await clone.write.setBuybackAllocation([
+  // setPackBuybackAllocation now lives on PackRegistry (pack-level config).
+  const packRegistry = await viem.getContractAt("PackRegistry", packRegistryProxy);
+  const setBuybackAllocHash = await packRegistry.write.setPackBuybackAllocation([
+    cloneAddress,
+    0,
     BUYBACK_ALLOCATION_BPS as number,
   ]);
   await publicClient.waitForTransactionReceipt({ hash: setBuybackAllocHash });
-  console.log(`  setBuybackAllocation(${BUYBACK_ALLOCATION_BPS}) ✓`);
+  console.log(
+    `  packRegistry.setPackBuybackAllocation(${cloneAddress}, 0, ${BUYBACK_ALLOCATION_BPS}) ✓`,
+  );
 } else if (!configureBuyback) {
   console.log("\n[Buyback] Skipped (BUYBACK_ALLOCATION_BPS not set).");
 }
@@ -327,7 +364,7 @@ if (!SKIP_DEPOSIT && assetNFTProxy !== undefined) {
 const effectivePoolSize = await clone.read.effectivePrizePoolSize();
 const totalInventory = await clone.read.getTotalInventory();
 const actualBuybackPool = await clone.read.getBuybackPool();
-const actualBuybackBps = await clone.read.getBuybackAllocationBps();
+const actualBuybackBps = await clone.read.getPackBuybackAllocationBps([0n]);
 
 console.log("\n=== PackMachine Setup Complete ===");
 console.log(
