@@ -6,6 +6,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {PackMachine} from "../PackMachine.sol";
 import {PackMachineFactory} from "../PackMachineFactory.sol";
 import {PackVRFRouter} from "../PackVRFRouter.sol";
+import {PackRegistry} from "../PackRegistry.sol";
 import {BuybackPool} from "../BuybackPool.sol";
 import {PermissionManager} from "../PermissionManager.sol";
 import {Roles} from "../lib/Roles.sol";
@@ -19,6 +20,7 @@ contract PackMachineCutoffTest is Test {
     PackMachine internal packMachine;
     PackMachineFactory internal factory;
     PackVRFRouter internal vrfRouter;
+    PackRegistry internal packRegistry;
     PermissionManager internal pm;
     MockERC20 internal usdc;
     AssetNFT internal assetNFT;
@@ -36,7 +38,7 @@ contract PackMachineCutoffTest is Test {
     address internal operator;
 
     bytes32 internal constant OPEN_PACK_TYPEHASH = keccak256(
-        "OpenPack(address user,uint256 nonce)"
+        "OpenPack(address user,uint256 packId,uint256 nonce)"
     );
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -121,6 +123,18 @@ contract PackMachineCutoffTest is Test {
         factory.setPackVRFRouter(address(vrfRouter));
         vm.stopPrank();
 
+        PackRegistry registryImpl = new PackRegistry();
+        ERC1967Proxy registryProxy = new ERC1967Proxy(
+            address(registryImpl),
+            abi.encodeCall(PackRegistry.initialize, (address(pm)))
+        );
+        packRegistry = PackRegistry(address(registryProxy));
+
+        vm.startPrank(admin);
+        factory.setPackRegistry(address(packRegistry));
+        packRegistry.setFactory(address(factory));
+        vm.stopPrank();
+
         vm.prank(operator);
         address cloneAddr = factory.createPackMachine(
             PRICE,
@@ -154,9 +168,11 @@ contract PackMachineCutoffTest is Test {
         }
         vm.prank(operator);
         assetNFT.batchMint(recipients, uris);
+        uint256[] memory masks = new uint256[](count);
+        for (uint256 i; i < count; i++) masks[i] = 1;
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(tokenIds, tiers, operator);
+        packMachine.deposit(tokenIds, tiers, masks, operator);
         vm.stopPrank();
     }
 
@@ -166,7 +182,7 @@ contract PackMachineCutoffTest is Test {
         uint256 nonce
     ) internal view returns (bytes memory) {
         bytes32 structHash = keccak256(
-            abi.encode(OPEN_PACK_TYPEHASH, user_, nonce)
+            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce)
         );
         bytes32 domainSep = keccak256(
             abi.encode(
@@ -194,7 +210,7 @@ contract PackMachineCutoffTest is Test {
             PackMachine(machine_).openNonce(who)
         );
         vm.prank(who);
-        PackMachine(machine_).openPack(who, sig);
+        PackMachine(machine_).openPack(who, 0, sig);
     }
 
     function _fulfillRequest(uint256 reqId, uint256 numWords) internal {
@@ -333,7 +349,7 @@ contract PackMachineCutoffTest is Test {
                 10
             )
         );
-        packMachine.openPack(user, sig);
+        packMachine.openPack(user, 0, sig);
     }
 
     function test_OpenPack_SucceedsWhenCutOffDisabled() public {
@@ -384,7 +400,7 @@ contract PackMachineCutoffTest is Test {
                 10
             )
         );
-        packMachine.openPack(user, sig);
+        packMachine.openPack(user, 0, sig);
     }
 
     // =========================================================================
@@ -510,7 +526,7 @@ contract PackMachineCutoffTest is Test {
                 5
             )
         );
-        packMachine.openPack(user, sig);
+        packMachine.openPack(user, 0, sig);
     }
 
     function test_CutOff_With50PercentThreshold() public {

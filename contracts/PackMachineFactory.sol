@@ -8,6 +8,7 @@ import {PermissionConsumer} from "./PermissionConsumer.sol";
 import {Roles} from "./lib/Roles.sol";
 import {IPackMachine} from "./interfaces/IPackMachine.sol";
 import {IPackVRFRouter} from "./interfaces/IPackVRFRouter.sol";
+import {IPackRegistry} from "./interfaces/IPackRegistry.sol";
 
 /// @title PackMachineFactory
 /// @author NettyWorth
@@ -38,6 +39,10 @@ contract PackMachineFactory is
         /// @dev PromoCodeRegistry proxy address.  Passed to PackMachine clones via
         ///      IPackMachineFactory.promoCodeRegistry() so they can call redeemDiscount.
         address promoCodeRegistry;
+        // ── Appended ──────────────────────────────────────────────────────────
+        /// @dev PackRegistry proxy address. Clones read pack definitions from here via
+        ///      IPackMachineFactory.packRegistry(). Must be set before createPackMachine.
+        address packRegistry;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.PackMachineFactory")) - 1)) & ~bytes32(uint256(0xff))
@@ -81,6 +86,10 @@ contract PackMachineFactory is
         address indexed oldRegistry,
         address indexed newRegistry
     );
+    event PackRegistryUpdated(
+        address indexed oldRegistry,
+        address indexed newRegistry
+    );
 
     // =========================================================================
     // Errors
@@ -94,6 +103,7 @@ contract PackMachineFactory is
     error PackMachineFactory__PaymentTokenNotSet();
     error PackMachineFactory__OnlyPackMachine(address caller);
     error PackMachineFactory__InvalidCardsPerPack();
+    error PackMachineFactory__PackRegistryNotSet();
 
     // =========================================================================
     // Modifiers
@@ -172,6 +182,8 @@ contract PackMachineFactory is
             revert PackMachineFactory__AssetNFTNotSet();
         if ($.paymentToken == address(0))
             revert PackMachineFactory__PaymentTokenNotSet();
+        if ($.packRegistry == address(0))
+            revert PackMachineFactory__PackRegistryNotSet();
         if (cardsPerPack_ == 0)
             revert PackMachineFactory__InvalidCardsPerPack();
 
@@ -187,8 +199,15 @@ contract PackMachineFactory is
         $.isPackMachine[packMachine] = true;
         $.allPackMachines.push(packMachine);
 
-        // Register with the VRF router so it can request randomness.
-        IPackVRFRouter($.packVRFRouter);
+        // Bootstrap pack 0 in the registry. The registry is the source of truth for
+        // all pack definitions; the clone holds no Pack array.
+        IPackRegistry($.packRegistry).registerMachine(
+            packMachine,
+            pricePerPack_,
+            cardsPerPack_,
+            startTime_
+        );
+
         // The PackVRFRouter.setAuthorizedPackMachine call must be done by an admin
         // (PACK_OPERATOR_ROLE) separately, because PackVRFRouter has its own access control.
         // Emitting the event here notifies off-chain tooling to complete that step.
@@ -306,6 +325,15 @@ contract PackMachineFactory is
         $.promoCodeRegistry = registry;
     }
 
+    function setPackRegistry(
+        address registry
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
+        if (registry == address(0)) revert PackMachineFactory__ZeroAddress();
+        PackMachineFactoryStorage storage $ = _getStorage();
+        emit PackRegistryUpdated($.packRegistry, registry);
+        $.packRegistry = registry;
+    }
+
     // =========================================================================
     // Views
     // =========================================================================
@@ -336,6 +364,10 @@ contract PackMachineFactory is
 
     function promoCodeRegistry() external view returns (address) {
         return _getStorage().promoCodeRegistry;
+    }
+
+    function packRegistry() external view returns (address) {
+        return _getStorage().packRegistry;
     }
 
     function getAllPackMachines() external view returns (address[] memory) {

@@ -16,44 +16,45 @@
     "deployedAt": "2026-06-08T15:30:28.970Z"
   },
   "PackVRFRouter": {
-    "proxy": "0x1126d2dd1641c06ecd26b75e379655b64fc7f8dc",
-    "implementation": "0x4990261ad6f28bec0a27486f2496c59efa851694",
+    "proxy": "0x62f73d660a08cc2b06362fb732dcaf20380bcc5c",
+    "implementation": "0x749d53949a788c53ad4320866ab197e79a81180c",
     "permissionManager": "0x8aF208488d6198F4712FCA457dcE8259Ac141601",
     "vrfCoordinator": "0x9DdfaCa8183c41ad55329BdeeD9F6A8d53168B1B",
     "subscriptionId": "101211738899578841133020544028266753490633834266748596589815508937050143498738",
     "keyHash": "0x787d74caea10b2b357790d5b5247c2f63d1d91572a9846f780606e4d953677ae",
     "callbackGasLimit": 250000,
     "requestConfirmations": 3,
-    "deployedAt": "2026-06-08T15:34:01.933Z"
+    "deployedAt": "2026-06-25T08:37:27.646Z"
   },
   "PackMachineImplementation": {
-    "implementation": "0x15d3d93807ca5f9500ea0ad613d5d6c6329c23d0",
+    "implementation": "0x2a4a201343764346059789c96fff84a15851eb5c",
     "trustedForwarder": "0x0000000000000000000000000000000000000000",
-    "deployedAt": "2026-06-08T15:34:01.934Z"
+    "deployedAt": "2026-06-25T08:37:27.647Z"
   },
   "PackMachineFactory": {
-    "proxy": "0xe013f4bbd886460f0747d9a9ff7fee473a272dd9",
-    "implementation": "0x1e8931530552bfa245e77afd148b1fac611ab9aa",
+    "proxy": "0xea794ac77805a38db0edc07f6256bc640fc58782",
+    "implementation": "0xe0ec2510813dab8282fb033543917dda9306cc26",
     "permissionManager": "0x8aF208488d6198F4712FCA457dcE8259Ac141601",
-    "packMachineImplementation": "0x15d3d93807ca5f9500ea0ad613d5d6c6329c23d0",
-    "packVRFRouter": "0x1126d2dd1641c06ecd26b75e379655b64fc7f8dc",
-    "buybackPool": "0x3c716e0d0a9863270978dd925f6b2a1dfd30cce8",
+    "packMachineImplementation": "0x2a4a201343764346059789c96fff84a15851eb5c",
+    "packVRFRouter": "0x62f73d660a08cc2b06362fb732dcaf20380bcc5c",
+    "buybackPool": "0xd37fc1e3ca4ccfb9134130db39b3efa54ed40eae",
+    "packRegistry": "0xa8769260d1501d4ec35c161b93b965dc0d786ee7",
     "assetNFT": "0x2f8BD4136edDEd19473448c24Da5C8aB9174b20C",
     "paymentToken": "0x8545C5930F36aBE57ED4F5372f3fbB8b49E533DB",
     "financeWallet": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
     "trustedForwarder": "0x0000000000000000000000000000000000000000",
-    "deployedAt": "2026-06-08T15:34:01.934Z"
+    "deployedAt": "2026-06-25T08:37:27.647Z"
   },
   "BuybackPool": {
-    "proxy": "0x3c716e0d0a9863270978dd925f6b2a1dfd30cce8",
-    "implementation": "0xacabcfe316fecaa02b663b8dc2a2710b2a6f8423",
+    "proxy": "0xd37fc1e3ca4ccfb9134130db39b3efa54ed40eae",
+    "implementation": "0x7d1383f75624912e9b76a2d5b39968e467171dce",
     "permissionManager": "0x8aF208488d6198F4712FCA457dcE8259Ac141601",
     "assetNFT": "0x2f8BD4136edDEd19473448c24Da5C8aB9174b20C",
     "paymentToken": "0x8545C5930F36aBE57ED4F5372f3fbB8b49E533DB",
     "financeWallet": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
-    "factory": "0xe013f4bbd886460f0747d9a9ff7fee473a272dd9",
+    "factory": "0xea794ac77805a38db0edc07f6256bc640fc58782",
     "defaultBuybackBps": 8000,
-    "deployedAt": "2026-06-08T15:34:01.934Z"
+    "deployedAt": "2026-06-25T08:37:27.647Z"
   },
   "AssetLendingPool": {
     "proxy": "0xe0e07bfd17e86876a721fe0276471bde63936fb2",
@@ -67,7 +68,12 @@
     "lenderShareBps": "8000",
     "acquisitionWindow": "86400",
     "auctionWindow": "604800",
-    "deployedAt": "2026-06-08T16:10:02.951Z"
+    "deployedAt": "2026-06-08T16:10:02.951Z",
+    "lenderDepositsEnabled": true,
+    "lenderConfigUpdatedAt": "2026-06-15T17:59:01.843Z",
+    "minAppraisalValue": "100000000",
+    "minGrade": "1",
+    "eligibilityUpdatedAt": "2026-06-18T04:57:40.205Z"
   },
   "FeeController": {
     "proxy": "0xcd6cda75b6ce21f5b83125f414607b9b8cd8c96f",
@@ -111,6 +117,14 @@
       "grantedBy": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
       "txHash": "0x6e71751a39b34e4c5cf51bbeeb86d0867385dd0872a4d6ae5243aa482b6bf416",
       "grantedAt": "2026-06-11T14:28:01.290Z"
+    },
+    {
+      "role": "PACK_OPERATOR_ROLE",
+      "roleHash": "0xd897432901a0be67ce45a5b2c9ffd6ed1af3cdea9c5ccbdd176b3d6784f6cb0f",
+      "account": "0xA89Da886BAc2A60a99847E7e97e9b4ab047b0E3f",
+      "grantedBy": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
+      "txHash": "0x494abc6d93daa9523106c801f7e96ff5415e31077879859a3c959dfe0506a8ee",
+      "grantedAt": "2026-06-12T06:56:15.427Z"
     }
   ],
   "BurnHistory": [
@@ -144,5 +158,12 @@
       ],
       "burnedAt": "2026-06-11T15:29:27.683Z"
     }
-  ]
+  ],
+  "PackRegistry": {
+    "proxy": "0xa8769260d1501d4ec35c161b93b965dc0d786ee7",
+    "implementation": "0xfe8a633dafad0315b9af7fa8b4d6c57f9d0f40a3",
+    "permissionManager": "0x8aF208488d6198F4712FCA457dcE8259Ac141601",
+    "factory": "0xea794ac77805a38db0edc07f6256bc640fc58782",
+    "deployedAt": "2026-06-25T08:37:27.647Z"
+  }
 }

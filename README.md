@@ -2,6 +2,11 @@
 
 Solidity smart contracts for physical asset tokenization, targeting Ethereum mainnet and Base L2 (OP-stack).
 
+Additional documentation:
+
+- [Operator runbook](docs/ops-runbook.md) — deployment, role grants, emergency procedures
+- [Marketplace frontend integration guide](docs/marketplace-frontend-integration.md) — frontend integration guide for the marketplace
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -18,8 +23,9 @@ Solidity smart contracts for physical asset tokenization, targeting Ethereum mai
 ```text
 contracts/
   AssetNFT.sol                    # ERC-721A asset tokenization with lifecycle states
-  PackMachine.sol                 # Loot-pack NFT distribution (EIP-1167 clone)
-  PackMachineFactory.sol          # Deploys and manages PackMachine clones (UUPS)
+  PackMachine.sol                 # Loot-pack NFT distribution (EIP-1167 clone); multi-pack; reads pack config from PackRegistry
+  PackMachineFactory.sol          # Deploys and manages PackMachine clones (UUPS); wires PackRegistry
+  PackRegistry.sol                # Pack definitions per (machine, packId) — single source of truth (UUPS)
   PackVRFRouter.sol               # Shared Chainlink VRF v2.5 consumer (UUPS)
   BuybackPool.sol                 # Guaranteed buyback pool for AssetNFTs (UUPS)
   AssetLendingPool.sol            # Asset-collateralized lending pool (UUPS, Ownable2Step)
@@ -30,8 +36,9 @@ contracts/
   PermissionManager.sol           # Centralized role registry (AccessControlEnumerable)
   PermissionConsumer.sol          # Abstract base for role-gated contracts
   interfaces/
-    IPackMachine.sol              # PackMachine interface
+    IPackMachine.sol              # PackMachine interface (open methods take packId)
     IPackMachineFactory.sol       # Factory interface
+    IPackRegistry.sol             # PackRegistry interface
     IPackVRFRouter.sol            # VRF router interface
     IBuybackPool.sol              # BuybackPool interface
     IPermissionManager.sol        # Permission manager interface
@@ -44,6 +51,7 @@ contracts/
     IP2PTradeEscrow.sol           # P2P escrow interface (Asset/Trade structs, enums, events, errors)
   lib/
     Roles.sol                     # Protocol role constants library
+    PackTypes.sol                 # Shared Pack struct used by PackRegistry and PackMachine
   test-helpers/                   # Mocks (MockPermit2, MockVRFCoordinatorV2Plus, etc.)
   test/                           # Foundry-style Solidity unit tests (.t.sol)
 test/                             # TypeScript integration tests (node:test + viem)
@@ -51,9 +59,13 @@ scripts/
   deploy-permission-manager.ts    # Deploy PermissionManager + ERC1967 proxy
   deploy-asset-nft.ts             # Deploy AssetNFT + ERC1967 proxy
   upgrade-asset-nft.ts            # UUPS upgrade for AssetNFT proxy
-  deploy-pack-machine.ts          # Deploy PackVRFRouter + PackMachine impl + PackMachineFactory + BuybackPool
+  deploy-pack-machine.ts          # Deploy PackVRFRouter + PackMachine impl + PackMachineFactory + PackRegistry + BuybackPool; wire factory ↔ registry
   create-pack-machine.ts          # Create a PackMachine clone via factory; register with VRFRouter + BuybackPool
-  setup-pack-machine.ts           # Configure a PackMachine clone: set buyback rate, deposit NFTs
+  setup-pack-machine.ts           # Configure a PackMachine clone: set buyback rate (via PackRegistry), deposit NFTs
+  appraisals.example.json         # Sample appraisal payload for batch-set-appraisals.ts
+  batch-set-appraisals.ts         # Bulk-write NFT appraisal data (value/grade/category) to AssetLendingPool
+  set-eligibility-controls.ts     # Set min appraisal value, min grade, and category lists on AssetLendingPool
+  set-lender-config.ts            # Set lender revenue share (bps) and toggle lender deposits on AssetLendingPool
   set-callback-gas-limit.ts       # Update PackVRFRouter Chainlink callback gas limit
   upgrade-pack-vrf-router.ts      # UUPS upgrade for PackVRFRouter proxy
   deploy-asset-lending-pool.ts    # Deploy AssetLendingPool + ERC1967 proxy; grant STATE_MANAGER_ROLE
@@ -62,6 +74,9 @@ scripts/
   deploy-p2p-trade-escrow.ts      # Deploy P2PTradeEscrow + ERC1967 proxy; standalone (no protocol deps)
   seed-asset-nft.ts               # Dev helper: mint sample AssetNFT cards and seed appraisals
   send-op-tx.ts                   # OP chain transaction example
+docs/
+  ops-runbook.md                  # Operator runbook: deployment, role grants, emergency procedures
+  marketplace-frontend-integration.md  # Frontend integration guide for the marketplace
 ```
 
 ## AssetNFT Contract
@@ -119,16 +134,47 @@ The PackMachine system is a loot-pack NFT distribution mechanism where users pay
 
 | Contract | Pattern | Role |
 | -------- | ------- | ---- |
-| `PackMachine` | EIP-1167 minimal clone | Individual pack instance — holds prize pool, processes opens |
-| `PackMachineFactory` | UUPS-upgradeable singleton | Deploys clones, stores shared config, relays transfer validator hooks |
+| `PackMachine` | EIP-1167 minimal clone | Individual pack instance — holds prize pool, processes opens; multi-pack; fetches pack config from `PackRegistry` |
+| `PackMachineFactory` | UUPS-upgradeable singleton | Deploys clones, stores shared config, relays transfer validator hooks; wired to `PackRegistry` |
+| `PackRegistry` | UUPS-upgradeable singleton | Single source of truth for all pack definitions, keyed by `(machine, packId)`; manages price, tier weights, buyback allocation, start time, active/finished state |
 | `PackVRFRouter` | UUPS-upgradeable singleton | Single Chainlink VRF consumer that routes callbacks to the correct clone |
 | `BuybackPool` | UUPS-upgradeable singleton | Holds USDC from pack sales; pays guaranteed buyback to NFT holders; re-deposits NFTs into source machine |
+
+### Pack definitions (PackRegistry)
+
+All pack configuration lives in `PackRegistry`, not on the clone. A machine can host multiple packs — `packId` is the zero-based index, and pack `0` is bootstrapped automatically when the clone is created.
+
+The canonical `PackTypes.Pack` struct (defined in `contracts/lib/PackTypes.sol`):
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `pricePerPack` | `uint128` | Payment-token base units charged per open |
+| `cardsPerPack` | `uint8` | Cards dispensed per open (≥ 1) |
+| `startTime` | `uint40` | Unix timestamp before which opens revert |
+| `buybackAllocationBps` | `uint16` | Share of pack price routed to BuybackPool (0–10000 bps) |
+| `active` | `bool` | Reversibly pause/unpause opens via `setPackActive` |
+| `finished` | `bool` | Permanently stop opens via `stopPack` (irreversible) |
+| `tierWeights` | `uint32[5]` | Probability weights per tier (Base/Common/Uncommon/Rare/Ultra), must sum to 10000; default `[7500, 1950, 400, 100, 50]` |
+
+#### PackRegistry access control
+
+| Function | Guard |
+| -------- | ----- |
+| `addPack`, `setPackPrice`, `setPackTierWeights`, `setPackBuybackAllocation`, `setPackActive`, `setPackStartTime`, `stopPack` | `PACK_OPERATOR_ROLE` |
+| `setFactory` | `DEFAULT_ADMIN_ROLE` |
+| `registerMachine` | `onlyFactory` (called internally by `createPackMachine`) |
+| `_authorizeUpgrade` | `UPGRADER_ROLE` |
+
+Machine-wide custody config — `buybackPool`, `authorizedDepositors`, and `retentionThresholdBps` — stays on the clone itself.
 
 ### Pack Open Call Flow
 
 ```text
-User ──► PackMachine.openPack() ──► PackVRFRouter.requestRandomWords() ──► Chainlink VRF
-                                                                                  │
+User ──► PackMachine.openPack(user, packId, sig)
+              │
+              ├── reads PackTypes.Pack from PackRegistry.getPack(machine, packId)
+              └──► PackVRFRouter.requestRandomWords() ──► Chainlink VRF
+                                                               │
 User ◄── NFT transferred ◄── PackMachine.fulfillRandomness() ◄── PackVRFRouter.rawFulfillRandomWords()
                                         │
                                         └──► BuybackPool.registerToken() (records per-card price + tier)
@@ -149,7 +195,7 @@ User ──► BuybackPool.buyback(tokenId)
 
 | Role | Permission |
 | ---- | ---------- |
-| `PACK_OPERATOR_ROLE` | Create pack machines, deposit/withdraw cards, set price, stop machine, authorize VRF |
+| `PACK_OPERATOR_ROLE` | Create pack machines, deposit/withdraw cards, manage pack config on PackRegistry, stop machine, authorize VRF |
 | `BUYBACK_POOL_ROLE` | Reserved for BuybackPool contract to call `depositFromPool` on PackMachine instances |
 
 `PACK_OPERATOR_ROLE` holders also sign the off-chain EIP-712 `OpenPack` authorization required per pack open.
@@ -157,10 +203,12 @@ User ──► BuybackPool.buyback(tokenId)
 ### PackMachine Features
 
 - **EIP-1167 minimal clones** — cheap per-machine deployment; each clone has its own ERC-7201 namespaced storage
+- **Multi-pack support** — each clone can host multiple packs (`packId` 0, 1, 2…); pack 0 bootstrapped at creation, further packs added via `PackRegistry.addPack`
+- **Centralized pack config via PackRegistry** — pack definitions (`pricePerPack`, `cardsPerPack`, `tierWeights`, `buybackAllocationBps`, `startTime`, `active`, `finished`) fetched live from `PackRegistry` on every open; machine-wide custody config (`buybackPool`, `authorizedDepositors`, `retentionThresholdBps`) stays on the clone
 - **Chainlink VRF v2.5** — verifiable on-chain randomness; shared router avoids Chainlink's per-subscription consumer cap
-- **Permit2 gasless payments** — `openPackWithPermit2` uses Uniswap's canonical Permit2 (`0x000000000022D473030F116dDEE9F6B43aC78BA3`) for relayer-submitted USDC transfers
-- **EIP-712 play signatures** — operator signs each pack open off-chain; per-user nonce prevents replay
-- **Swap-and-pop prize pool** — O(1) random card selection and removal from the prize pool array
+- **Permit2 gasless payments** — `openPackWithPermit2(user, packId, …)` uses Uniswap's canonical Permit2 (`0x000000000022D473030F116dDEE9F6B43aC78BA3`) for relayer-submitted USDC transfers
+- **EIP-712 play signatures** — typehash `OpenPack(address user, uint256 packId, uint256 nonce)`; operator signs each open off-chain; `packId` binds the signature to the intended pack, preventing cross-pack replay; per-user nonce prevents replay within a pack
+- **Swap-and-pop prize pool** — O(1) random card selection and removal from the shared machine-wide prize pool array
 - **Effective pool size accounting** — pool size decremented immediately on VRF request, preventing over-commitment before randomness arrives
 - **Transfer validator relay** — factory proxies Creator Token Standard `beforeAuthorizedTransfer`/`afterAuthorizedTransfer` hooks for AssetNFT royalty enforcement
 
@@ -443,7 +491,26 @@ START_TIME=                       # Optional: Unix timestamp for when packs can 
 # --- setup-pack-machine.ts (required) ---
 TOKEN_IDS=                        # Comma-separated token IDs or range (e.g. 1-50 or 1,2,3) to deposit
 TIERS=                            # Comma-separated tier values (0=Base … 4=Ultra) matching TOKEN_IDS
-BUYBACK_ALLOCATION_BPS=           # Fraction of pack price allocated to buyback fund (e.g. 3000 = 30%)
+BUYBACK_ALLOCATION_BPS=           # Fraction of pack price routed to BuybackPool (e.g. 3000 = 30%); sets PackRegistry pack 0
+PACK_REGISTRY=                    # (optional) PackRegistry proxy; falls back to deployments/<network>.json
+
+# --- batch-set-appraisals.ts ---
+APPRAISALS_FILE=                  # Path to JSON appraisal data (see scripts/appraisals.example.json); value in whole token units
+# ASSET_LENDING_POOL_PROXY        # (optional) Override AssetLendingPool proxy
+# SKIP_CONFIRM=true               # Skip interactive confirmation on live networks
+
+# --- set-eligibility-controls.ts ---
+MIN_APPRAISAL_VALUE=              # Minimum appraised value in whole token units (e.g. 100 = $100); 0 disables
+MIN_GRADE=                        # Minimum grade integer; 0 disables grade filtering
+ADD_CATEGORIES=                   # (optional) Comma-separated category IDs to whitelist (e.g. 1,2,3)
+REMOVE_CATEGORIES=                # (optional) Comma-separated category IDs to remove from whitelist
+# ASSET_LENDING_POOL_PROXY        # (optional) Override AssetLendingPool proxy
+# SKIP_CONFIRM=true               # Skip interactive confirmation on live networks
+
+# --- set-lender-config.ts ---
+SHARE_BPS=                        # Lender revenue share in basis points (0–10000; e.g. 8000 = 80%)
+ENABLED=                          # true/false — toggle lender deposits open/closed
+# ASSET_LENDING_POOL_PROXY        # (optional) Override AssetLendingPool proxy
 
 # --- deploy-asset-lending-pool.ts (required) ---
 # PAYMENT_TOKEN reused from above
@@ -496,8 +563,10 @@ pnpm fork:sepolia
 PermissionManager          (deploy FIRST — no protocol deps)
   ├── AssetNFT             depends on PermissionManager
   ├── PackVRFRouter        depends on PermissionManager + Chainlink VRF coordinator
-  ├── PackMachineFactory   depends on PermissionManager + AssetNFT
-  │     └── PackMachine clones  EIP-1167, created by the factory
+  ├── PackRegistry         depends on PermissionManager
+  │     └── (bidirectionally wired with PackMachineFactory after both are deployed)
+  ├── PackMachineFactory   depends on PermissionManager + AssetNFT + PackRegistry
+  │     └── PackMachine clones  EIP-1167, created by the factory; pack config in PackRegistry
   ├── BuybackPool          depends on PermissionManager + AssetNFT + PackMachineFactory
   ├── AssetLendingPool     depends on AssetNFT + PackMachineFactory
   │                        ⚠ must be granted STATE_MANAGER_ROLE on PermissionManager post-deploy
@@ -508,7 +577,7 @@ PermissionManager          (deploy FIRST — no protocol deps)
 P2PTradeEscrow             (standalone — no protocol deps; deploy independently at any time)
 ```
 
-> **Note:** `deploy-pack-machine.ts` is a composite script — it deploys `PackVRFRouter`, the `PackMachine` logic contract, `PackMachineFactory`, and `BuybackPool` in a single run, then wires the factory (`setImplementation` / `setPackVRFRouter` / `setBuybackPool`) automatically.
+> **Note:** `deploy-pack-machine.ts` is a composite script — it deploys `PackVRFRouter`, the `PackMachine` logic contract, `PackMachineFactory`, **`PackRegistry`**, and `BuybackPool` in a single run (7 steps), then wires the factory (`setImplementation` / `setPackVRFRouter` / `setBuybackPool` / `setPackRegistry`) and the registry (`packRegistry.setFactory(factory)`) automatically.
 
 ### Deployment order
 
@@ -516,9 +585,9 @@ P2PTradeEscrow             (standalone — no protocol deps; deploy independentl
 | - | ---- | ------ | ------------------ | ---------- |
 | 1 | Permission registry | `deploy-permission-manager.ts` | PermissionManager (UUPS) | — |
 | 2 | Asset NFT | `deploy-asset-nft.ts` | AssetNFT (UUPS) | PermissionManager |
-| 3 | Pack system | `deploy-pack-machine.ts` | PackVRFRouter, PackMachine impl, PackMachineFactory, BuybackPool (all UUPS) | PermissionManager, AssetNFT |
-| 4 | Create a pack | `create-pack-machine.ts` | PackMachine clone (EIP-1167) | PackMachineFactory, PackVRFRouter, BuybackPool |
-| 5 | Configure pack | `setup-pack-machine.ts` | — (deposits NFTs, sets buyback rate) | PackMachine clone, BuybackPool, AssetNFT |
+| 3 | Pack system | `deploy-pack-machine.ts` | PackVRFRouter, PackMachine impl, PackMachineFactory, PackRegistry, BuybackPool (all UUPS) | PermissionManager, AssetNFT |
+| 4 | Create a pack | `create-pack-machine.ts` | PackMachine clone (EIP-1167); bootstraps pack 0 in PackRegistry | PackMachineFactory, PackVRFRouter, BuybackPool, PackRegistry |
+| 5 | Configure pack | `setup-pack-machine.ts` | — (deposits NFTs; sets buyback rate on PackRegistry pack 0) | PackMachine clone, BuybackPool, AssetNFT, PackRegistry |
 | 6 | Lending pool | `deploy-asset-lending-pool.ts` | AssetLendingPool (UUPS) | AssetNFT, PackMachineFactory |
 | 7 | Fee controller | `deploy-fee-controller.ts` | FeeController (UUPS) | PermissionManager |
 | 8 | Marketplace | `deploy-marketplace.ts` | NettyWorthMarketplace (UUPS) | PermissionManager, FeeController, AssetLendingPool, AssetNFT |
@@ -566,13 +635,17 @@ Deploys `AssetNFT` implementation (constructor bakes in the trusted forwarder) a
 npx hardhat run scripts/deploy-pack-machine.ts --network <network>
 ```
 
-Deploys — in order — `PackVRFRouter` (UUPS), the `PackMachine` logic contract (clone target, no proxy), `PackMachineFactory` (UUPS), and `BuybackPool` (UUPS). After all four are live, the script wires the factory automatically by calling:
+Deploys — in order — `PackVRFRouter` (UUPS), the `PackMachine` logic contract (clone target, no proxy), `PackMachineFactory` (UUPS), **`PackRegistry`** (UUPS), and `BuybackPool` (UUPS). After all five are live, the script wires them automatically by calling:
 
 - `factory.setImplementation(packMachineImpl)`
 - `factory.setPackVRFRouter(vrfRouterProxy)`
-- `factory.setBuybackPool(buybackProxy)` *(also wires `factory.setBuybackPool` on BuybackPool side)*
+- `factory.setBuybackPool(buybackProxy)` *(also wires BuybackPool side)*
+- `factory.setPackRegistry(registryProxy)` — factory reads pack config from registry on every clone creation
+- `packRegistry.setFactory(factoryProxy)` — registry trusts only the factory to call `registerMachine`
 
-Saves `PackVRFRouter`, `PackMachineImplementation`, `PackMachineFactory`, and `BuybackPool` to `deployments/<network>.json`.
+The verify step asserts `factory.packRegistry() == registryProxy` and `packRegistry.factory() == factoryProxy`.
+
+Saves `PackVRFRouter`, `PackMachineImplementation`, `PackMachineFactory`, `PackRegistry`, and `BuybackPool` to `deployments/<network>.json`.
 
 > ⚠ **Manual step after this script:** Add the `PackVRFRouter` proxy address as a consumer on your Chainlink VRF subscription (via the Chainlink dashboard or coordinator contract). No pack can be opened until this is done.
 
@@ -592,7 +665,7 @@ Saves `PackVRFRouter`, `PackMachineImplementation`, `PackMachineFactory`, and `B
 npx hardhat run scripts/create-pack-machine.ts --network <network>
 ```
 
-Calls `factory.createPackMachine(...)` to deploy an EIP-1167 clone, then automatically:
+Calls `factory.createPackMachine(...)` to deploy an EIP-1167 clone. The factory internally calls `packRegistry.registerMachine(clone, pricePerPack, cardsPerPack, startTime)` to bootstrap pack 0 in the registry. The script then automatically:
 
 - `vrfRouter.setAuthorizedPackMachine(clone, true)` — allows the clone to request VRF randomness
 - `buybackPool.registerPackMachine(clone, true)` — allows the clone to register tokens in the buyback pool
@@ -609,7 +682,8 @@ Appends the clone address and config to the `PackMachines[]` array in `deploymen
 |----------|-------------|
 | `TOKEN_IDS` | Comma-separated IDs or range (e.g. `1-50` or `1,2,3`) |
 | `TIERS` | Comma-separated tier values (0=Base … 4=Ultra) matching `TOKEN_IDS` |
-| `BUYBACK_ALLOCATION_BPS` | Fraction of pack price held for buybacks (e.g. `3000` = 30%) |
+| `BUYBACK_ALLOCATION_BPS` | Fraction of pack price routed to BuybackPool (e.g. `3000` = 30%) |
+| `PACK_REGISTRY` | *(optional)* PackRegistry proxy override; falls back to `deployments/<network>.json` |
 
 ```bash
 npx hardhat run scripts/setup-pack-machine.ts --network <network>
@@ -617,9 +691,10 @@ npx hardhat run scripts/setup-pack-machine.ts --network <network>
 
 Configures the most recently created clone (or the address in env `PACK_MACHINE_PROXY`):
 
-1. `clone.setBuybackPool(buybackProxy)` + `clone.setBuybackAllocation(bps)`
-2. `assetNFT.setApprovalForAll(clone, true)`
-3. Batched `clone.deposit(tokenIds, tiers, tokensOwner)` — up to 50 tokens per batch
+1. `clone.setBuybackPool(buybackProxy)` — machine-wide custody wiring (stays on the clone)
+2. `packRegistry.setPackBuybackAllocation(clone, 0, bps)` — sets buyback allocation for **pack 0** on PackRegistry (replaces the old `clone.setBuybackAllocation`; requires `PACK_OPERATOR_ROLE`)
+3. `assetNFT.setApprovalForAll(clone, true)`
+4. Batched `clone.deposit(tokenIds, tiers, tokensOwner)` — up to 50 tokens per batch
 
 Updates the matching `PackMachines[]` entry in `deployments/<network>.json` with deposited tokens and config.
 
@@ -715,6 +790,9 @@ Deploys the `P2PTradeEscrow` implementation and ERC1967 proxy. `initialize(owner
 | `grant-role.ts` | Grant any protocol role to any wallet via PermissionManager | `DEFAULT_ADMIN_ROLE` |
 | `burn-asset-nft.ts` | Permanently burn AssetNFT tokens by token ID | `BURNER_ROLE` |
 | `seed-asset-nft.ts` | Dev/test helper — mint sample AssetNFT cards and set appraisals | `MINTER_ROLE` |
+| `batch-set-appraisals.ts` | Bulk-write NFT appraisal data (value, grade, category) to `AssetLendingPool` for collateral valuation; batches of ≤ 50; value in whole token units | Pool owner |
+| `set-eligibility-controls.ts` | Set minimum appraisal value, minimum grade, and allowed-category add/remove lists on `AssetLendingPool` | Pool owner |
+| `set-lender-config.ts` | Set lender revenue-share bps and toggle lender deposits open/closed on `AssetLendingPool` | Pool owner |
 
 ```bash
 # Example: update callback gas limit
@@ -783,6 +861,85 @@ TOKEN_IDS=1-50 ASSET_NFT_PROXY=0x<proxy> PERMISSION_MANAGER_PROXY=0x<proxy> \
 On live networks the script prints a confirmation summary (with an irreversibility warning) and requires `yes` before sending. It appends a `BurnHistory` entry `{ burnedBy, tokenIds, txHashes, burnedAt }` to `deployments/<network>.json`.
 
 > **Note:** If a token is in `Loaned` or `InPack` state the contract reverts with `AssetNFT__TokenNotBurnable`. Ensure collateral is released and pack deposits are withdrawn before burning.
+
+---
+
+### `batch-set-appraisals.ts` — Bulk-write NFT appraisals
+
+Writes appraisal data (appraised value, grade, category) for AssetNFT tokens to `AssetLendingPool` in batches of ≤ 50. The pool uses this data to compute maximum loan amounts and enforce eligibility. The caller must be the pool **owner** (`Ownable2StepUpgradeable`).
+
+**Environment variables:**
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `APPRAISALS_FILE` | Yes | Path to JSON appraisal data (see `scripts/appraisals.example.json`). `value` is in **whole token units** (e.g. `1000` = $1,000 USDC); the script scales by `10^decimals` |
+| `ASSET_LENDING_POOL_PROXY` | No | Override AssetLendingPool proxy; falls back to `deployments/<network>.json` |
+| `SKIP_CONFIRM` | No | Set to `true`/`1` to skip the interactive confirmation prompt on live networks |
+
+Input file format (`appraisals.example.json`):
+
+```json
+[
+  { "tokenId": 1, "value": 1000, "grade": 8, "category": 2 },
+  { "tokenId": 2, "value": 500,  "grade": 6, "category": 1 }
+]
+```
+
+Fields: `tokenId` (uint256), `value` (whole token units), `grade` (integer; 0 = ungraded), `category` (integer; 0 = uncategorized).
+
+```bash
+APPRAISALS_FILE=scripts/appraisals.example.json \
+  npx hardhat run scripts/batch-set-appraisals.ts --network sepolia
+```
+
+The script verifies each appraisal was stored correctly after sending. On success it reports the number of tokens updated; on any mismatch it exits with code 1.
+
+---
+
+### `set-eligibility-controls.ts` — Set loan eligibility gates
+
+Configures which AssetNFT tokens are eligible as loan collateral on `AssetLendingPool`. The caller must be the pool **owner**.
+
+**Environment variables:**
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `MIN_APPRAISAL_VALUE` | Yes | Minimum appraised value in **whole token units** (e.g. `100` = $100); `0` disables the check |
+| `MIN_GRADE` | Yes | Minimum grade integer; `0` disables grade filtering |
+| `ADD_CATEGORIES` | No | Comma-separated category IDs to add to the whitelist (e.g. `1,2,3`) |
+| `REMOVE_CATEGORIES` | No | Comma-separated category IDs to remove from the whitelist |
+| `ASSET_LENDING_POOL_PROXY` | No | Override AssetLendingPool proxy; falls back to `deployments/<network>.json` |
+| `SKIP_CONFIRM` | No | Set to `true`/`1` to skip the interactive confirmation on live networks |
+
+```bash
+MIN_APPRAISAL_VALUE=100 MIN_GRADE=1 ADD_CATEGORIES=1,2 \
+  npx hardhat run scripts/set-eligibility-controls.ts --network sepolia
+```
+
+On live networks the script verifies the changes via `getPoolInfo()` and persists `minAppraisalValue`, `minGrade`, and `eligibilityUpdatedAt` to `deployments/<network>.json`.
+
+---
+
+### `set-lender-config.ts` — Configure lender economics
+
+Sets the lender revenue-share percentage and whether external lender deposits are open on `AssetLendingPool`. The caller must be the pool **owner**.
+
+**Environment variables:**
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `SHARE_BPS` | Yes | Lender revenue share in basis points (0–10000; e.g. `8000` = 80%) |
+| `ENABLED` | Yes | `true`/`false` or `1`/`0` — toggle lender deposits open or closed |
+| `ASSET_LENDING_POOL_PROXY` | No | Override AssetLendingPool proxy; falls back to `deployments/<network>.json` |
+
+```bash
+SHARE_BPS=8000 ENABLED=true \
+  npx hardhat run scripts/set-lender-config.ts --network sepolia
+```
+
+On live networks the script verifies the changes and persists `lenderShareBps`, `lenderDepositsEnabled`, and `lenderConfigUpdatedAt` to `deployments/<network>.json`.
+
+---
 
 ## Networks
 

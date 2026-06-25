@@ -6,6 +6,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {PackMachine} from "../PackMachine.sol";
 import {PackMachineFactory} from "../PackMachineFactory.sol";
 import {PackVRFRouter} from "../PackVRFRouter.sol";
+import {PackRegistry} from "../PackRegistry.sol";
 import {BuybackPool} from "../BuybackPool.sol";
 import {PermissionManager} from "../PermissionManager.sol";
 import {Roles} from "../lib/Roles.sol";
@@ -18,6 +19,7 @@ contract BuybackPoolTest is Test {
     PackMachine internal packMachine;
     PackMachineFactory internal factory;
     PackVRFRouter internal vrfRouter;
+    PackRegistry internal packRegistry;
     BuybackPool internal pool;
     PermissionManager internal pm;
     MockERC20 internal usdc;
@@ -39,7 +41,7 @@ contract BuybackPoolTest is Test {
         0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     bytes32 internal constant OPEN_PACK_TYPEHASH = keccak256(
-        "OpenPack(address user,uint256 nonce)"
+        "OpenPack(address user,uint256 packId,uint256 nonce)"
     );
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -125,6 +127,18 @@ contract BuybackPoolTest is Test {
         factory.setPackVRFRouter(address(vrfRouter));
         vm.stopPrank();
 
+        PackRegistry registryImpl = new PackRegistry();
+        ERC1967Proxy registryProxy = new ERC1967Proxy(
+            address(registryImpl),
+            abi.encodeCall(PackRegistry.initialize, (address(pm)))
+        );
+        packRegistry = PackRegistry(address(registryProxy));
+
+        vm.startPrank(admin);
+        factory.setPackRegistry(address(packRegistry));
+        packRegistry.setFactory(address(factory));
+        vm.stopPrank();
+
         vm.prank(operator);
         address cloneAddr = factory.createPackMachine(
             PRICE,
@@ -157,7 +171,7 @@ contract BuybackPoolTest is Test {
         vm.prank(operator);
         packMachine.setBuybackPool(address(pool));
         vm.prank(operator);
-        packMachine.setBuybackAllocation(BUYBACK_ALLOC_BPS);
+        packRegistry.setPackBuybackAllocation(address(packMachine), 0, BUYBACK_ALLOC_BPS);
 
         // Disable cut-off so BuybackPool tests are not affected by it.
         vm.prank(operator);
@@ -187,9 +201,11 @@ contract BuybackPoolTest is Test {
         }
         vm.prank(operator);
         assetNFT.batchMint(recipients, uris);
+        uint256[] memory masks = new uint256[](count);
+        for (uint256 i; i < count; i++) masks[i] = 1;
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(tokenIds, tiers, operator);
+        packMachine.deposit(tokenIds, tiers, masks, operator);
         vm.stopPrank();
     }
 
@@ -198,7 +214,7 @@ contract BuybackPoolTest is Test {
         uint256 nonce
     ) internal view returns (bytes memory) {
         bytes32 structHash = keccak256(
-            abi.encode(OPEN_PACK_TYPEHASH, user_, nonce)
+            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce)
         );
         bytes32 domainSeparator = keccak256(
             abi.encode(
@@ -230,7 +246,7 @@ contract BuybackPoolTest is Test {
 
         bytes memory sig = _signOpenPack(user, packMachine.openNonce(user));
         vm.prank(user);
-        packMachine.openPack(user, sig);
+        packMachine.openPack(user, 0, sig);
 
         uint256 requestId = 1; // MockVRFCoordinator assigns sequential IDs
         uint256[] memory words = new uint256[](CARDS_PER_PACK);
@@ -548,7 +564,7 @@ contract BuybackPoolTest is Test {
         vm.prank(operator);
         packMachine2.setBuybackPool(address(pool));
         vm.prank(operator);
-        packMachine2.setBuybackAllocation(BUYBACK_ALLOC_BPS);
+        packRegistry.setPackBuybackAllocation(clone2Addr, 0, BUYBACK_ALLOC_BPS);
         vm.prank(operator);
         packMachine2.setRetentionThreshold(0);
         vm.prank(operator);
@@ -603,7 +619,7 @@ contract BuybackPoolTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig);
+        packMachine.openPack(user, 0, sig);
 
         assertEq(usdc.balanceOf(address(pool)), expectedBuybackAmount);
         assertEq(usdc.balanceOf(financeWallet), expectedTreasuryAmount);
@@ -612,7 +628,7 @@ contract BuybackPoolTest is Test {
     function test_PaymentSplit_ZeroAllocation_AllGoesToTreasury() public {
         // Disable allocation
         vm.prank(operator);
-        packMachine.setBuybackAllocation(0);
+        packRegistry.setPackBuybackAllocation(address(packMachine), 0, 0);
 
         _depositNFTs(CARDS_PER_PACK);
         usdc.mint(user, PRICE);
@@ -621,7 +637,7 @@ contract BuybackPoolTest is Test {
 
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
-        packMachine.openPack(user, sig);
+        packMachine.openPack(user, 0, sig);
 
         assertEq(usdc.balanceOf(address(pool)), 0);
         assertEq(usdc.balanceOf(financeWallet), PRICE);

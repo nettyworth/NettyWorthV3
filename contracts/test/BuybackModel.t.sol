@@ -6,6 +6,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {PackMachine} from "../PackMachine.sol";
 import {PackMachineFactory} from "../PackMachineFactory.sol";
 import {PackVRFRouter} from "../PackVRFRouter.sol";
+import {PackRegistry} from "../PackRegistry.sol";
 import {BuybackPool} from "../BuybackPool.sol";
 import {IBuybackPool} from "../interfaces/IBuybackPool.sol";
 import {PermissionManager} from "../PermissionManager.sol";
@@ -23,6 +24,7 @@ contract BuybackModelTest is Test {
     PackMachine internal packMachine;
     PackMachineFactory internal factory;
     PackVRFRouter internal vrfRouter;
+    PackRegistry internal packRegistry;
     BuybackPool internal pool;
     PermissionManager internal pm;
     MockERC20 internal usdc;
@@ -51,7 +53,7 @@ contract BuybackModelTest is Test {
         0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     bytes32 internal constant OPEN_PACK_TYPEHASH =
-        keccak256("OpenPack(address user,uint256 nonce)");
+        keccak256("OpenPack(address user,uint256 packId,uint256 nonce)");
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH =
         keccak256(
             "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -146,6 +148,18 @@ contract BuybackModelTest is Test {
         factory.setPackVRFRouter(address(vrfRouter));
         vm.stopPrank();
 
+        PackRegistry registryImpl = new PackRegistry();
+        ERC1967Proxy registryProxy = new ERC1967Proxy(
+            address(registryImpl),
+            abi.encodeCall(PackRegistry.initialize, (address(pm)))
+        );
+        packRegistry = PackRegistry(address(registryProxy));
+
+        vm.startPrank(admin);
+        factory.setPackRegistry(address(packRegistry));
+        packRegistry.setFactory(address(factory));
+        vm.stopPrank();
+
         vm.prank(operator);
         address cloneAddr = factory.createPackMachine(
             PRICE,
@@ -176,7 +190,7 @@ contract BuybackModelTest is Test {
         vm.prank(operator);
         packMachine.setBuybackPool(address(pool));
         vm.prank(operator);
-        packMachine.setBuybackAllocation(BUYBACK_ALLOC_BPS);
+        packRegistry.setPackBuybackAllocation(address(packMachine), 0, BUYBACK_ALLOC_BPS);
         vm.prank(operator);
         packMachine.setRetentionThreshold(0);
 
@@ -201,9 +215,11 @@ contract BuybackModelTest is Test {
         }
         vm.prank(operator);
         assetNFT.batchMint(recipients, uris);
+        uint256[] memory masks = new uint256[](count);
+        for (uint256 i; i < count; i++) masks[i] = 1;
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(tokenIds, tiers, operator);
+        packMachine.deposit(tokenIds, tiers, masks, operator);
         vm.stopPrank();
     }
 
@@ -212,7 +228,7 @@ contract BuybackModelTest is Test {
         uint256 nonce
     ) internal view returns (bytes memory) {
         bytes32 structHash = keccak256(
-            abi.encode(OPEN_PACK_TYPEHASH, user_, nonce)
+            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce)
         );
         bytes32 domainSeparator = keccak256(
             abi.encode(
@@ -240,7 +256,7 @@ contract BuybackModelTest is Test {
 
         bytes memory sig = _signOpenPack(user, packMachine.openNonce(user));
         vm.prank(user);
-        packMachine.openPack(user, sig);
+        packMachine.openPack(user, 0, sig);
 
         // MockVRFCoordinator assigns sequential IDs starting from 1.
         uint256 requestId = ++_vrfRequestCounter;
