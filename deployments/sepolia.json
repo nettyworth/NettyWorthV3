@@ -57,8 +57,8 @@
     "deployedAt": "2026-06-28T09:54:49.495Z"
   },
   "AssetLendingPool": {
-    "proxy": "0x9e9bd57bb229e5a8d964ec5c6ac53017acfa8660",
-    "implementation": "0xb46a3c5355d727ba9a08eabb83284aa052c4594d",
+    "proxy": "0xd38a324ef89862be4e998e9aa8f825f770f2a100",
+    "implementation": "0xee820daa7ec7e3a3e1328ba197983963834c955d",
     "owner": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
     "paymentToken": "0x8545C5930F36aBE57ED4F5372f3fbB8b49E533DB",
     "assetNFT": "0xE1712477f2F4dC98865ec2f72652C4881667e266",
@@ -68,7 +68,7 @@
     "lenderShareBps": "8000",
     "acquisitionWindow": "86400",
     "auctionWindow": "604800",
-    "deployedAt": "2026-06-28T09:58:26.556Z"
+    "deployedAt": "2026-06-29T06:24:52.674Z"
   },
   "FeeController": {
     "proxy": "0xcc853698c76eb7895f5aac9019bd1b964e171989",
@@ -84,7 +84,7 @@
     "implementation": "0x12ca6354ba55157da4e765abc6b1d9623dbf6976",
     "permissionManager": "0x8aF208488d6198F4712FCA457dcE8259Ac141601",
     "feeController": "0xCd6CdA75B6Ce21f5B83125f414607b9B8Cd8c96F",
-    "lendingPool": "0xe0e07bFD17E86876a721FE0276471BdE63936FB2",
+    "lendingPool": "0xD38A324eF89862Be4e998E9AA8F825f770f2a100",
     "assetNFT": "0x2f8BD4136edDEd19473448c24Da5C8aB9174b20C",
     "paymentToken": "0x8545C5930F36aBE57ED4F5372f3fbB8b49E533DB",
     "treasury": "0x0ed8BDFbb4803CD29d3C436AeaCdb48A9fa22A74",
@@ -184,6 +184,14 @@
         "0x61b29a6aaec45c6c388484aafd000f4f5c1fa3657b17247b9ef0b53bdc76ddc3"
       ],
       "updatedAt": "2026-06-29T03:54:16.430Z"
+    }
+  ],
+  "MarketplaceLendingPoolUpdates": [
+    {
+      "lendingPool": "0xD38A324eF89862Be4e998E9AA8F825f770f2a100",
+      "updatedBy": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
+      "txHash": "0xf1fbc6860035b9f422f58993f11b0abbfbd56a0b240d1d336dc3bf1fe7a7e82a",
+      "updatedAt": "2026-06-29T06:36:27.379Z"
     }
   ]
 }

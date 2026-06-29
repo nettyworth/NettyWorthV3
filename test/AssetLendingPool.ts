@@ -855,6 +855,11 @@ describe("AssetLendingPool", async function () {
         account: walletLender1.account,
       });
 
+      // Temporarily disable utilization cap so the precondition borrow can fill the pool.
+      await pool.write.setMaxUtilizationBps([10_000n], {
+        account: walletAdmin.account,
+      });
+
       // Borrow all available liquidity
       const tokenId = await mintNFT(nft, borrowerAddress);
       const bigVal = (POOL_SEED + depositAmt) * 3n;

@@ -101,6 +101,12 @@ abstract contract AssetLendingPoolConfig is
         ///      Keyed by (seller, nonce). Prevents a seller's listing signature from being
         ///      replayed to finance the same NFT (or any other approved NFT) a second time.
         mapping(address seller => mapping(uint256 nonce => bool)) financeNonces;
+        // =====================================================================
+        // V3: Maximum Pool Utilization
+        // =====================================================================
+        /// @dev Maximum fraction of totalDeposited that may be committed to active loans,
+        ///      in basis points. Default 8000 (80%); 10000 = no reserve (legacy 100% behaviour).
+        uint256 maxUtilizationBps;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.AssetLendingPool")) - 1)) & ~bytes32(uint256(0xff))
@@ -173,6 +179,8 @@ abstract contract AssetLendingPoolConfig is
         $.auctionWindow = auctionWindow_;
         $.packMachineFactory = packMachineFactory_;
         // lenderDepositsEnabled starts false; admin enables via setLenderConfig
+        // 80% maximum utilization by default; 20% reserved for lender withdrawals
+        $.maxUtilizationBps = 8000;
     }
 
     // =========================================================================
@@ -295,6 +303,20 @@ abstract contract AssetLendingPoolConfig is
         AssetLendingPoolStorage storage $ = _getStorage();
         emit LtvUpdated($.ltvBps, newLtv);
         $.ltvBps = newLtv;
+    }
+
+    /// @notice Set the maximum fraction of pool capital that may be committed to active loans.
+    /// @dev onlyOwner. Changes take effect on the next loan origination attempt.
+    ///      Setting to 10000 disables the reserve (equivalent to the legacy 100% behaviour).
+    /// @param newMaxUtilization New cap in basis points (1–10000; e.g. 8000 = 80%).
+    function setMaxUtilizationBps(
+        uint256 newMaxUtilization
+    ) external override onlyOwner {
+        if (newMaxUtilization == 0 || newMaxUtilization > BPS)
+            revert AssetLendingPool__InvalidBps();
+        AssetLendingPoolStorage storage $ = _getStorage();
+        emit MaxUtilizationUpdated($.maxUtilizationBps, newMaxUtilization);
+        $.maxUtilizationBps = newMaxUtilization;
     }
 
     /// @notice Set the origination fee charged on each loan at disbursement.
@@ -547,5 +569,17 @@ abstract contract AssetLendingPoolConfig is
     ) internal view returns (uint256) {
         if ($.originationFeeBps == 0) return 0;
         return (principal * $.originationFeeBps) / BPS;
+    }
+
+    /// @dev Reverts unless originating `amount` keeps total utilization at or below
+    ///      the configured cap. Subsumes the legacy "amount <= idle liquidity" check
+    ///      (equivalent when `maxUtilizationBps == 10000`).
+    function _checkUtilization(
+        AssetLendingPoolStorage storage $,
+        uint256 amount
+    ) internal view {
+        uint256 maxBorrowable = ($.totalDeposited * $.maxUtilizationBps) / BPS;
+        if ($.totalBorrowed + amount > maxBorrowable)
+            revert AssetLendingPool__ExceedsMaxUtilization();
     }
 }

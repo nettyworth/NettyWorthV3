@@ -348,6 +348,10 @@ contract AssetLendingPoolTest is Test {
     }
 
     function test_Withdraw_RevertsIfExceedsAvailableLiquidity() public {
+        // Temporarily disable utilization cap so the precondition borrow can fill the pool.
+        vm.prank(admin);
+        pool.setMaxUtilizationBps(10_000);
+
         // Borrow most of the pool so available < ownerDeposited
         uint256 tokenId = _mintNFT(borrower);
         vm.prank(admin);
@@ -526,6 +530,10 @@ contract AssetLendingPoolTest is Test {
     }
 
     function test_Borrow_RevertsIfInsufficientLiquidity() public {
+        // Temporarily disable utilization cap so the precondition borrow can fill the pool.
+        vm.prank(admin);
+        pool.setMaxUtilizationBps(10_000);
+
         // Drain all liquidity first by borrowing several tokens
         uint256 poolLiquidity = pool.getAvailableLiquidity();
 
@@ -538,13 +546,13 @@ contract AssetLendingPoolTest is Test {
         vm.prank(borrower);
         pool.borrow(tokenId, poolLiquidity, 0); // borrow full pool
 
-        // Now try to borrow again
+        // Now try to borrow again — blocked by utilization cap (pool is at 100%)
         uint256 tokenId2 = _mintNFT(borrower);
         _appraise(tokenId2);
         vm.prank(borrower);
         assetNFT.approve(address(pool), tokenId2);
         vm.expectRevert(
-            IAssetLendingPool.AssetLendingPool__InsufficientLiquidity.selector
+            IAssetLendingPool.AssetLendingPool__ExceedsMaxUtilization.selector
         );
         vm.prank(borrower);
         pool.borrow(tokenId2, 100e6, 0);
@@ -1478,6 +1486,10 @@ contract AssetLendingPoolTest is Test {
         usdc.approve(address(pool), 1000e6);
         pool.lenderDeposit(1000e6);
         vm.stopPrank();
+
+        // Temporarily disable utilization cap so the precondition borrow can fill the pool.
+        vm.prank(admin);
+        pool.setMaxUtilizationBps(10_000);
 
         // Borrow 10k (almost all of owner's capital) + lender's 1000 → pool is depleted
         uint256 tokenId = _mintNFT(borrower);

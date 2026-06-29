@@ -86,6 +86,7 @@ interface IAssetLendingPool {
         uint256 acquisitionWindow;
         uint256 auctionWindow;
         uint256 totalDefaultedPrincipal;
+        uint256 maxUtilizationBps; // e.g. 8000 = 80% cap; 10000 = no reserve
     }
 
     // =========================================================================
@@ -154,6 +155,7 @@ interface IAssetLendingPool {
         uint256 minGrade
     );
     event LtvUpdated(uint256 oldLtv, uint256 newLtv);
+    event MaxUtilizationUpdated(uint256 oldMaxUtilization, uint256 newMaxUtilization);
     event OriginationFeeUpdated(uint256 bps, address wallet);
     event MaxAppraisalAgeUpdated(uint256 oldMaxAge, uint256 newMaxAge);
 
@@ -209,6 +211,7 @@ interface IAssetLendingPool {
     error AssetLendingPool__IneligibleAsset();
     error AssetLendingPool__ExceedsLTV();
     error AssetLendingPool__InsufficientLiquidity();
+    error AssetLendingPool__ExceedsMaxUtilization();
     error AssetLendingPool__ActiveLoanExists();
     error AssetLendingPool__LoanNotFound();
     error AssetLendingPool__LoanAlreadyPaid();
@@ -338,6 +341,11 @@ interface IAssetLendingPool {
     ) external;
 
     function setLtvBps(uint256 newLtv) external;
+
+    /// @notice Set the maximum fraction of pool capital that may be committed to active loans.
+    /// @param newMaxUtilization New cap in basis points (1–10000; e.g. 8000 = 80% max utilization;
+    ///        10000 = no reserve, equivalent to the legacy 100% behaviour).
+    function setMaxUtilizationBps(uint256 newMaxUtilization) external;
 
     function setOriginationFee(uint256 bps, address wallet) external;
 

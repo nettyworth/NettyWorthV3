@@ -288,9 +288,7 @@ contract AssetLendingPool is
         // Buyer must cover any gap between listing price and max-financed amount.
         if (loanAmount > maxLoan) revert AssetLendingPool__ExceedsLTV();
 
-        if (loanAmount > $.totalDeposited - $.totalBorrowed) {
-            revert AssetLendingPool__InsufficientLiquidity();
-        }
+        _checkUtilization($, loanAmount);
 
         if ($.tokenIdToActiveLoan[tokenId] != 0) {
             revert AssetLendingPool__ActiveLoanExists();
@@ -637,6 +635,7 @@ contract AssetLendingPool is
         info.acquisitionWindow = $.acquisitionWindow;
         info.auctionWindow = $.auctionWindow;
         info.totalDefaultedPrincipal = $.totalDefaultedPrincipal;
+        info.maxUtilizationBps = $.maxUtilizationBps;
     }
 
     /// @notice Returns the current default phase for a given loan, computed from timestamps.
@@ -837,9 +836,7 @@ contract AssetLendingPool is
         uint256 maxLoan = (summedAppraisal * $.ltvBps) / BPS;
         if (amount > maxLoan) revert AssetLendingPool__ExceedsLTV();
 
-        if (amount > $.totalDeposited - $.totalBorrowed) {
-            revert AssetLendingPool__InsufficientLiquidity();
-        }
+        _checkUtilization($, amount);
 
         // Pull all NFTs from borrower (each transferFrom enforces Held state via AssetNFT).
         for (uint256 i; i < tokenIds.length; ) {
