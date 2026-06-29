@@ -27,6 +27,10 @@
 # Gas snapshot files
 /.gas-snapshot
 
+# Foundry build output (forge build)
+/out
+/cache_forge
+
 # Snapshot cheatcodes output
 /snapshots
 .claude

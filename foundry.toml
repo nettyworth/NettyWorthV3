@@ -1,0 +1,28 @@
+[profile.default]
+src            = "contracts"
+out            = "out"
+libs           = ["node_modules"]
+solc_version   = "0.8.28"
+optimizer      = true
+optimizer_runs = 200
+via_ir         = true
+evm_version    = "cancun"
+# Keep Foundry defaults for metadata so bytecode matches the Hardhat-compiled deployment.
+# bytecode_hash = "ipfs"   (Foundry default — do NOT set to "none", breaks verification)
+# cbor_metadata = true     (Foundry default — leave as-is)
+
+remappings = [
+    "@openzeppelin/contracts-upgradeable/=node_modules/@openzeppelin/contracts-upgradeable/",
+    "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/",
+    "erc721a-upgradeable/=node_modules/erc721a-upgradeable/",
+    "@chainlink/contracts/=node_modules/@chainlink/contracts/",
+    "forge-std/=node_modules/forge-std/src/",
+]
+
+# Exclude test-helpers and test files from forge build (they pull in forge-std which is fine,
+# but keeping the build focused avoids noise from mock contracts).
+# Remove entries below if you want forge to compile tests too.
+exclude = [
+    "contracts/test/**",
+    "contracts/test-helpers/**",
+]
