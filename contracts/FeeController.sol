@@ -55,7 +55,7 @@ contract FeeController is IFeeController, Initializable, UUPSUpgradeable, Permis
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.FeeController")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant FEE_CONTROLLER_STORAGE_SLOT =
-        0xf806c797cc8da4456daf44958fde59a0cc307465a69aeb2c7bba1f677bfd5f00;
+        0x16282aa3535788a12f78176b028b84bac0775ab65d39753784b083cc58ab5800;
 
     function _getFeeControllerStorage() private pure returns (FeeControllerStorage storage $) {
         // solhint-disable-next-line no-inline-assembly

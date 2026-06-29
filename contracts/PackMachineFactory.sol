@@ -47,7 +47,7 @@ contract PackMachineFactory is
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.PackMachineFactory")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant PACK_MACHINE_FACTORY_STORAGE_SLOT =
-        0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a00;
+        0x8e80552b741b8b80b7858148bf33ea537542bd5cd613b93df76c968fde960e00;
 
     function _getStorage()
         private

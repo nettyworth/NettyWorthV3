@@ -91,12 +91,12 @@ contract PromoCodeRegistryTest is Test {
 
     function _createDiscountCode(bytes32 codeId, uint16 bps) internal {
         vm.prank(operator);
-        registry.createCode(codeId, IPromoCodeRegistry.PromoKind.Discount, bps, 0, 0, false, false);
+        registry.createCode(codeId, IPromoCodeRegistry.PromoKind.Discount, bps, 0, 0, false, false, address(0));
     }
 
     function _createBuybackCode(bytes32 codeId, uint16 bps) internal {
         vm.prank(operator);
-        registry.createCode(codeId, IPromoCodeRegistry.PromoKind.Buyback, bps, 0, 0, false, false);
+        registry.createCode(codeId, IPromoCodeRegistry.PromoKind.Buyback, bps, 0, 0, false, false, address(0));
     }
 
     function _redeemDiscount(bytes32 codeId, address _user) internal returns (uint16) {
@@ -118,7 +118,7 @@ contract PromoCodeRegistryTest is Test {
         for (uint256 i; i < validBps.length; ++i) {
             bytes32 id = keccak256(abi.encodePacked("D", i));
             vm.prank(operator);
-            registry.createCode(id, IPromoCodeRegistry.PromoKind.Discount, validBps[i], 0, 0, false, false);
+            registry.createCode(id, IPromoCodeRegistry.PromoKind.Discount, validBps[i], 0, 0, false, false, address(0));
             IPromoCodeRegistry.PromoCode memory c = registry.getCode(id);
             assertEq(c.bps, validBps[i]);
             assertTrue(c.active);
@@ -131,7 +131,7 @@ contract PromoCodeRegistryTest is Test {
         for (uint256 i; i < validBps.length; ++i) {
             bytes32 id = keccak256(abi.encodePacked("B", i));
             vm.prank(operator);
-            registry.createCode(id, IPromoCodeRegistry.PromoKind.Buyback, validBps[i], 0, 0, false, false);
+            registry.createCode(id, IPromoCodeRegistry.PromoKind.Buyback, validBps[i], 0, 0, false, false, address(0));
             IPromoCodeRegistry.PromoCode memory c = registry.getCode(id);
             assertEq(c.bps, validBps[i]);
         }
@@ -150,7 +150,7 @@ contract PromoCodeRegistryTest is Test {
                 uint16(9000)
             )
         );
-        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, 9000, 0, 0, false, false);
+        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, 9000, 0, 0, false, false, address(0));
     }
 
     function test_createCode_revertInvalidBps_buyback_discountValue() public {
@@ -162,7 +162,7 @@ contract PromoCodeRegistryTest is Test {
                 uint16(2000)
             )
         );
-        registry.createCode(BUYBACK_CODE, IPromoCodeRegistry.PromoKind.Buyback, 2000, 0, 0, false, false);
+        registry.createCode(BUYBACK_CODE, IPromoCodeRegistry.PromoKind.Buyback, 2000, 0, 0, false, false, address(0));
     }
 
     function test_createCode_revertInvalidBps_discount_arbitrary() public {
@@ -174,7 +174,7 @@ contract PromoCodeRegistryTest is Test {
                 uint16(500)
             )
         );
-        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, 500, 0, 0, false, false);
+        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, 500, 0, 0, false, false, address(0));
     }
 
     // =========================================================================
@@ -190,7 +190,7 @@ contract PromoCodeRegistryTest is Test {
                 DISCOUNT_CODE
             )
         );
-        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, 2000, 0, 0, false, false);
+        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, 2000, 0, 0, false, false, address(0));
     }
 
     // =========================================================================
@@ -200,7 +200,7 @@ contract PromoCodeRegistryTest is Test {
     function test_createCode_revertIfUnauthorized() public {
         vm.prank(unauthorized);
         vm.expectRevert();
-        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, 2000, 0, 0, false, false);
+        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, 2000, 0, 0, false, false, address(0));
     }
 
     // =========================================================================
@@ -354,7 +354,8 @@ contract PromoCodeRegistryTest is Test {
             uint64(block.timestamp + 100), // expires in 100 seconds
             0,
             false,
-            false
+            false,
+            address(0)
         );
 
         vm.warp(block.timestamp + 101);
@@ -378,7 +379,8 @@ contract PromoCodeRegistryTest is Test {
             uint64(block.timestamp + 100),
             0,
             false,
-            false
+            false,
+            address(0)
         );
         vm.warp(block.timestamp + 99);
         uint16 bps = _redeemDiscount(DISCOUNT_CODE, user);
@@ -398,7 +400,8 @@ contract PromoCodeRegistryTest is Test {
             0,
             2,   // maxRedemptions = 2
             false,
-            false
+            false,
+            address(0)
         );
 
         _redeemDiscount(DISCOUNT_CODE, user);
@@ -427,7 +430,8 @@ contract PromoCodeRegistryTest is Test {
             0,
             0,
             true,   // restricted
-            false
+            false,
+            address(0)
         );
 
         vm.prank(packMachine);
@@ -450,7 +454,8 @@ contract PromoCodeRegistryTest is Test {
             0,
             0,
             true,
-            false
+            false,
+            address(0)
         );
 
         address[] memory users = new address[](1);
@@ -471,7 +476,8 @@ contract PromoCodeRegistryTest is Test {
             0,
             0,
             true,
-            false
+            false,
+            address(0)
         );
         address[] memory users = new address[](1);
         users[0] = user;
@@ -504,7 +510,8 @@ contract PromoCodeRegistryTest is Test {
             0,
             0,
             false,
-            true   // oncePerUser
+            true,  // oncePerUser
+            address(0)
         );
 
         _redeemDiscount(DISCOUNT_CODE, user);
@@ -529,7 +536,8 @@ contract PromoCodeRegistryTest is Test {
             0,
             0,
             false,
-            true
+            true,
+            address(0)
         );
         _redeemDiscount(DISCOUNT_CODE, user);
         _redeemDiscount(DISCOUNT_CODE, user2);  // should not revert
@@ -619,7 +627,8 @@ contract PromoCodeRegistryTest is Test {
             0,
             3,
             false,
-            false
+            false,
+            address(0)
         );
         assertEq(registry.remainingRedemptions(DISCOUNT_CODE), 3);
         _redeemDiscount(DISCOUNT_CODE, user);
@@ -637,7 +646,8 @@ contract PromoCodeRegistryTest is Test {
             0,
             1,
             false,
-            false
+            false,
+            address(0)
         );
         _redeemDiscount(DISCOUNT_CODE, user);
         assertEq(registry.remainingRedemptions(DISCOUNT_CODE), 0);
@@ -655,7 +665,8 @@ contract PromoCodeRegistryTest is Test {
             0,
             cap,
             false,
-            false
+            false,
+            address(0)
         );
         for (uint32 i; i < redeems; ++i) {
             address u = makeAddr(string(abi.encodePacked("fuzz", i)));
@@ -690,7 +701,8 @@ contract PromoCodeRegistryTest is Test {
             uint64(block.timestamp + 10),
             0,
             false,
-            false
+            false,
+            address(0)
         );
         vm.warp(block.timestamp + 11);
         assertFalse(registry.isEligible(DISCOUNT_CODE, user));
@@ -705,7 +717,8 @@ contract PromoCodeRegistryTest is Test {
             0,
             0,
             true,
-            false
+            false,
+            address(0)
         );
         assertFalse(registry.isEligible(DISCOUNT_CODE, user));
     }
@@ -741,7 +754,8 @@ contract PromoCodeRegistryTest is Test {
             uint64(block.timestamp + 10),
             0,
             false,
-            false
+            false,
+            address(0)
         );
         vm.warp(block.timestamp + 11);
         uint256 price = 100e6;
@@ -779,7 +793,8 @@ contract PromoCodeRegistryTest is Test {
             0,
             10,
             false,
-            false
+            false,
+            address(0)
         );
         _redeemDiscount(DISCOUNT_CODE, user);
 
@@ -833,7 +848,7 @@ contract PromoCodeRegistryTest is Test {
         PromoCodeRegistry reg2 = PromoCodeRegistry(address(regProxy2));
 
         vm.prank(operator);
-        reg2.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, DISCOUNT_BPS_20, 0, 0, false, false);
+        reg2.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, DISCOUNT_BPS_20, 0, 0, false, false, address(0));
 
         vm.prank(packMachine);
         vm.expectRevert(IPromoCodeRegistry.PromoCodeRegistry__NotConfigured.selector);
@@ -853,7 +868,8 @@ contract PromoCodeRegistryTest is Test {
             0,
             1,
             false,
-            false
+            false,
+            address(0)
         );
 
         // Consume the single redemption
@@ -886,9 +902,10 @@ contract PromoCodeRegistryTest is Test {
             0,
             0,
             false,
-            false
+            false,
+            address(0)
         );
-        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, DISCOUNT_BPS_20, 0, 0, false, false);
+        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, DISCOUNT_BPS_20, 0, 0, false, false, address(0));
     }
 
     // =========================================================================

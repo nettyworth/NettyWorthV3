@@ -286,11 +286,13 @@ contract BuybackPoolTest is Test {
         pool.registerToken(1, 5e6, 0, address(packMachine));
     }
 
-    function test_RegisterToken_RevertsIfAlreadyActive() public {
+    function test_RegisterToken_OverwritesStaleActiveRecord() public {
+        // A stale isActive flag (from a prior win/recycle cycle) must NOT revert —
+        // an authorized machine silently overwrites the record with fresh data.
         _depositNFTs(CARDS_PER_PACK);
         _openPackAndFulfill();
 
-        // Find a token owned by user (which was registered)
+        // Find a token owned by user (which was registered during fulfillment).
         uint256 tokenId;
         for (uint256 i = 1; i <= assetNFT.totalSupply(); i++) {
             if (assetNFT.ownerOf(i) == user) {
@@ -300,14 +302,17 @@ contract BuybackPoolTest is Test {
         }
         require(tokenId > 0, "no token found");
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                BuybackPool.BuybackPool__TokenAlreadyRegistered.selector,
-                tokenId
-            )
-        );
+        uint128 newPrice = 7e6;
+        uint8 newTier = 2;
+        // Re-registering by an authorized machine must succeed and refresh the record.
         vm.prank(address(packMachine));
-        pool.registerToken(tokenId, 5e6, 0, address(packMachine));
+        pool.registerToken(tokenId, newPrice, newTier, address(packMachine));
+
+        (uint128 price, uint8 tier, address src, bool active) = pool.getTokenInfo(tokenId);
+        assertEq(price, newPrice, "price should be overwritten");
+        assertEq(tier, newTier, "tier should be overwritten");
+        assertEq(src, address(packMachine));
+        assertTrue(active);
     }
 
     function test_RegisterToken_StoresCorrectData() public {
@@ -607,6 +612,7 @@ contract BuybackPoolTest is Test {
     // =========================================================================
 
     function test_PaymentSplit_SendsCorrectAmountsToPoolAndTreasury() public {
+        // Payment is escrowed at open time and settled (split) at fulfillment.
         _depositNFTs(CARDS_PER_PACK);
 
         usdc.mint(user, PRICE);
@@ -621,12 +627,25 @@ contract BuybackPoolTest is Test {
         vm.prank(user);
         packMachine.openPack(user, 0, sig);
 
+        // At open time, full price is escrowed in the machine — not yet split.
+        assertEq(usdc.balanceOf(address(packMachine)), PRICE);
+        assertEq(usdc.balanceOf(address(pool)), 0);
+        assertEq(usdc.balanceOf(financeWallet), 0);
+
+        // Fulfill the VRF request — settlement happens here.
+        uint256 requestId = 1;
+        uint256[] memory words = new uint256[](CARDS_PER_PACK);
+        for (uint256 i; i < CARDS_PER_PACK; i++) {
+            words[i] = uint256(keccak256(abi.encodePacked(requestId, i)));
+        }
+        coordinator.fulfillRandomWords(address(vrfRouter), requestId, words);
+
         assertEq(usdc.balanceOf(address(pool)), expectedBuybackAmount);
         assertEq(usdc.balanceOf(financeWallet), expectedTreasuryAmount);
     }
 
     function test_PaymentSplit_ZeroAllocation_AllGoesToTreasury() public {
-        // Disable allocation
+        // Disable buyback allocation — all settled USDC must go to treasury at fulfillment.
         vm.prank(operator);
         packRegistry.setPackBuybackAllocation(address(packMachine), 0, 0);
 
@@ -638,6 +657,14 @@ contract BuybackPoolTest is Test {
         bytes memory sig = _signOpenPack(user, 0);
         vm.prank(user);
         packMachine.openPack(user, 0, sig);
+
+        // Fulfill to trigger settlement.
+        uint256 requestId = 1;
+        uint256[] memory words = new uint256[](CARDS_PER_PACK);
+        for (uint256 i; i < CARDS_PER_PACK; i++) {
+            words[i] = uint256(keccak256(abi.encodePacked(requestId, i)));
+        }
+        coordinator.fulfillRandomWords(address(vrfRouter), requestId, words);
 
         assertEq(usdc.balanceOf(address(pool)), 0);
         assertEq(usdc.balanceOf(financeWallet), PRICE);

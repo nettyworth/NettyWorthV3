@@ -28,6 +28,7 @@ contracts/
   PackRegistry.sol                # Pack definitions per (machine, packId) — single source of truth (UUPS)
   PackVRFRouter.sol               # Shared Chainlink VRF v2.5 consumer (UUPS)
   BuybackPool.sol                 # Guaranteed buyback pool for AssetNFTs (UUPS)
+  PromoCodeRegistry.sol           # Promo/discount + buyback-rate code registry (UUPS)
   AssetLendingPool.sol            # Asset-collateralized lending pool (UUPS, Ownable2Step)
   AssetLendingPoolConfig.sol      # Lending pool storage layout + admin config (abstract base)
   FeeController.sol               # Marketplace & redemption fee rates (UUPS)
@@ -41,6 +42,7 @@ contracts/
     IPackRegistry.sol             # PackRegistry interface
     IPackVRFRouter.sol            # VRF router interface
     IBuybackPool.sol              # BuybackPool interface
+    IPromoCodeRegistry.sol        # PromoCodeRegistry interface (PromoKind enum, PromoCode struct, errors, events)
     IPermissionManager.sol        # Permission manager interface
     ISignatureTransfer.sol        # Uniswap Permit2 signature transfer interface
     ITransferValidator.sol        # External transfer validation hook
@@ -62,6 +64,7 @@ scripts/
   deploy-pack-machine.ts          # Deploy PackVRFRouter + PackMachine impl + PackMachineFactory + PackRegistry + BuybackPool; wire factory ↔ registry
   create-pack-machine.ts          # Create a PackMachine clone via factory; register with VRFRouter + BuybackPool
   setup-pack-machine.ts           # Configure a PackMachine clone: set buyback rate (via PackRegistry), deposit NFTs
+  deploy-promo-code-registry.ts   # Deploy PromoCodeRegistry + ERC1967 proxy; prints setPromoCodeRegistry wiring steps
   appraisals.example.json         # Sample appraisal payload for batch-set-appraisals.ts
   batch-set-appraisals.ts         # Bulk-write NFT appraisal data (value/grade/category) to AssetLendingPool
   set-eligibility-controls.ts     # Set min appraisal value, min grade, and category lists on AssetLendingPool
@@ -173,11 +176,15 @@ Machine-wide custody config — `buybackPool`, `authorizedDepositors`, and `rete
 User ──► PackMachine.openPack(user, packId, sig)
               │
               ├── reads PackTypes.Pack from PackRegistry.getPack(machine, packId)
+              ├── pulls full (post-discount) payment into this contract (escrow)
               └──► PackVRFRouter.requestRandomWords() ──► Chainlink VRF
                                                                │
 User ◄── NFT transferred ◄── PackMachine.fulfillRandomness() ◄── PackVRFRouter.rawFulfillRandomWords()
                                         │
-                                        └──► BuybackPool.registerToken() (records per-card price + tier)
+                                        ├──► BuybackPool.registerToken() (try/catch — failure emits event, does not revert)
+                                        └──► Settle escrowed payment:
+                                               - wonCards/cardsPerPack share → BuybackPool + financeWallet
+                                               - failed cards → refund to user
 ```
 
 ### Buyback Call Flow
@@ -206,7 +213,8 @@ User ──► BuybackPool.buyback(tokenId)
 - **Multi-pack support** — each clone can host multiple packs (`packId` 0, 1, 2…); pack 0 bootstrapped at creation, further packs added via `PackRegistry.addPack`
 - **Centralized pack config via PackRegistry** — pack definitions (`pricePerPack`, `cardsPerPack`, `tierWeights`, `buybackAllocationBps`, `startTime`, `active`, `finished`) fetched live from `PackRegistry` on every open; machine-wide custody config (`buybackPool`, `authorizedDepositors`, `retentionThresholdBps`) stays on the clone
 - **Chainlink VRF v2.5** — verifiable on-chain randomness; shared router avoids Chainlink's per-subscription consumer cap
-- **Permit2 gasless payments** — `openPackWithPermit2(user, packId, …)` uses Uniswap's canonical Permit2 (`0x000000000022D473030F116dDEE9F6B43aC78BA3`) for relayer-submitted USDC transfers
+- **Escrowed payment model** — pack payment is held in the clone contract until `fulfillRandomness` distributes it: cards actually won receive their proportional share (buyback portion → BuybackPool, remainder → financeWallet); any cards that fail (empty pool or transfer revert) are refunded to the user proportionally. `rescueERC20` is guarded by `totalEscrowed` so pending user funds can never be swept.
+- **Permit2 gasless payments** — `openPackWithPermit2(user, packId, …)` uses Uniswap's canonical Permit2 (`0x000000000022D473030F116dDEE9F6B43aC78BA3`) for relayer-submitted USDC transfers; payment is escrowed in the clone until VRF settles
 - **EIP-712 play signatures** — typehash `OpenPack(address user, uint256 packId, uint256 nonce)`; operator signs each open off-chain; `packId` binds the signature to the intended pack, preventing cross-pack replay; per-user nonce prevents replay within a pack
 - **Swap-and-pop prize pool** — O(1) random card selection and removal from the shared machine-wide prize pool array
 - **Effective pool size accounting** — pool size decremented immediately on VRF request, preventing over-commitment before randomness arrives
@@ -249,8 +257,60 @@ Per-tier overrides (5 tiers: Base/Common/Uncommon/Rare/Ultra) can be set by `PAC
 - **Pausable** — emergency stop via `PAUSER_ROLE`
 - **Tiered buyback rates** — per-tier overrides for both standard and protected rates; zero means use global default
 - **Auto-redeposit** — bought-back NFTs automatically returned to the source PackMachine's prize pool
+- **Idempotent token registration** — `registerToken` silently overwrites a stale active record instead of reverting; prevents a prior win/recycle cycle from permanently blocking VRF fulfillment for a recycled card
 - **Emergency withdrawal** — admin can drain USDC to financeWallet while paused
 - **NFT rescue** — admin can recover stuck NFTs (e.g. if source PackMachine is deregistered)
+
+## PromoCodeRegistry Contract
+
+`PromoCodeRegistry` is a UUPS-upgradeable singleton that stores and validates off-chain promo codes. A `codeId` is the `keccak256` hash of the off-chain code string. Each code belongs to one of two kinds (the `PromoKind` enum):
+
+| Kind | Effect | Allowed bps values | Redeemer |
+| ---- | ------ | ------------------ | -------- |
+| **Discount** | Reduces PackMachine pack price | 1000 / 1500 / 2000 / 2500 (10–25%) | Any registered PackMachine clone (via `factory.isPackMachine`) |
+| **Buyback** | Raises BuybackPool payout from 80% | 9000 / 9500 / 9800 (90–98%) | The stored BuybackPool singleton address |
+
+### Code Configuration
+
+Each code carries independent guards:
+
+| Field | Description |
+| ----- | ----------- |
+| `expiry` | Unix timestamp after which redemption reverts (0 = no expiry) |
+| `maxRedemptions` | Total-use cap (0 = uncapped) |
+| `restricted` | If `true`, only allowlisted addresses may redeem |
+| `oncePerUser` | If `true`, each address may redeem at most once |
+| `active` | Admin kill switch; toggled independently of `expiry` |
+| `machine` *(Discount only)* | Scopes the code to a single PackMachine clone (`address(0)` = valid on any registered machine) |
+
+### Machine Binding
+
+Discount codes can be scoped to a specific PackMachine clone via the `machine` field set at `createCode` time. When `machine != address(0)`, `redeemDiscount` reverts with `WrongMachine` if called from any other clone. Global codes (`machine == address(0)`) remain valid on all registered machines.
+
+### Discount Refund
+
+`refundDiscount(codeId, user)` reverses a previously consumed discount code — it decrements `redeemedCount` and clears the `oncePerUser` flag for that user. This is called by PackMachine in the all-cards-failed VRF path, wrapped in `try/catch`, so a refund failure can never block the USDC refund to the user.
+
+### PromoCodeRegistry Roles
+
+| Role | Permission |
+| ---- | ---------- |
+| `PACK_OPERATOR_ROLE` | `createCode`, `setActive`, `setExpiry`, `setMaxRedemptions`, `addToAllowlist`, `removeFromAllowlist` |
+| `DEFAULT_ADMIN_ROLE` | `setPackMachineFactory`, `setBuybackPool` |
+| `PAUSER_ROLE` | `pause`, `unpause` |
+| `UPGRADER_ROLE` | `_authorizeUpgrade` |
+
+Redemption callers are not role-gated; instead `redeemDiscount` validates `factory.isPackMachine(msg.sender)` and `redeemBuyback` validates `msg.sender == storedBuybackPool`.
+
+### PromoCodeRegistry Features
+
+- **UUPS upgradeable** (EIP-1822) — logic upgrades without changing the proxy address
+- **PermissionConsumer access control** — centralized role checks via PermissionManager
+- **ERC-7201 namespaced storage** — collision-safe across upgrades
+- **Pausable** — emergency stop via `PAUSER_ROLE`; pausing blocks all redemption and refund calls
+- **Two-kind dispatch** — Discount and Buyback codes share one registry; `_validateAndConsume` enforces the expected kind on every redemption
+- **Machine-scoped discount codes** — optional per-clone scoping prevents a code issued for one machine from being used on another
+- **Discount refund** — `refundDiscount` allows PackMachine to restore a code on total VRF failure, keeping the user's redemption quota intact
 
 ## AssetLendingPool Contract
 
@@ -262,7 +322,7 @@ Configuration setters, the ERC-7201 storage layout, and eligibility helpers live
 
 1. **Borrow** — a borrower collateralizes one token (`borrow`) or up to 50 tokens as a bundle (`borrowBundle`). The maximum loan amount is `LTV × Σ(appraisal values)`. Interest is fixed upfront and deducted from the disbursement.
 2. **Repay** — the borrower repays principal + pre-fixed interest before the term deadline, reclaiming all collateral atomically.
-3. **Marketplace financing** — `financeMarketplacePurchase` atomically purchases an NFT from a seller and opens a loan: the buyer pays the deposit, the pool finances `appraisalValue − deposit`, and the token becomes collateral immediately.
+3. **Marketplace financing** — `financeMarketplacePurchase` atomically purchases a marketplace-listed NFT and opens a loan. The caller passes the seller's EIP-712 `SignedListing` (verified on-chain against the marketplace domain) along with their deposit. The pool finances `listingPrice − depositAmount` (capped at LTV × appraisalValue), pays the seller the full listing price, and the token becomes collateral immediately. A per-seller `financeNonces` mapping prevents replay of the listing signature.
 4. **Lender capital** — external lenders call `lenderDeposit` / `lenderWithdraw` / `claimLenderInterest`. Withdraw and claim deliberately omit `whenNotPaused` so lenders can always exit even during an emergency pause.
 
 ### Loan Terms (defaults)
@@ -277,7 +337,7 @@ Interest formula: `principal × aprBps × duration / (365 days × BPS)`. Term co
 
 ### Default Lifecycle
 
-When the borrower misses repayment, the owner calls `initiateDefault`. The asset then passes through three phases (durations configurable):
+When the borrower misses repayment, the owner calls `initiateDefault` (or the backward-compatible alias `liquidate`). The asset then passes through three phases (durations configurable):
 
 | Phase | Default duration | Who can act | Outcome |
 | ----- | ---------------- | ----------- | ------- |
@@ -301,7 +361,9 @@ The pool's only dependency on `PermissionManager` is external: the deployed pool
 - **Eligibility checks** — per-token: minimum appraisal value (default $100), minimum grade, category whitelist, appraisal staleness guard (`maxAppraisalAge`, default 7 days; 0 disables)
 - **Synthetix reward-per-share lender interest** — `accInterestPerShare` accumulator + per-lender `lenderRewardDebt`; `lenderShareBps` (e.g. 80%) splits interest between lenders and protocol
 - **Split capital accounting** — owner/treasury deposits tracked separately from lender capital and protocol interest
-- **Configurable origination fee** — `originationFeeBps` deducted from disbursement (or pulled from buyer in marketplace path), sent to `feeWallet`
+- **Configurable origination fee** — `originationFeeBps` deducted from disbursement (or pulled from buyer on top of deposit in the marketplace path), sent to `feeWallet`
+- **EIP-712 verified marketplace financing** — `financeMarketplacePurchase` verifies the seller's `SignedListing` on-chain against the marketplace's EIP-712 domain before executing; `financeNonces` mapping prevents listing-signature replay
+- **`liquidate()` alias** — backward-compatible alias for `initiateDefault()` for off-chain callers
 - **PackMachine recycle integration** — defaulted assets can be deposited directly into any registered PackMachine via `depositFromPool`
 - **NFT rescue** — `rescueNFT` admin escape hatch for stuck tokens
 
@@ -549,6 +611,10 @@ npx hardhat test nodejs
 # Lint Solidity files
 pnpm lint
 
+# Verify every hardcoded ERC-7201 storage slot matches the canonical keccak256(…) derivation
+# (guards against copy-paste slot typos across upgrades)
+pnpm verify:slots
+
 # Start a fork
 pnpm fork:mainnet
 pnpm fork:base
@@ -588,6 +654,7 @@ P2PTradeEscrow             (standalone — no protocol deps; deploy independentl
 | 3 | Pack system | `deploy-pack-machine.ts` | PackVRFRouter, PackMachine impl, PackMachineFactory, PackRegistry, BuybackPool (all UUPS) | PermissionManager, AssetNFT |
 | 4 | Create a pack | `create-pack-machine.ts` | PackMachine clone (EIP-1167); bootstraps pack 0 in PackRegistry | PackMachineFactory, PackVRFRouter, BuybackPool, PackRegistry |
 | 5 | Configure pack | `setup-pack-machine.ts` | — (deposits NFTs; sets buyback rate on PackRegistry pack 0) | PackMachine clone, BuybackPool, AssetNFT, PackRegistry |
+| 5a | Promo codes *(optional)* | `deploy-promo-code-registry.ts` | PromoCodeRegistry (UUPS) | PackMachineFactory, BuybackPool; wire via `factory.setPromoCodeRegistry` + `buybackPool.setPromoCodeRegistry` |
 | 6 | Lending pool | `deploy-asset-lending-pool.ts` | AssetLendingPool (UUPS) | AssetNFT, PackMachineFactory |
 | 7 | Fee controller | `deploy-fee-controller.ts` | FeeController (UUPS) | PermissionManager |
 | 8 | Marketplace | `deploy-marketplace.ts` | NettyWorthMarketplace (UUPS) | PermissionManager, FeeController, AssetLendingPool, AssetNFT |

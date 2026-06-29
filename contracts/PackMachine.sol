@@ -118,17 +118,29 @@ contract PackMachine is
         ///      = eligible-tokens-in-custody for pack p minus pending reservations.
         ///      Decremented on _requestVRF, restored on CardFailed, decremented further on win.
         mapping(uint256 packId => uint256) availablePerPack;
+        // === Escrow ===
+        /// @dev Sum of all escrowed payments for pending VRF requests. rescueERC20 must
+        ///      never sweep below this floor so user funds are always recoverable.
+        uint256 totalEscrowed;
+        /// @dev Promo code (if any) used for a pending open, keyed by VRF requestId.
+        ///      Written only when a discount code is applied; omitted (default bytes32(0))
+        ///      for opens without a code. Cleared alongside pendingOpens in fulfillRandomness.
+        mapping(uint256 requestId => bytes32 codeId) pendingCodeIds;
     }
 
     struct PendingOpen {
         address user;
         uint8 cardsCount;
         uint256 packId;
+        /// @dev Total USDC (post-discount) held in escrow for this open.
+        uint256 escrowedAmount;
+        /// @dev Buyback allocation portion of escrowedAmount (routed to BuybackPool on settle).
+        uint256 buybackAmount;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.PackMachine")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant PACK_MACHINE_STORAGE_SLOT =
-        0x7a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a00;
+        0xf65d8338bde3e030621995e09419bd24a6a0ace7a2660416b0681f35fe771000;
 
     function _getStorage() private pure returns (PackMachineStorage storage $) {
         assembly {
@@ -165,6 +177,12 @@ contract PackMachine is
         address indexed depositor,
         bool authorized
     );
+    /// @dev Emitted when BuybackPool.registerToken reverts after a successful card transfer.
+    ///      The user already received the card; buyback registration is best-effort.
+    event BuybackRegistrationFailed(
+        uint256 indexed tokenId,
+        uint256 indexed requestId
+    );
 
     // =========================================================================
     // Errors
@@ -188,10 +206,6 @@ contract PackMachine is
     error PackMachine__UnauthorizedDepositor(address caller);
     error PackMachine__CutOff(uint256 retained, uint256 total);
     error PackMachine__PromoRegistryNotSet();
-    error PackMachine__DiscountExceedsBuyback(
-        uint256 discountedPrice,
-        uint256 buybackAmount
-    );
     error PackMachine__RegistryNotSet();
     error PackMachine__NoEligibility(uint256 tokenId);
     error PackMachine__InvalidPackRef(uint256 packId);
@@ -268,13 +282,7 @@ contract PackMachine is
         uint256 packId,
         bytes calldata signature
     ) external nonReentrant whenNotPaused {
-        PackMachineStorage storage $ = _getStorage();
-        // Fetch pack config once into memory (validates packId via registry).
-        PackTypes.Pack memory pack = _registry().getPack(address(this), packId);
-        _assertOpenable($, pack, packId);
-        _verifySignature($, user, packId, signature);
-        _handlePayment($, pack, _msgSender(), user, bytes32(0));
-        _requestVRF($, pack, user, packId, IPackMachineFactory($.factory));
+        _openPackDirect(user, packId, signature, bytes32(0));
     }
 
     /// @notice Open a pack by pulling USDC directly from `msg.sender`, applying a promo discount code.
@@ -288,12 +296,37 @@ contract PackMachine is
         bytes calldata signature,
         bytes32 codeId
     ) external nonReentrant whenNotPaused {
+        _openPackDirect(user, packId, signature, codeId);
+    }
+
+    /// @dev Shared implementation for both direct-USDC openPack overloads.
+    function _openPackDirect(
+        address user,
+        uint256 packId,
+        bytes calldata signature,
+        bytes32 codeId
+    ) private {
         PackMachineStorage storage $ = _getStorage();
         PackTypes.Pack memory pack = _registry().getPack(address(this), packId);
         _assertOpenable($, pack, packId);
         _verifySignature($, user, packId, signature);
-        _handlePayment($, pack, _msgSender(), user, codeId);
-        _requestVRF($, pack, user, packId, IPackMachineFactory($.factory));
+        (uint256 escrowed, uint256 buyback) = _handlePayment(
+            $,
+            pack,
+            _msgSender(),
+            user,
+            codeId
+        );
+        _requestVRF(
+            $,
+            pack,
+            user,
+            packId,
+            IPackMachineFactory($.factory),
+            escrowed,
+            buyback,
+            codeId
+        );
     }
 
     /// @notice Open a pack paying via Uniswap Permit2 (gasless for user — relayer pays gas).
@@ -363,64 +396,44 @@ contract PackMachine is
         _verifySignature($, user, packId, playSignature);
 
         IPackMachineFactory iFactory = IPackMachineFactory($.factory);
-        uint256 price = pack.pricePerPack;
 
-        // Buyback allocation computed on the FULL price — pool always receives its configured share.
-        uint256 buybackAmount =
-            (price * pack.buybackAllocationBps) / WEIGHT_PRECISION;
-        address pool = $.buybackPool;
+        // Resolve discount and buyback allocation (redeems promo code when codeId is non-zero).
+        (uint256 escrowedAmount, uint256 buybackAmount) = _resolveAmounts(
+            $,
+            pack,
+            user,
+            codeId
+        );
 
-        // Resolve discount and compute the amount the user will pay.
-        uint16 discountBps = 0;
-        if (codeId != bytes32(0)) {
-            address promoReg = iFactory.promoCodeRegistry();
-            if (promoReg == address(0))
-                revert PackMachine__PromoRegistryNotSet();
-            discountBps = IPromoCodeRegistry(promoReg).redeemDiscount(
-                codeId,
-                user
-            );
-        }
-        uint256 discountedPrice =
-            price - (price * discountBps) / WEIGHT_PRECISION;
-
-        // Guard: NettyWorth (finance wallet) absorbs the discount.
-        if (discountedPrice < buybackAmount)
-            revert PackMachine__DiscountExceedsBuyback(
-                discountedPrice,
-                buybackAmount
-            );
-
-        // Pull the discounted amount from the user via Permit2.
+        // Pull the discounted amount from the user via Permit2 into this contract (escrow).
+        // Funds remain here until fulfillRandomness distributes them per-card or refunds failures.
         PERMIT2.permitTransferFrom(
             ISignatureTransfer.PermitTransferFrom({
                 permitted: ISignatureTransfer.TokenPermissions({
                     token: iFactory.paymentToken(),
-                    amount: discountedPrice
+                    amount: escrowedAmount
                 }),
                 nonce: permit2Nonce,
                 deadline: permit2Deadline
             }),
             ISignatureTransfer.SignatureTransferDetails({
                 to: address(this),
-                requestedAmount: discountedPrice
+                requestedAmount: escrowedAmount
             }),
             user,
             permit2Signature
         );
 
-        IERC20 token = IERC20(iFactory.paymentToken());
-        if (buybackAmount > 0 && pool != address(0)) {
-            token.safeTransfer(pool, buybackAmount);
-        } else {
-            buybackAmount = 0;
-        }
-        token.safeTransfer(
-            iFactory.financeWallet(),
-            discountedPrice - buybackAmount
+        _requestVRF(
+            $,
+            pack,
+            user,
+            packId,
+            iFactory,
+            escrowedAmount,
+            buybackAmount,
+            codeId
         );
-
-        _requestVRF($, pack, user, packId, iFactory);
     }
 
     // =========================================================================
@@ -444,7 +457,9 @@ contract PackMachine is
             revert PackMachine__OnlyVRFRouter(msg.sender);
 
         PendingOpen memory pending = $.pendingOpens[requestId];
+        bytes32 pendingCodeId = $.pendingCodeIds[requestId];
         delete $.pendingOpens[requestId];
+        delete $.pendingCodeIds[requestId];
 
         // Fetch pack config from registry at fulfill-time.
         PackTypes.Pack memory pack = _registry().getPack(
@@ -459,6 +474,7 @@ contract PackMachine is
 
         iFactory.beforeTransfer(assetNFT);
 
+        uint256 wonCards;
         for (uint256 i; i < pending.cardsCount; ++i) {
             uint256 word = randomWords[i];
 
@@ -519,15 +535,24 @@ contract PackMachine is
                     tokenId
                 )
             {
+                ++wonCards;
                 emit CardWon(pending.user, tokenId, requestId);
                 // Register with BuybackPool so the user can sell the card back.
+                // Wrapped in try/catch: a registration failure must never revert card
+                // delivery — the user already owns the NFT at this point.
                 if (poolActive) {
-                    IBuybackPool(pool).registerToken(
-                        tokenId,
-                        uint128(uint256(pack.pricePerPack) / pack.cardsPerPack),
-                        uint8(selectedTier),
-                        address(this)
-                    );
+                    try
+                        IBuybackPool(pool).registerToken(
+                            tokenId,
+                            uint128(
+                                uint256(pack.pricePerPack) / pack.cardsPerPack
+                            ),
+                            uint8(selectedTier),
+                            address(this)
+                        )
+                    {} catch {
+                        emit BuybackRegistrationFailed(tokenId, requestId);
+                    }
                 }
             } catch {
                 // Transfer failed — return the card to all its pools.
@@ -544,6 +569,49 @@ contract PackMachine is
         }
 
         iFactory.afterTransfer(assetNFT);
+
+        // ── Settle escrowed payment ──────────────────────────────────────────
+        // Distribute the held USDC proportionally to the cards that were actually
+        // won; refund the remainder to the user (failed cards are not charged).
+        // Integer-division dust (at most cardsCount-1 wei) stays in the contract
+        // and is sweepable via rescueERC20 (which protects totalEscrowed).
+        $.totalEscrowed -= pending.escrowedAmount;
+        uint256 n = pending.cardsCount;
+        IERC20 paymentToken = IERC20(iFactory.paymentToken());
+        if (wonCards > 0 && pending.escrowedAmount > 0) {
+            uint256 settled = (pending.escrowedAmount * wonCards) / n;
+            uint256 buybackShare = (pending.buybackAmount * wonCards) / n;
+            uint256 financeShare = settled - buybackShare;
+            if (buybackShare > 0 && pool != address(0)) {
+                paymentToken.safeTransfer(pool, buybackShare);
+            }
+            if (financeShare > 0) {
+                paymentToken.safeTransfer(
+                    iFactory.financeWallet(),
+                    financeShare
+                );
+            }
+            uint256 refund = pending.escrowedAmount - settled;
+            if (refund > 0) {
+                paymentToken.safeTransfer(pending.user, refund);
+            }
+        } else if (pending.escrowedAmount > 0) {
+            // All cards failed — refund the full escrowed amount.
+            paymentToken.safeTransfer(pending.user, pending.escrowedAmount);
+            // Reverse the promo code consumption so the user can reuse their code.
+            if (pendingCodeId != bytes32(0)) {
+                address promoReg = iFactory.promoCodeRegistry();
+                if (promoReg != address(0)) {
+                    try
+                        IPromoCodeRegistry(promoReg).refundDiscount(
+                            pendingCodeId,
+                            pending.user
+                        )
+                    {} catch {} // solhint-disable-line no-empty-blocks
+                }
+            }
+        }
+
         emit PackOpened(
             pending.user,
             requestId,
@@ -773,11 +841,18 @@ contract PackMachine is
     }
 
     /// @notice Recover ERC-20 tokens accidentally sent to this contract.
+    /// @dev For the payment token, only the amount above `totalEscrowed` is swept so
+    ///      pending user funds are never at risk.
     function rescueERC20(
         address token
     ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
         uint256 balance = IERC20(token).balanceOf(address(this));
-        IERC20(token).safeTransfer(_msgSender(), balance);
+        uint256 escrowed =
+            (token == IPackMachineFactory(_getStorage().factory).paymentToken())
+                ? _getStorage().totalEscrowed
+                : 0;
+        if (balance <= escrowed) return;
+        IERC20(token).safeTransfer(_msgSender(), balance - escrowed);
     }
 
     // =========================================================================
@@ -861,7 +936,14 @@ contract PackMachine is
     }
 
     function isCutOff() external view returns (bool) {
-        PackMachineStorage storage $ = _getStorage();
+        return _isCutOff(_getStorage());
+    }
+
+    /// @dev Returns true when the machine-wide retention threshold is breached.
+    ///      Zero guards: returns false if totalInventory or threshold are unset.
+    function _isCutOff(
+        PackMachineStorage storage $
+    ) private view returns (bool) {
         if ($.totalInventory == 0 || $.retentionThresholdBps == 0) return false;
         return
             $.effectivePrizePoolSize * WEIGHT_PRECISION <
@@ -927,16 +1009,11 @@ contract PackMachine is
         }
 
         // Machine-wide cut-off: block sales if retained inventory < threshold.
-        if ($.totalInventory > 0 && $.retentionThresholdBps > 0) {
-            if (
-                $.effectivePrizePoolSize * WEIGHT_PRECISION <
-                $.totalInventory * uint256($.retentionThresholdBps)
-            ) {
-                revert PackMachine__CutOff(
-                    $.effectivePrizePoolSize,
-                    $.totalInventory
-                );
-            }
+        if (_isCutOff($)) {
+            revert PackMachine__CutOff(
+                $.effectivePrizePoolSize,
+                $.totalInventory
+            );
         }
     }
 
@@ -973,24 +1050,19 @@ contract PackMachine is
             revert PackMachine__InvalidSignature();
     }
 
-    /// @dev Pull payment from `payer`, applying an optional promo discount code.
-    function _handlePayment(
+    /// @dev Compute the post-discount escrow amount and the buyback allocation within it.
+    ///      Calls `redeemDiscount` when codeId is non-zero (state-changing — must be called
+    ///      exactly once per open flow, before any token transfer).
+    function _resolveAmounts(
         PackMachineStorage storage $,
         PackTypes.Pack memory pack,
-        address payer,
         address user,
         bytes32 codeId
-    ) private {
+    ) private returns (uint256 escrowedAmount, uint256 buybackAmount) {
         IPackMachineFactory iFactory = IPackMachineFactory($.factory);
-        IERC20 token = IERC20(iFactory.paymentToken());
         uint256 price = pack.pricePerPack;
 
-        // Buyback allocation computed on FULL price — pool always receives its configured share.
-        uint256 buybackAmount =
-            (price * pack.buybackAllocationBps) / WEIGHT_PRECISION;
-        address pool = $.buybackPool;
-
-        // Resolve discount; revert (not silent) if promo registry is unset with a non-zero code.
+        // Resolve discount first; revert (not silent) if promo registry is unset with a non-zero code.
         uint16 discountBps = 0;
         if (codeId != bytes32(0)) {
             address promoReg = iFactory.promoCodeRegistry();
@@ -1001,24 +1073,42 @@ contract PackMachine is
                 user
             );
         }
-        uint256 discountedPrice =
-            price - (price * discountBps) / WEIGHT_PRECISION;
+        escrowedAmount = price - (price * discountBps) / WEIGHT_PRECISION;
 
-        if (discountedPrice < buybackAmount)
-            revert PackMachine__DiscountExceedsBuyback(
-                discountedPrice,
-                buybackAmount
-            );
+        // Buyback allocation computed on the DISCOUNTED price so it is always <= escrowedAmount
+        // regardless of the discount applied. Finance wallet absorbs the discount proportionally.
+        address pool = $.buybackPool;
+        buybackAmount =
+            pool != address(0)
+                ? (escrowedAmount * pack.buybackAllocationBps) /
+                    WEIGHT_PRECISION
+                : 0;
+    }
 
-        if (buybackAmount > 0 && pool != address(0)) {
-            token.safeTransferFrom(payer, pool, buybackAmount);
-        } else {
-            buybackAmount = 0;
-        }
-        token.safeTransferFrom(
+    /// @dev Pull payment from `payer` into this contract (escrow), applying an optional promo
+    ///      discount code. Returns the total escrowed amount and the buyback allocation within
+    ///      it. Funds are held here until fulfillRandomness settles them per-card; any cards
+    ///      that fail (empty pool or transfer revert) are refunded proportionally to the user.
+    function _handlePayment(
+        PackMachineStorage storage $,
+        PackTypes.Pack memory pack,
+        address payer,
+        address user,
+        bytes32 codeId
+    ) private returns (uint256 escrowedAmount, uint256 buybackAmount) {
+        (escrowedAmount, buybackAmount) = _resolveAmounts(
+            $,
+            pack,
+            user,
+            codeId
+        );
+
+        // Pull the full (post-discount) payment into this contract. Funds stay here
+        // until fulfillRandomness distributes them to pool/finance or refunds to user.
+        IERC20(IPackMachineFactory($.factory).paymentToken()).safeTransferFrom(
             payer,
-            iFactory.financeWallet(),
-            discountedPrice - buybackAmount
+            address(this),
+            escrowedAmount
         );
     }
 
@@ -1027,7 +1117,10 @@ contract PackMachine is
         PackTypes.Pack memory pack,
         address user,
         uint256 packId,
-        IPackMachineFactory factory_
+        IPackMachineFactory factory_,
+        uint256 escrowedAmount,
+        uint256 buybackAmount,
+        bytes32 codeId
     ) private {
         uint8 cards = pack.cardsPerPack;
         // Decrement both machine-wide and per-pack reservation counters.
@@ -1039,22 +1132,13 @@ contract PackMachine is
         $.pendingOpens[requestId] = PendingOpen({
             user: user,
             cardsCount: cards,
-            packId: packId
+            packId: packId,
+            escrowedAmount: escrowedAmount,
+            buybackAmount: buybackAmount
         });
-    }
-
-    function _swapAndPopTier(
-        PackMachineStorage storage $,
-        uint256 tier,
-        uint256 index
-    ) private {
-        uint256 last = $.tierPools[tier].length - 1;
-        if (index != last) {
-            uint256 moved = $.tierPools[tier][last];
-            $.tierPools[tier][index] = moved;
-            $.machinePoolIndex[moved] = index + 1;
-        }
-        $.tierPools[tier].pop();
+        // Store the promo code separately (sparse mapping — only written when non-zero).
+        if (codeId != bytes32(0)) $.pendingCodeIds[requestId] = codeId;
+        $.totalEscrowed += escrowedAmount;
     }
 
     /// @dev O(1) removal of tokenId from machine-wide tierPools using the stored index map.

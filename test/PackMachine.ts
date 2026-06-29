@@ -341,8 +341,8 @@ describe("PackMachine Integration", async function () {
       // effectivePrizePoolSize decremented at request time
       assert.equal(await packMachine.read.effectivePrizePoolSize(), 0n);
 
-      // USDC should have moved to finance wallet (admin in this test)
-      assert.equal(await usdc.read.balanceOf([adminAddress]), PRICE_PER_PACK);
+      // USDC is escrowed in the machine at open time — not yet forwarded.
+      assert.equal(await usdc.read.balanceOf([packMachine.address]), PRICE_PER_PACK);
       assert.equal(await usdc.read.balanceOf([userAddress]), 0n);
 
       // Simulate VRF fulfillment: coordinator calls rawFulfillRandomWords on router
@@ -366,6 +366,10 @@ describe("PackMachine Integration", async function () {
       // User should now own all CARDS_PER_PACK NFTs
       const userBalance = await assetNFT.read.balanceOf([userAddress]);
       assert.equal(userBalance, BigInt(CARDS_PER_PACK));
+
+      // Payment settled to finance wallet (admin) at fulfillment.
+      assert.equal(await usdc.read.balanceOf([adminAddress]), PRICE_PER_PACK);
+      assert.equal(await usdc.read.balanceOf([packMachine.address]), 0n);
 
       // Pool should be empty
       assert.equal(await getTotalPoolSize(packMachine), 0n);
@@ -417,7 +421,9 @@ describe("PackMachine Integration", async function () {
         account: walletUser.account,
       });
 
-      assert.equal(await usdc.read.balanceOf([adminAddress]), PRICE_PER_PACK);
+      // USDC is escrowed in the machine at open time — settled to finance wallet at fulfillment.
+      assert.equal(await usdc.read.balanceOf([packMachine.address]), PRICE_PER_PACK);
+      assert.equal(await usdc.read.balanceOf([adminAddress]), 0n);
       assert.equal(await packMachine.read.effectivePrizePoolSize(), 0n);
 
       // Fulfill and verify cards received
@@ -430,6 +436,10 @@ describe("PackMachine Integration", async function () {
         [1n, [12345n, 67890n, 11111n]],
         { account: coordinator.address },
       );
+
+      // Finance wallet receives settled payment after fulfillment.
+      assert.equal(await usdc.read.balanceOf([adminAddress]), PRICE_PER_PACK);
+      assert.equal(await usdc.read.balanceOf([packMachine.address]), 0n);
 
       assert.equal(
         await assetNFT.read.balanceOf([userAddress]),

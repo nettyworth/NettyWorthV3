@@ -97,6 +97,10 @@ abstract contract AssetLendingPoolConfig is
         // =====================================================================
         /// @dev Address of the authorized marketplace contract allowed to call settleLoanRepaymentOnSale.
         address marketplace;
+        /// @dev Replay protection for financeMarketplacePurchase: tracks used seller nonces.
+        ///      Keyed by (seller, nonce). Prevents a seller's listing signature from being
+        ///      replayed to finance the same NFT (or any other approved NFT) a second time.
+        mapping(address seller => mapping(uint256 nonce => bool)) financeNonces;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.AssetLendingPool")) - 1)) & ~bytes32(uint256(0xff))

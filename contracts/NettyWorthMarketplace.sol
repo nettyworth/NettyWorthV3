@@ -96,7 +96,7 @@ contract NettyWorthMarketplace is
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.NettyWorthMarketplace")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant MARKETPLACE_STORAGE_SLOT =
-        0x68ba5196c25fc959bc0fb3ec3cc9a4e3d693169bd32406f4511fd2704f2d7000;
+        0x1b62b54db2d4d5c73083078cc269c4036b01ae06fa994c0368f121e766c05600;
 
     function _getMarketplaceStorage() private pure returns (MarketplaceStorage storage $) {
         // solhint-disable-next-line no-inline-assembly

@@ -89,7 +89,7 @@ contract BuybackPool is
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.BuybackPool")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant BUYBACK_POOL_STORAGE_SLOT =
-        0x3f1a2b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f00;
+        0xcde91e075f2798ca63d14356a360b0f16575d21d6ecd1d5809e671a133dd7f00;
 
     function _getStorage() private pure returns (BuybackPoolStorage storage $) {
         assembly {
@@ -259,6 +259,12 @@ contract BuybackPool is
 
     /// @notice Called by PackMachine during fulfillRandomness to record a won token's buyback data.
     /// @dev Only callable by registered PackMachines.
+    ///      If the token already has an active registration (stale flag from a prior win/recycle
+    ///      cycle that bypassed buyback), the record is silently overwritten with the current
+    ///      price/tier/source. This prevents a stale `isActive` from permanently bricking a
+    ///      pack's VRF fulfillment — an authorized machine re-registering its own token is safe
+    ///      because the token physically left the machine before the next win, making any prior
+    ///      record obsolete.
     function registerToken(
         uint256 tokenId,
         uint128 pricePerCard,
@@ -268,8 +274,6 @@ contract BuybackPool is
         BuybackPoolStorage storage $ = _getStorage();
         if (!$.registeredPackMachines[msg.sender])
             revert BuybackPool__UnauthorizedSource(msg.sender);
-        if ($.tokenInfo[tokenId].isActive)
-            revert BuybackPool__TokenAlreadyRegistered(tokenId);
 
         $.tokenInfo[tokenId] = TokenBuybackInfo({
             pricePerCard: pricePerCard,

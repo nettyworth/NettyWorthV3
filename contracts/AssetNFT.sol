@@ -94,7 +94,7 @@ contract AssetNFT is
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.AssetNFT")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant ASSET_NFT_STORAGE_SLOT =
-        0x675aac697fe56d36fbae4d3e62e7ee038891694765a00c8d87dcb6940159f900;
+        0xdf981ac21670c8d86950dabc51999eae0654f62defa8cd0d5ce4ac3696fabe00;
 
     function _getAssetNFTStorage()
         private

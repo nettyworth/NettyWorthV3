@@ -228,7 +228,8 @@ contract PromoCodeSecurityTest is Test {
             0,  // no expiry
             0,  // uncapped
             false, // not restricted
-            false  // not oncePerUser
+            false, // not oncePerUser
+            address(0)
         );
         // Open buyback boost code
         registry.createCode(
@@ -238,7 +239,8 @@ contract PromoCodeSecurityTest is Test {
             0,
             0,
             false,
-            false
+            false,
+            address(0)
         );
         // Restricted discount code — allowlist gated
         registry.createCode(
@@ -248,7 +250,8 @@ contract PromoCodeSecurityTest is Test {
             0,
             0,
             true,  // restricted
-            false
+            false,
+            address(0)
         );
         vm.stopPrank();
     }

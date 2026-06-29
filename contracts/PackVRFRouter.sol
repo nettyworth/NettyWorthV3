@@ -49,7 +49,7 @@ contract PackVRFRouter is
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.PackVRFRouter")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant PACK_VRF_ROUTER_STORAGE_SLOT =
-        0x9e3c7d59c2c1e1a6a0a24454f70b7c4ed3a3a9a9f6e3b3a1c8e7d6c5b4a3a200;
+        0x1a86f08caea8a771089b03dcbcd6d44d4b9a0be22a0569919ff7e908d7550700;
 
     function _getStorage()
         private

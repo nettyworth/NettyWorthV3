@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { network } from "hardhat";
-import { encodeFunctionData, toHex, keccak256, getAddress } from "viem";
+import {
+  encodeFunctionData,
+  toHex,
+  keccak256,
+  getAddress,
+  type Address,
+  type WalletClient,
+} from "viem";
 
 const FORWARDER = "0x1234567890123456789012345678901234567890" as `0x${string}`;
 const LTV_BPS = 5000n; // 50%
@@ -29,8 +36,14 @@ const MINTER_ROLE = roleHash("MINTER_ROLE");
 describe("AssetLendingPool", async function () {
   const { viem } = await network.create();
   const testClient = await viem.getTestClient();
+  const publicClient = await viem.getPublicClient();
   const [walletAdmin, walletBorrower, walletSeller, walletOther] =
     await viem.getWalletClients();
+
+  async function getBlockTimestamp(): Promise<bigint> {
+    const block = await publicClient.getBlock({ blockTag: "latest" });
+    return block.timestamp;
+  }
 
   const adminAddress = walletAdmin.account.address;
   const borrowerAddress = walletBorrower.account.address;
@@ -112,7 +125,56 @@ describe("AssetLendingPool", async function () {
     });
     await pool.write.deposit([POOL_SEED], { account: walletAdmin.account });
 
-    return { pm, usdc, nft, pool };
+    // Set a fake marketplace address so financeMarketplacePurchase can verify listing sigs.
+    // The address just needs to be deterministic — it forms part of the EIP-712 domain.
+    const fakeMarketplace = "0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF" as Address;
+    await pool.write.setMarketplace([fakeMarketplace], {
+      account: walletAdmin.account,
+    });
+
+    return { pm, usdc, nft, pool, fakeMarketplace };
+  }
+
+  // ---------------------------------------------------------------------------
+  // EIP-712 listing signing helpers
+  // ---------------------------------------------------------------------------
+
+  async function signListing(
+    wallet: WalletClient,
+    listing: {
+      seller: Address;
+      collection: Address;
+      tokenId: bigint;
+      paymentToken: Address;
+      price: bigint;
+      nonce: bigint;
+      expiry: bigint;
+    },
+    marketplaceAddress: Address,
+  ): Promise<`0x${string}`> {
+    const chainId = await wallet.getChainId();
+    return wallet.signTypedData({
+      account: wallet.account!,
+      domain: {
+        name: "NettyWorthMarketplace",
+        version: "1",
+        chainId,
+        verifyingContract: marketplaceAddress,
+      },
+      types: {
+        SignedListing: [
+          { name: "seller", type: "address" },
+          { name: "collection", type: "address" },
+          { name: "tokenId", type: "uint256" },
+          { name: "paymentToken", type: "address" },
+          { name: "price", type: "uint256" },
+          { name: "nonce", type: "uint256" },
+          { name: "expiry", type: "uint256" },
+        ],
+      },
+      primaryType: "SignedListing",
+      message: listing,
+    });
   }
 
   async function mintNFT(
@@ -358,20 +420,33 @@ describe("AssetLendingPool", async function () {
   // =========================================================================
 
   describe("financeMarketplacePurchase", async function () {
-    it("seller receives full appraisal value, NFT goes to buyer on repay", async function () {
-      const { usdc, nft, pool } = await deploy();
+    it("seller receives listing price, NFT loaned to buyer, repay returns NFT", async function () {
+      const { usdc, nft, pool, fakeMarketplace } = await deploy();
       const tokenId = await mintNFT(nft, sellerAddress);
       await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
 
-      // Seller approves pool
-      await nft.write.approve([pool.address, tokenId], {
+      // Seller approves pool for all so pool can pull the NFT
+      await nft.write.setApprovalForAll([pool.address, true], {
         account: walletSeller.account,
       });
 
-      const depositAmount = MAX_LOAN; // 500 USDC = 50%
-      const loanAmount = APPRAISAL_VALUE - depositAmount; // 500 USDC
+      const listingPrice = APPRAISAL_VALUE; // 1000 USDC
+      const depositAmount = MAX_LOAN; // 500 USDC (50%)
+      const loanAmount = listingPrice - depositAmount; // 500 USDC
+      const expiry = (await getBlockTimestamp()) + 30n * 24n * 3600n;
+
+      const listing = {
+        seller: sellerAddress,
+        collection: nft.address,
+        tokenId,
+        paymentToken: usdc.address,
+        price: listingPrice,
+        nonce: 1n,
+        expiry,
+      };
+      const sig = await signListing(walletSeller, listing, fakeMarketplace);
 
       await usdc.write.mint([borrowerAddress, depositAmount]);
       await usdc.write.approve([pool.address, depositAmount], {
@@ -380,14 +455,14 @@ describe("AssetLendingPool", async function () {
 
       const sellerBefore = await usdc.read.balanceOf([sellerAddress]);
       await pool.write.financeMarketplacePurchase(
-        [tokenId, depositAmount, 0, sellerAddress],
+        [listing, sig, depositAmount, 0],
         { account: walletBorrower.account },
       );
 
-      // Seller received full purchase price
+      // Seller received full listing price
       assert.equal(
         (await usdc.read.balanceOf([sellerAddress])) - sellerBefore,
-        APPRAISAL_VALUE,
+        listingPrice,
       );
       // NFT in pool, Loaned
       assert.equal(
@@ -416,16 +491,65 @@ describe("AssetLendingPool", async function () {
       );
     });
 
-    it("reverts if deposit below minimum", async function () {
-      const { usdc, nft, pool } = await deploy();
+    it("reverts if deposit too high (loanAmount == 0)", async function () {
+      const { usdc, nft, pool, fakeMarketplace } = await deploy();
       const tokenId = await mintNFT(nft, sellerAddress);
       await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
-      await nft.write.approve([pool.address, tokenId], {
+      await nft.write.setApprovalForAll([pool.address, true], {
         account: walletSeller.account,
       });
 
+      const expiry = (await getBlockTimestamp()) + 30n * 24n * 3600n;
+      const listing = {
+        seller: sellerAddress,
+        collection: nft.address,
+        tokenId,
+        paymentToken: usdc.address,
+        price: APPRAISAL_VALUE,
+        nonce: 1n,
+        expiry,
+      };
+      const sig = await signListing(walletSeller, listing, fakeMarketplace);
+
+      // Pay the full price — loanAmount = 0, reverts ZeroAmount
+      await usdc.write.mint([borrowerAddress, APPRAISAL_VALUE]);
+      await usdc.write.approve([pool.address, APPRAISAL_VALUE], {
+        account: walletBorrower.account,
+      });
+
+      await assert.rejects(
+        pool.write.financeMarketplacePurchase(
+          [listing, sig, APPRAISAL_VALUE, 0],
+          { account: walletBorrower.account },
+        ),
+      );
+    });
+
+    it("reverts if loan exceeds LTV (deposit too low)", async function () {
+      const { usdc, nft, pool, fakeMarketplace } = await deploy();
+      const tokenId = await mintNFT(nft, sellerAddress);
+      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+        account: walletAdmin.account,
+      });
+      await nft.write.setApprovalForAll([pool.address, true], {
+        account: walletSeller.account,
+      });
+
+      const expiry = (await getBlockTimestamp()) + 30n * 24n * 3600n;
+      const listing = {
+        seller: sellerAddress,
+        collection: nft.address,
+        tokenId,
+        paymentToken: usdc.address,
+        price: APPRAISAL_VALUE,
+        nonce: 1n,
+        expiry,
+      };
+      const sig = await signListing(walletSeller, listing, fakeMarketplace);
+
+      // Deposit < MIN (500) → loanAmount > maxLoan → ExceedsLTV
       const tooLow = MAX_LOAN - 1n;
       await usdc.write.mint([borrowerAddress, tooLow]);
       await usdc.write.approve([pool.address, tooLow], {
@@ -434,7 +558,43 @@ describe("AssetLendingPool", async function () {
 
       await assert.rejects(
         pool.write.financeMarketplacePurchase(
-          [tokenId, tooLow, 0, sellerAddress],
+          [listing, sig, tooLow, 0],
+          { account: walletBorrower.account },
+        ),
+      );
+    });
+
+    it("reverts if signature is invalid", async function () {
+      const { usdc, nft, pool, fakeMarketplace } = await deploy();
+      const tokenId = await mintNFT(nft, sellerAddress);
+      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+        account: walletAdmin.account,
+      });
+      await nft.write.setApprovalForAll([pool.address, true], {
+        account: walletSeller.account,
+      });
+
+      const expiry = (await getBlockTimestamp()) + 30n * 24n * 3600n;
+      const listing = {
+        seller: sellerAddress,
+        collection: nft.address,
+        tokenId,
+        paymentToken: usdc.address,
+        price: APPRAISAL_VALUE,
+        nonce: 1n,
+        expiry,
+      };
+      // Sign with admin wallet (wrong signer)
+      const badSig = await signListing(walletAdmin, listing, fakeMarketplace);
+
+      await usdc.write.mint([borrowerAddress, MAX_LOAN]);
+      await usdc.write.approve([pool.address, MAX_LOAN], {
+        account: walletBorrower.account,
+      });
+
+      await assert.rejects(
+        pool.write.financeMarketplacePurchase(
+          [listing, badSig, MAX_LOAN, 0],
           { account: walletBorrower.account },
         ),
       );

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
+import {INettyWorthMarketplace} from "./INettyWorthMarketplace.sol";
+
 /// @title IAssetLendingPool
 /// @notice Interface for the NettyWorth-operated AssetNFT-backed lending pool.
 interface IAssetLendingPool {
@@ -239,6 +241,11 @@ interface IAssetLendingPool {
     error AssetLendingPool__InvalidPackMachine();
     error AssetLendingPool__OwnerWithdrawExceedsOwnerDeposits();
     error AssetLendingPool__NotMarketplace();
+    error AssetLendingPool__InvalidSignature();
+    error AssetLendingPool__ListingExpired();
+    error AssetLendingPool__ListingNonceUsed();
+    error AssetLendingPool__ListingCollectionMismatch();
+    error AssetLendingPool__ListingPaymentTokenMismatch();
 
     // =========================================================================
     // Borrower functions
@@ -256,11 +263,24 @@ interface IAssetLendingPool {
         uint8 termId
     ) external;
 
+    /// @notice Atomically purchase a marketplace-listed AssetNFT with partial deposit,
+    ///         financing the remainder as a collateralized loan from this pool.
+    ///
+    ///         Price is taken from the seller's EIP-712 signed listing (verified on-chain
+    ///         against the marketplace domain). The pool pays the seller the full listing
+    ///         price (buyer deposit + pool loan). Loan exposure is capped at LTV × appraisalValue
+    ///         so the pool never lends more than the collateral is worth.
+    ///
+    /// @param listing  The seller's signed listing struct (collection, tokenId, price, nonce, expiry).
+    /// @param sig      EIP-712 signature over `listing` produced by `listing.seller`.
+    /// @param depositAmount Buyer's upfront payment in payment-token units.
+    ///                 Must satisfy: depositAmount >= listing.price - (appraisalValue * ltvBps / BPS).
+    /// @param termId   Loan term index (must be active).
     function financeMarketplacePurchase(
-        uint256 tokenId,
+        INettyWorthMarketplace.SignedListing calldata listing,
+        bytes calldata sig,
         uint256 depositAmount,
-        uint8 termId,
-        address seller
+        uint8 termId
     ) external;
 
     function repay(uint256 loanId) external;
