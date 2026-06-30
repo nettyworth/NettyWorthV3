@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
@@ -10,7 +10,9 @@ import {INettyWorthMarketplace} from "../interfaces/INettyWorthMarketplace.sol";
 import {FeeController} from "../FeeController.sol";
 import {IFeeController} from "../interfaces/IFeeController.sol";
 import {AssetLendingPool} from "../AssetLendingPool.sol";
+import {AssetLendingPoolConfig} from "../AssetLendingPoolConfig.sol";
 import {IAssetLendingPool} from "../interfaces/IAssetLendingPool.sol";
+import {IAssetLendingPoolConfig} from "../interfaces/IAssetLendingPoolConfig.sol";
 import {AssetNFT} from "../AssetNFT.sol";
 import {IAssetNFT} from "../interfaces/IAssetNFT.sol";
 import {PermissionManager} from "../PermissionManager.sol";
@@ -50,6 +52,7 @@ contract NettyWorthMarketplaceTest is Test {
     NettyWorthMarketplace internal market;
     FeeController internal fc;
     AssetLendingPool internal pool;
+    AssetLendingPoolConfig internal config;
     AssetNFT internal assetNFT;
     PermissionManager internal pm;
     MockERC20 internal usdc;
@@ -60,12 +63,14 @@ contract NettyWorthMarketplaceTest is Test {
     address internal admin = makeAddr("admin");
     address internal treasury = makeAddr("treasury");
     address internal forwarder = makeAddr("forwarder");
-    address internal buyer = makeAddr("buyer");
     address internal unauthorized = makeAddr("unauthorized");
     address internal royaltyReceiver = makeAddr("royaltyReceiver");
 
     uint256 internal sellerPk;
     address internal seller;
+
+    uint256 internal buyerPk;
+    address internal buyer;
 
     uint256 internal bidderPk;
     address internal bidder;
@@ -103,6 +108,7 @@ contract NettyWorthMarketplaceTest is Test {
 
     function setUp() public {
         (seller, sellerPk) = makeAddrAndKey("seller");
+        (buyer, buyerPk) = makeAddrAndKey("buyer");
         (bidder, bidderPk) = makeAddrAndKey("bidder");
         (operator, operatorPk) = makeAddrAndKey("operator");
 
@@ -138,7 +144,7 @@ contract NettyWorthMarketplaceTest is Test {
             assetNFT = AssetNFT(address(p));
         }
 
-        // AssetLendingPool
+        // AssetLendingPoolConfig + AssetLendingPool
         {
             MockPackMachineForMarket mm = new MockPackMachineForMarket(
                 address(assetNFT)
@@ -146,11 +152,11 @@ contract NettyWorthMarketplaceTest is Test {
             MockPackMachineFactoryForMarket mf = new MockPackMachineFactoryForMarket();
             mf.register(address(mm));
 
-            AssetLendingPool impl = new AssetLendingPool();
-            ERC1967Proxy p = new ERC1967Proxy(
-                address(impl),
+            AssetLendingPoolConfig configImpl = new AssetLendingPoolConfig();
+            ERC1967Proxy cp = new ERC1967Proxy(
+                address(configImpl),
                 abi.encodeCall(
-                    AssetLendingPool.initialize,
+                    AssetLendingPoolConfig.initialize,
                     (
                         admin,
                         address(usdc),
@@ -162,6 +168,13 @@ contract NettyWorthMarketplaceTest is Test {
                         address(mf)
                     )
                 )
+            );
+            config = AssetLendingPoolConfig(address(cp));
+
+            AssetLendingPool impl = new AssetLendingPool();
+            ERC1967Proxy p = new ERC1967Proxy(
+                address(impl),
+                abi.encodeCall(AssetLendingPool.initialize, (admin, address(config)))
             );
             pool = AssetLendingPool(address(p));
         }
@@ -201,9 +214,9 @@ contract NettyWorthMarketplaceTest is Test {
 
         // Wiring
         vm.startPrank(admin);
-        // Pool: grant STATE_MANAGER_ROLE + authorize marketplace
+        // Pool: grant STATE_MANAGER_ROLE + authorize marketplace via config
         pm.grantRole(Roles.STATE_MANAGER_ROLE, address(pool));
-        pool.setMarketplace(address(market));
+        config.setMarketplace(address(market));
         // Mint some tokens to seller
         pm.grantRole(Roles.MINTER_ROLE, admin);
         address[] memory recipients = new address[](2);
@@ -217,10 +230,10 @@ contract NettyWorthMarketplaceTest is Test {
         usdc.mint(admin, POOL_SEED);
         usdc.approve(address(pool), POOL_SEED);
         pool.deposit(POOL_SEED);
-        // Set appraisals for both tokens
+        // Set appraisals for both tokens via config
         // category 0 = uncategorised (exempt from eligibleCategories whitelist)
-        pool.setAppraisal(1, APPRAISAL, 80, 0);
-        pool.setAppraisal(2, APPRAISAL, 80, 0);
+        config.setAppraisal(1, APPRAISAL, 80, 0);
+        config.setAppraisal(2, APPRAISAL, 80, 0);
         vm.stopPrank();
 
         // Pre-fund buyer, bidder and operator
@@ -911,13 +924,13 @@ contract NettyWorthMarketplaceTest is Test {
     }
 
     // =========================================================================
-    // Pool: setMarketplace guards
+    // Config: setMarketplace guards
     // =========================================================================
 
     function test_setMarketplace_revertIfNotOwner() public {
         vm.prank(unauthorized);
         vm.expectRevert();
-        pool.setMarketplace(unauthorized);
+        config.setMarketplace(unauthorized);
     }
 
     function test_setMarketplace_revertZeroAddress() public {
@@ -925,7 +938,7 @@ contract NettyWorthMarketplaceTest is Test {
         vm.expectRevert(
             IAssetLendingPool.AssetLendingPool__ZeroAddress.selector
         );
-        pool.setMarketplace(address(0));
+        config.setMarketplace(address(0));
     }
 
     // =========================================================================
@@ -982,16 +995,15 @@ contract NettyWorthMarketplaceTest is Test {
     }
 
     // =========================================================================
-    // Default lifecycle → operator claim → marketplace auction
+    // Default lifecycle → pool-default marketplace auction
     //
-    // Verifies the manual operational workflow for defaulted assets:
+    // Verifies the pool-default auction workflow:
     //   1. Loan expires  → initiateDefault  (collateral: Loaned → Held, stays in pool)
     //   2. Acquisition window passes
-    //   3. Operator calls purchaseDefaultedAsset (pays outstanding value, receives NFT in Held)
-    //   4. Operator lists on marketplace as a 24h signed auction at reservePrice = outstanding value
-    //   5. Bidder wins; settleAuction delivers NFT to bidder, proceeds to operator (net of fees)
-    //   6. Relist: a round with no qualifying bids never materializes an AuctionState on-chain;
-    //      operator simply re-signs with a fresh nonce for the next 24h window
+    //   3. MARKETPLACE_ROLE calls listDefaultedAsset → pool pre-approves marketplace
+    //   4. Bidder commits a pool bid via commitPoolBid
+    //   5. settleAuction delivers NFT to bidder, full proceeds to pool
+    //   6. Relist: cancelAuction allows MARKETPLACE_ROLE to relist with fresh params
     // =========================================================================
 
     /// @dev Helper: originate a loan against tokenId 1 for `seller`.
@@ -1009,7 +1021,7 @@ contract NettyWorthMarketplaceTest is Test {
         outstanding = loan.principal + loan.interest;
     }
 
-    /// @dev Step 1 + 2: default the loan and warp past the acquisition window.
+    /// @dev Steps 1 + 2: default the loan and warp past the acquisition window.
     function _defaultAndWarpPastAcquisition(uint256 loanId) internal {
         IAssetLendingPool.Loan memory loan = pool.getLoan(loanId);
         // Warp to loan expiry
@@ -1020,259 +1032,464 @@ contract NettyWorthMarketplaceTest is Test {
         vm.warp(block.timestamp + 24 hours + 1);
     }
 
-    // ----- test 1: operator claims defaulted NFT ----
+    // ----- test 1: pool-default auction — listDefaultedAsset and settleAuction ----
 
-    function test_defaultedAsset_operatorClaims_poolRecredited_accountingRestored() public {
-        (uint256 loanId, ) = _originateLoan();
-        _defaultAndWarpPastAcquisition(loanId);
-
-        // rec.outstandingValue == loan.principal (interest is NOT included in the default record)
-        IAssetLendingPool.DefaultRecord memory rec = pool.getDefaultRecord(loanId);
-        uint256 claimPrice = rec.outstandingValue;
-
-        uint256 poolBefore = usdc.balanceOf(address(pool));
-        IAssetLendingPool.PoolInfo memory infoBefore = pool.getPoolInfo();
-
-        // Operator claims: pays exactly the outstanding principal
-        vm.startPrank(operator);
-        usdc.approve(address(pool), claimPrice);
-        pool.purchaseDefaultedAsset(loanId);
-        vm.stopPrank();
-
-        // Default record resolved
-        IAssetLendingPool.DefaultRecord memory recAfter = pool.getDefaultRecord(loanId);
-        assertTrue(recAfter.resolved);
-
-        // Pool received exact claim price (principal only)
-        assertEq(usdc.balanceOf(address(pool)), poolBefore + claimPrice);
-
-        // Pool accounting re-credited
-        IAssetLendingPool.PoolInfo memory infoAfter = pool.getPoolInfo();
-        assertEq(
-            infoAfter.totalDeposited,
-            infoBefore.totalDeposited + claimPrice
-        );
-        assertEq(
-            infoAfter.totalDefaultedPrincipal,
-            infoBefore.totalDefaultedPrincipal - claimPrice
-        );
-
-        // Operator owns the NFT in Held state — ready to list
-        assertEq(assetNFT.ownerOf(1), operator);
-        assertEq(
-            uint8(assetNFT.getAssetState(1)),
-            uint8(IAssetNFT.AssetState.Held)
-        );
-    }
-
-    // ----- test 2: full flow — default → claim → auction → settle ----
-
-    function test_defaultedAsset_fullFlow_auctionAndSettle() public {
+    function test_defaultedAsset_poolDefaultAuction_fullFlow() public {
         (uint256 loanId, uint256 outstanding) = _originateLoan();
         _defaultAndWarpPastAcquisition(loanId);
 
-        // Operator claims NFT
-        vm.startPrank(operator);
-        usdc.approve(address(pool), outstanding);
-        pool.purchaseDefaultedAsset(loanId);
-        // Operator approves marketplace
-        assetNFT.approve(address(market), 1);
-        vm.stopPrank();
-
-        // --- Operator signs a 24h auction at reserve = outstanding value ---
+        uint256 tokenId = 1;
+        uint256 reservePrice = outstanding; // pool.principal + pool.interest
         uint256 auctionStart = block.timestamp;
-        INettyWorthMarketplace.SignedAuction memory a = INettyWorthMarketplace
-            .SignedAuction({
-                seller: operator,
-                collection: address(assetNFT),
-                tokenId: 1,
-                paymentToken: address(usdc),
-                reservePrice: outstanding, // == outstanding loan value (the "loan price")
-                minIncrement: 10e6,
-                startTime: auctionStart,
-                endTime: auctionStart + 24 hours,
-                extensionWindow: 5 minutes,
-                extensionDuration: 10 minutes,
-                nonce: 1
-            });
-        (bytes memory aSig, bytes32 aId) = _signAuction(a, operatorPk);
+        uint256 auctionEnd = auctionStart + 48 hours; // 48h so bidding window is well after auctionStart
 
-        // Bidder bids at reserve + some increment (reserve = 400e6 + interest)
-        uint256 bidAmount = outstanding + 50e6;
-        INettyWorthMarketplace.SignedBid memory b = INettyWorthMarketplace
-            .SignedBid({
-                auctionId: aId,
-                bidder: bidder,
-                amount: bidAmount,
-                nonce: 1,
-                expiry: auctionStart + 2 days
-            });
+        // Capture the DefaultedAssetListed event to get the auctionId (includes block.timestamp so
+        // we cannot pre-compute it reliably without snapshotting the storage slot).
+        vm.recordLogs();
+        vm.prank(admin);
+        market.listDefaultedAsset(
+            loanId,
+            tokenId,
+            reservePrice,
+            10e6,           // minIncrement
+            auctionStart,
+            auctionEnd,
+            5 minutes,
+            10 minutes
+        );
+        // Parse the DefaultedAssetListed event: topic[0] = sig, [1] = loanId, [2] = tokenId,
+        // [3] = auctionId. The ABI layout is indexed(loanId, tokenId, auctionId) + non-indexed.
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 auctionId;
+        for (uint256 i; i < logs.length; i++) {
+            // DefaultedAssetListed(uint256 indexed loanId, uint256 indexed tokenId,
+            //                      bytes32 indexed auctionId, uint256, uint256)
+            bytes32 sig = keccak256(
+                "DefaultedAssetListed(uint256,uint256,bytes32,uint256,uint256)"
+            );
+            if (logs[i].topics[0] == sig) {
+                auctionId = logs[i].topics[3];
+                break;
+            }
+        }
+        assertTrue(auctionId != bytes32(0), "auctionId not found in logs");
+        assertTrue(market.getAuction(auctionId).exists);
+
+        // Bidder commits a pool bid at reserve price
+        uint256 bidAmount = reservePrice + 50e6;
+        INettyWorthMarketplace.SignedBid memory b = INettyWorthMarketplace.SignedBid({
+            auctionId: auctionId,
+            bidder: bidder,
+            amount: bidAmount,
+            nonce: 100,
+            expiry: auctionEnd + 1 days
+        });
         bytes memory bSig = _signBid(b, bidderPk);
 
-        uint256 operatorBefore = usdc.balanceOf(operator);
-        uint256 bidderBefore = usdc.balanceOf(bidder);
-        uint256 treasuryBefore = usdc.balanceOf(treasury);
-
         vm.prank(bidder);
         usdc.approve(address(market), type(uint256).max);
         vm.prank(bidder);
-        market.commitBid(a, aSig, b, bSig);
+        market.commitPoolBid(auctionId, b, bSig);
 
         // Warp past end; anyone can settle
-        vm.warp(auctionStart + 24 hours + 1);
-        market.settleAuction(aId);
+        vm.warp(auctionEnd + 1);
 
-        // Bidder received the NFT
-        assertEq(assetNFT.ownerOf(1), bidder);
-        assertEq(
-            uint8(assetNFT.getAssetState(1)),
-            uint8(IAssetNFT.AssetState.Held)
-        );
+        uint256 poolBefore = usdc.balanceOf(address(pool));
+        market.settleAuction(auctionId);
 
-        // Bidder paid bidAmount
-        assertEq(usdc.balanceOf(bidder), bidderBefore - bidAmount);
-
-        // Treasury received collectible fee (5% of bidAmount)
-        uint256 expectedFee = (bidAmount * 500) / 10_000;
-        assertEq(usdc.balanceOf(treasury), treasuryBefore + expectedFee);
-
-        // Operator received net proceeds (bidAmount - fee - royalty)
-        assertGt(usdc.balanceOf(operator), operatorBefore);
-
+        // NFT delivered to bidder
+        assertEq(assetNFT.ownerOf(tokenId), bidder);
+        // Pool received full bid proceeds (fees/royalty waived for pool-default)
+        assertGe(usdc.balanceOf(address(pool)), poolBefore + bidAmount);
         // Auction settled
-        assertTrue(market.getAuction(aId).settled);
+        assertTrue(market.getAuction(auctionId).settled);
+        // Default record resolved
+        assertTrue(pool.getDefaultRecord(loanId).resolved);
     }
 
-    // ----- test 3: bid below reserve never materializes AuctionState (relist scenario) ----
+    // ----- test 2: listDefaultedAsset reverts during acquisition window ----
 
-    function test_defaultedAsset_bidBelowReserve_neverMaterializesState_operatorRelists()
-        public
-    {
-        (uint256 loanId, ) = _originateLoan();
-        _defaultAndWarpPastAcquisition(loanId);
-
-        // Use rec.outstandingValue (== principal) as the claim price, not principal+interest
-        IAssetLendingPool.DefaultRecord memory rec = pool.getDefaultRecord(loanId);
-        uint256 claimPrice = rec.outstandingValue;
-
-        vm.startPrank(operator);
-        usdc.approve(address(pool), claimPrice);
-        pool.purchaseDefaultedAsset(loanId);
-        assetNFT.approve(address(market), 1);
-        vm.stopPrank();
-
-        // Round 1: operator signs a 24h auction at reserve = outstanding principal
-        uint256 round1Start = block.timestamp;
-        INettyWorthMarketplace.SignedAuction memory a1 = INettyWorthMarketplace
-            .SignedAuction({
-                seller: operator,
-                collection: address(assetNFT),
-                tokenId: 1,
-                paymentToken: address(usdc),
-                reservePrice: claimPrice,
-                minIncrement: 10e6,
-                startTime: round1Start,
-                endTime: round1Start + 24 hours,
-                extensionWindow: 5 minutes,
-                extensionDuration: 10 minutes,
-                nonce: 10
-            });
-        (bytes memory a1Sig, bytes32 a1Id) = _signAuction(a1, operatorPk);
-
-        // Bid BELOW reserve reverts; AuctionState never written
-        uint256 lowBid = claimPrice - 1;
-        INettyWorthMarketplace.SignedBid memory bLow = INettyWorthMarketplace
-            .SignedBid({
-                auctionId: a1Id,
-                bidder: bidder,
-                amount: lowBid,
-                nonce: 10,
-                expiry: round1Start + 2 days
-            });
-
-        vm.prank(bidder);
-        usdc.approve(address(market), type(uint256).max);
-        vm.prank(bidder);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                INettyWorthMarketplace.Marketplace__BidTooLow.selector,
-                lowBid,
-                claimPrice
-            )
-        );
-        market.commitBid(a1, a1Sig, bLow, _signBid(bLow, bidderPk));
-
-        // AuctionState not materialized — round 1 never created on-chain
-        assertFalse(market.getAuction(a1Id).exists);
-
-        // Off-chain: window expires; operator re-signs for round 2 with same reserve + fresh nonce.
-        // We keep endTime computation in a local var to avoid viaIR stack-slot reuse.
-        uint256 round2End = round1Start + 24 hours + 1 + 24 hours; // = round1Start + 48h + 1
-        vm.warp(round1Start + 24 hours + 1);
-
-        INettyWorthMarketplace.SignedAuction memory a2 = INettyWorthMarketplace
-            .SignedAuction({
-                seller: operator,
-                collection: address(assetNFT),
-                tokenId: 1,
-                paymentToken: address(usdc),
-                reservePrice: claimPrice, // same reserve — relisted unchanged
-                minIncrement: 10e6,
-                startTime: block.timestamp,
-                endTime: round2End,
-                extensionWindow: 5 minutes,
-                extensionDuration: 10 minutes,
-                nonce: 11 // fresh nonce
-            });
-        (bytes memory a2Sig, bytes32 a2Id) = _signAuction(a2, operatorPk);
-
-        // Round 2: qualifying bid at or above reserve succeeds
-        uint256 qualifyingBid = claimPrice + 20e6;
-        INettyWorthMarketplace.SignedBid memory bWin = INettyWorthMarketplace
-            .SignedBid({
-                auctionId: a2Id,
-                bidder: bidder,
-                amount: qualifyingBid,
-                nonce: 11,
-                expiry: round2End + 1 days
-            });
-        bytes memory bWinSig = _signBid(bWin, bidderPk);
-
-        vm.prank(bidder);
-        market.commitBid(a2, a2Sig, bWin, bWinSig);
-
-        INettyWorthMarketplace.AuctionState memory s2 = market.getAuction(a2Id);
-        assertTrue(s2.exists);
-        assertEq(s2.highestBidder, bidder);
-        assertEq(s2.highestBid, qualifyingBid);
-
-        // Settle round 2 after its window
-        vm.warp(round2End + 1);
-        market.settleAuction(a2Id);
-        assertEq(assetNFT.ownerOf(1), bidder);
-        assertTrue(market.getAuction(a2Id).settled);
-    }
-
-    // ----- test 4: purchaseDefaultedAsset reverts during acquisition window ----
-
-    function test_purchaseDefaultedAsset_revertDuringAcquisitionWindow() public {
-        (uint256 loanId, ) = _originateLoan();
+    function test_listDefaultedAsset_revertDuringAcquisitionWindow() public {
+        (uint256 loanId, uint256 outstanding) = _originateLoan();
         IAssetLendingPool.Loan memory loan = pool.getLoan(loanId);
 
-        // Warp to expiry and default — but stay inside the acquisition window
+        // Warp to expiry and default — but stay inside the 24h acquisition window
         vm.warp(loan.expireTime + 1);
         vm.prank(admin);
         pool.initiateDefault(loanId);
 
-        IAssetLendingPool.DefaultRecord memory rec = pool.getDefaultRecord(loanId);
-        uint256 outstanding = rec.outstandingValue;
-
-        vm.startPrank(operator);
-        usdc.approve(address(pool), outstanding);
-        vm.expectRevert(
-            IAssetLendingPool.AssetLendingPool__NotInPurchasePhase.selector
+        // Attempt to list before acquisition window passes
+        vm.prank(admin);
+        vm.expectRevert(); // AssetLendingPool__NotInPurchasePhase
+        market.listDefaultedAsset(
+            loanId,
+            1,
+            outstanding,
+            10e6,
+            block.timestamp,
+            block.timestamp + 24 hours,
+            5 minutes,
+            10 minutes
         );
-        pool.purchaseDefaultedAsset(loanId);
-        vm.stopPrank();
     }
+
+    // =========================================================================
+    // acceptOffer — EIP-712 typehash (redeclared for signing helpers)
+    // =========================================================================
+
+    bytes32 internal constant SIGNED_OFFER_TYPEHASH = keccak256(
+        "SignedOffer(address buyer,address collection,uint256 tokenId,address paymentToken,"
+        "uint256 price,uint256 nonce,uint256 expiry)"
+    );
+
+    // =========================================================================
+    // acceptOffer — signing helpers
+    // =========================================================================
+
+    function _signOffer(
+        INettyWorthMarketplace.SignedOffer memory o,
+        uint256 pk
+    ) internal view returns (bytes memory) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                SIGNED_OFFER_TYPEHASH,
+                o.buyer,
+                o.collection,
+                o.tokenId,
+                o.paymentToken,
+                o.price,
+                o.nonce,
+                o.expiry
+            )
+        );
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", _domainSeparator(), structHash)
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _defaultOffer(
+        address offerBuyer,
+        uint256 tokenId,
+        uint256 price,
+        uint256 nonce
+    ) internal view returns (INettyWorthMarketplace.SignedOffer memory) {
+        return INettyWorthMarketplace.SignedOffer({
+            buyer: offerBuyer,
+            collection: address(assetNFT),
+            tokenId: tokenId,
+            paymentToken: address(usdc),
+            price: price,
+            nonce: nonce,
+            expiry: block.timestamp + 1 hours
+        });
+    }
+
+    // =========================================================================
+    // acceptOffer — happy path, no loan
+    // =========================================================================
+
+    function test_acceptOffer_noLoan_happyPath() public {
+        uint256 tokenId = 1;
+        uint256 gross = SALE_PRICE;
+
+        uint256 collectibleFee = (gross * 500) / 10_000; // 5%
+        uint256 royalty = (gross * 500) / 10_000;        // 5%
+        uint256 sellerProceeds = gross - collectibleFee - royalty;
+
+        // Seller approves marketplace to transfer the NFT
+        vm.prank(seller);
+        assetNFT.approve(address(market), tokenId);
+
+        // Buyer funds + approves already set up in setUp
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, tokenId, gross, 1);
+        bytes memory sig = _signOffer(o, buyerPk);
+
+        uint256 buyerBefore   = usdc.balanceOf(buyer);
+        uint256 treasBefore   = usdc.balanceOf(treasury);
+        uint256 royaltyBefore = usdc.balanceOf(royaltyReceiver);
+        uint256 sellerBefore  = usdc.balanceOf(seller);
+
+        vm.expectEmit(true, true, true, true);
+        emit INettyWorthMarketplace.OfferAccepted(
+            buyer, seller, address(assetNFT), tokenId, address(usdc), gross
+        );
+
+        vm.prank(seller);
+        market.acceptOffer(o, sig);
+
+        // NFT transferred to buyer
+        assertEq(assetNFT.ownerOf(tokenId), buyer);
+        // Buyer paid gross
+        assertEq(usdc.balanceOf(buyer), buyerBefore - gross);
+        // Treasury received collectible fee
+        assertEq(usdc.balanceOf(treasury), treasBefore + collectibleFee);
+        // Royalty receiver received royalty
+        assertEq(usdc.balanceOf(royaltyReceiver), royaltyBefore + royalty);
+        // Seller received net proceeds
+        assertEq(usdc.balanceOf(seller), sellerBefore + sellerProceeds);
+    }
+
+    // =========================================================================
+    // acceptOffer — loan branch: borrower accepts, loan auto-repaid
+    // =========================================================================
+
+    function test_acceptOffer_withActiveLoan_borrowerAccepts() public {
+        uint256 tokenId = 1;
+        uint256 loanAmount = 400e6;
+
+        // Borrower (seller) puts tokenId into pool as collateral
+        vm.startPrank(seller);
+        assetNFT.approve(address(pool), tokenId);
+        pool.borrow(tokenId, loanAmount, 0);
+        vm.stopPrank();
+
+        (, , uint256 loanDebt) = pool.getLoanDebt(tokenId);
+        // Gross must cover: collectibleFee (5%) + royalty (5%) + loanDebt
+        uint256 gross = (loanDebt * 10_000) / 8000 + 2e6;
+
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, tokenId, gross, 10);
+        bytes memory sig = _signOffer(o, buyerPk);
+
+        uint256 poolBefore   = usdc.balanceOf(address(pool));
+        uint256 sellerBefore = usdc.balanceOf(seller);
+
+        // Seller (borrower) accepts
+        vm.prank(seller);
+        market.acceptOffer(o, sig);
+
+        // NFT delivered to buyer
+        assertEq(assetNFT.ownerOf(tokenId), buyer);
+        // Loan cleared
+        assertEq(pool.getActiveLoanId(tokenId), 0);
+        // Pool received at least loanDebt
+        assertGe(usdc.balanceOf(address(pool)), poolBefore + loanDebt);
+        // Seller got net proceeds
+        assertGt(usdc.balanceOf(seller), sellerBefore);
+    }
+
+    // =========================================================================
+    // acceptOffer — non-borrower cannot accept on a collateralised token
+    // =========================================================================
+
+    function test_acceptOffer_withActiveLoan_revertIfNotBorrower() public {
+        uint256 tokenId = 1;
+
+        vm.startPrank(seller);
+        assetNFT.approve(address(pool), tokenId);
+        pool.borrow(tokenId, 400e6, 0);
+        vm.stopPrank();
+
+        (, , uint256 loanDebt) = pool.getLoanDebt(tokenId);
+        uint256 gross = loanDebt * 2;
+
+        // A third party (buyer) tries to "accept" the offer on the collateralised token
+        // — they are not the borrower, so it should revert.
+        (address thirdParty, uint256 thirdPk) = makeAddrAndKey("thirdParty");
+        usdc.mint(thirdParty, 20_000e6);
+        vm.prank(thirdParty);
+        usdc.approve(address(market), type(uint256).max);
+
+        // Offer is signed by yet another buyer address
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, tokenId, gross, 20);
+        bytes memory sig = _signOffer(o, buyerPk);
+
+        // thirdParty (not the borrower) calls acceptOffer — must revert
+        vm.prank(thirdParty);
+        vm.expectRevert(INettyWorthMarketplace.Marketplace__NotTokenOwner.selector);
+        market.acceptOffer(o, sig);
+        (thirdPk); // silence unused variable warning
+    }
+
+    // =========================================================================
+    // acceptOffer — revert: bad signature
+    // =========================================================================
+
+    function test_acceptOffer_revertBadSignature() public {
+        vm.prank(seller);
+        assetNFT.approve(address(market), 1);
+
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, 1, SALE_PRICE, 1);
+        // Sign with a different key
+        (, uint256 wrongPk) = makeAddrAndKey("wrongKey");
+        bytes memory sig = _signOffer(o, wrongPk);
+
+        vm.prank(seller);
+        vm.expectRevert(INettyWorthMarketplace.Marketplace__InvalidSignature.selector);
+        market.acceptOffer(o, sig);
+    }
+
+    // =========================================================================
+    // acceptOffer — revert: nonce already used (by buyer)
+    // =========================================================================
+
+    function test_acceptOffer_revertNonceReplay() public {
+        uint256 tokenId = 1;
+
+        // Seller approves marketplace for token 1
+        vm.prank(seller);
+        assetNFT.approve(address(market), tokenId);
+
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, tokenId, SALE_PRICE, 5);
+        bytes memory sig = _signOffer(o, buyerPk);
+
+        // First accept succeeds
+        vm.prank(seller);
+        market.acceptOffer(o, sig);
+
+        // Mint a second token to seller and try to reuse the same nonce
+        vm.prank(admin);
+        address[] memory r = new address[](1);
+        r[0] = seller;
+        string[] memory u = new string[](1);
+        u[0] = "ipfs://replay";
+        assetNFT.batchMint(r, u);
+        uint256 tokenId2 = 3;
+
+        vm.prank(seller);
+        assetNFT.approve(address(market), tokenId2);
+
+        INettyWorthMarketplace.SignedOffer memory o2 = INettyWorthMarketplace.SignedOffer({
+            buyer: buyer,
+            collection: address(assetNFT),
+            tokenId: tokenId2,
+            paymentToken: address(usdc),
+            price: SALE_PRICE,
+            nonce: 5, // same nonce
+            expiry: block.timestamp + 1 hours
+        });
+        bytes memory sig2 = _signOffer(o2, buyerPk);
+
+        vm.prank(seller);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                INettyWorthMarketplace.Marketplace__NonceUsed.selector,
+                buyer,
+                5
+            )
+        );
+        market.acceptOffer(o2, sig2);
+    }
+
+    // =========================================================================
+    // acceptOffer — revert: expired
+    // =========================================================================
+
+    function test_acceptOffer_revertExpired() public {
+        vm.prank(seller);
+        assetNFT.approve(address(market), 1);
+
+        INettyWorthMarketplace.SignedOffer memory o = INettyWorthMarketplace.SignedOffer({
+            buyer: buyer,
+            collection: address(assetNFT),
+            tokenId: 1,
+            paymentToken: address(usdc),
+            price: SALE_PRICE,
+            nonce: 1,
+            expiry: block.timestamp - 1 // already expired
+        });
+        bytes memory sig = _signOffer(o, buyerPk);
+
+        vm.prank(seller);
+        vm.expectRevert(INettyWorthMarketplace.Marketplace__Expired.selector);
+        market.acceptOffer(o, sig);
+    }
+
+    // =========================================================================
+    // acceptOffer — revert: collection not allowed
+    // =========================================================================
+
+    function test_acceptOffer_revertCollectionNotAllowed() public {
+        address badCollection = makeAddr("badNFT");
+        INettyWorthMarketplace.SignedOffer memory o = INettyWorthMarketplace.SignedOffer({
+            buyer: buyer,
+            collection: badCollection,
+            tokenId: 1,
+            paymentToken: address(usdc),
+            price: SALE_PRICE,
+            nonce: 1,
+            expiry: block.timestamp + 1 hours
+        });
+        bytes memory sig = _signOffer(o, buyerPk);
+
+        vm.prank(seller);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                INettyWorthMarketplace.Marketplace__CollectionNotAllowed.selector,
+                badCollection
+            )
+        );
+        market.acceptOffer(o, sig);
+    }
+
+    // =========================================================================
+    // acceptOffer — revert: price below minimum (loan debt exceeds offer - fees)
+    // =========================================================================
+
+    function test_acceptOffer_revertPriceBelowMinimum_whenLoaned() public {
+        uint256 tokenId = 1;
+
+        vm.startPrank(seller);
+        assetNFT.approve(address(pool), tokenId);
+        pool.borrow(tokenId, 400e6, 0);
+        vm.stopPrank();
+
+        (, , uint256 loanDebt) = pool.getLoanDebt(tokenId);
+        // Offer price equal to loanDebt — 5% fee pushes required above gross
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, tokenId, loanDebt, 30);
+        bytes memory sig = _signOffer(o, buyerPk);
+
+        vm.prank(seller);
+        vm.expectRevert(); // Marketplace__PriceBelowMinimum
+        market.acceptOffer(o, sig);
+    }
+
+    // =========================================================================
+    // acceptOffer — cancelNonce blocks future accept
+    // =========================================================================
+
+    function test_acceptOffer_cancelNonce_blocksAcceptance() public {
+        vm.prank(seller);
+        assetNFT.approve(address(market), 1);
+
+        // Buyer cancels their own nonce 77
+        vm.prank(buyer);
+        market.cancelNonce(77);
+
+        assertTrue(market.isNonceUsed(buyer, 77));
+
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, 1, SALE_PRICE, 77);
+        bytes memory sig = _signOffer(o, buyerPk);
+
+        vm.prank(seller);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                INettyWorthMarketplace.Marketplace__NonceUsed.selector,
+                buyer,
+                77
+            )
+        );
+        market.acceptOffer(o, sig);
+    }
+
+    // =========================================================================
+    // acceptOffer — revert when paused
+    // =========================================================================
+
+    function test_acceptOffer_revertWhenPaused() public {
+        vm.prank(seller);
+        assetNFT.approve(address(market), 1);
+
+        vm.prank(admin);
+        market.pause();
+
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, 1, SALE_PRICE, 1);
+        bytes memory sig = _signOffer(o, buyerPk);
+
+        vm.prank(seller);
+        vm.expectRevert(); // EnforcedPause
+        market.acceptOffer(o, sig);
+    }
+
 }

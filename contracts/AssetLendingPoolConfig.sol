@@ -2,28 +2,32 @@
 pragma solidity ^0.8.28;
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {Ownable2StepUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 import {IAssetNFT} from "./interfaces/IAssetNFT.sol";
 import {IAssetLendingPool} from "./interfaces/IAssetLendingPool.sol";
+import {IAssetLendingPoolConfig} from "./interfaces/IAssetLendingPoolConfig.sol";
 import {IPackMachineFactory} from "./interfaces/IPackMachineFactory.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /// @title AssetLendingPoolConfig
 /// @author NettyWorth
-/// @notice Abstract base contract that owns the ERC-7201 storage layout, all admin
-///         configuration setters, and the pure config-read internal helpers for
-///         AssetLendingPool. Business logic lives in the concrete contract.
-/// @dev Inherits IAssetLendingPool so config functions can carry `override`. The
-///      concrete AssetLendingPool contract re-declares `is IAssetLendingPool` (legal
-///      in Solidity) and implements the remaining interface functions.
-abstract contract AssetLendingPoolConfig is
-    IAssetLendingPool,
+/// @notice Standalone UUPS-upgradeable contract that stores all admin-controlled
+///         configuration for AssetLendingPool. Business logic and runtime accounting
+///         live in AssetLendingPool; this contract owns only the config storage and
+///         exposes setters + view helpers for the pool to consume via IAssetLendingPoolConfig.
+/// @dev Errors and shared structs (TermConfig, AssetAppraisal) are defined in
+///      IAssetLendingPool to maintain a single canonical type identity across the protocol.
+/// @custom:security-contact security@nettyworth.io
+contract AssetLendingPoolConfig is
+    IAssetLendingPoolConfig,
     Initializable,
+    UUPSUpgradeable,
     Ownable2StepUpgradeable
 {
     // =========================================================================
-    // Constants (config-relevant; business-only constants live in the concrete contract)
+    // Constants
     // =========================================================================
 
     uint256 internal constant BPS = 10_000;
@@ -33,33 +37,22 @@ abstract contract AssetLendingPoolConfig is
     uint256 internal constant DEFAULT_MIN_APPRAISAL_UNITS = 100;
 
     // =========================================================================
-    // Storage (ERC-7201) — single unified struct; layout must never change
+    // Storage (ERC-7201 namespaced) — config fields only; no runtime state
     // =========================================================================
 
-    /// @custom:storage-location erc7201:nettyworth.storage.AssetLendingPool
-    struct AssetLendingPoolStorage {
+    /// @custom:storage-location erc7201:nettyworth.storage.AssetLendingPoolConfig
+    struct ConfigStorage {
         IERC20 paymentToken;
         IAssetNFT assetNFT;
         // Term configs
-        mapping(uint8 termId => TermConfig) termConfigs;
+        mapping(uint8 termId => IAssetLendingPool.TermConfig) termConfigs;
         uint8 termCount;
-        // Loans
-        uint256 nextLoanId;
-        mapping(uint256 loanId => Loan) loans;
-        mapping(address borrower => uint256[]) borrowerLoans;
-        mapping(uint256 tokenId => uint256 loanId) tokenIdToActiveLoan;
         // Appraisals
-        mapping(uint256 tokenId => AssetAppraisal) appraisals;
+        mapping(uint256 tokenId => IAssetLendingPool.AssetAppraisal) appraisals;
         // Eligibility
         uint256 minAppraisalValue;
         uint256 minGrade;
         mapping(uint256 categoryId => bool) eligibleCategories;
-        // Pool financial (protocol/owner capital)
-        uint256 totalDeposited;
-        uint256 totalBorrowed;
-        uint256 totalInterestEarned; // protocol-only interest (excludes lender share)
-        uint256 interestWithdrawn;
-        uint256 activeLoanCount;
         // Fee
         uint256 originationFeeBps;
         address feeWallet;
@@ -67,70 +60,62 @@ abstract contract AssetLendingPoolConfig is
         uint256 ltvBps;
         // Staleness
         uint256 maxAppraisalAge; // 0 = disabled
-        // =====================================================================
-        // V2: External Lender Capital
-        // =====================================================================
-        mapping(address lender => uint256) lenderDeposits;
-        uint256 totalLenderDeposits;
-        uint256 lenderShareBps; // e.g. 8000 = lenders get 80% of interest
+        // Lender config
+        uint256 lenderShareBps;
         bool lenderDepositsEnabled;
-        uint256 ownerDeposited; // tracks admin's own capital separately from lender capital
-        // Reward-per-share accounting (Synthetix pattern, scaled by PRECISION)
-        uint256 accInterestPerShare; // accumulated lender interest per unit deposited
-        mapping(address lender => uint256) lenderRewardDebt;
-        uint256 totalLenderInterestPaid; // total interest paid out to lenders
-        // =====================================================================
-        // V2: Default Lifecycle
-        // =====================================================================
-        mapping(uint256 loanId => DefaultRecord) defaults;
-        uint256 acquisitionWindow; // Phase 1 duration (default 24 hours)
-        uint256 auctionWindow; // Phase 2 duration (default 7 days)
-        uint256 totalDefaultedPrincipal; // unrecovered principal across all active defaults
-        // =====================================================================
-        // V2: PackMachine Integration
-        // =====================================================================
+        // Default lifecycle windows
+        uint256 acquisitionWindow;
+        uint256 auctionWindow;
+        // PackMachine integration
         address packMachineFactory;
         address defaultPackMachine;
         mapping(uint256 tokenId => uint8) defaultTokenTiers;
-        // =====================================================================
-        // V3: Marketplace Integration
-        // =====================================================================
-        /// @dev Address of the authorized marketplace contract allowed to call settleLoanRepaymentOnSale.
+        // Marketplace integration
         address marketplace;
-        /// @dev Replay protection for financeMarketplacePurchase: tracks used seller nonces.
-        ///      Keyed by (seller, nonce). Prevents a seller's listing signature from being
-        ///      replayed to finance the same NFT (or any other approved NFT) a second time.
-        mapping(address seller => mapping(uint256 nonce => bool)) financeNonces;
-        // =====================================================================
-        // V3: Maximum Pool Utilization
-        // =====================================================================
-        /// @dev Maximum fraction of totalDeposited that may be committed to active loans,
-        ///      in basis points. Default 8000 (80%); 10000 = no reserve (legacy 100% behaviour).
+        // Maximum pool utilization cap
         uint256 maxUtilizationBps;
+        // Finance wallet (Phase-1 acquisition cash leg)
+        address financeWallet;
     }
 
-    // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.AssetLendingPool")) - 1)) & ~bytes32(uint256(0xff))
-    bytes32 private constant ASSET_LENDING_POOL_STORAGE_SLOT =
-        0xc51d85cdfca26408bedc9203b8e293ed787f8c84ae3aab3bfb78650d9d676d00;
+    // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.AssetLendingPoolConfig")) - 1)) & ~bytes32(uint256(0xff))
+    bytes32 private constant ASSET_LENDING_POOL_CONFIG_STORAGE_SLOT =
+        0x44360b8816dcda47227a5f760c5ec3f2cdf3eef6a97dfd570813ac50da6e4200;
 
-    function _getStorage()
+    function _getConfigStorage()
         internal
         pure
-        returns (AssetLendingPoolStorage storage $)
+        returns (ConfigStorage storage $)
     {
         assembly {
-            $.slot := ASSET_LENDING_POOL_STORAGE_SLOT
+            $.slot := ASSET_LENDING_POOL_CONFIG_STORAGE_SLOT
         }
     }
 
     // =========================================================================
-    // Config initializer (called by AssetLendingPool.initialize)
+    // Constructor
     // =========================================================================
 
-    /// @dev Writes all configuration defaults. Called from the concrete initialize().
-    ///      Validation of init args happens here so that the concrete initialize() stays
-    ///      focused on OZ mixin init calls.
-    function __AssetLendingPoolConfig_init(
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    // =========================================================================
+    // Initializer
+    // =========================================================================
+
+    /// @notice Initializes the config proxy with default values.
+    /// @param initialOwner_ Address to receive ownership (admin controls all setters).
+    /// @param paymentToken_ ERC20 token used for loans (e.g. USDC).
+    /// @param assetNFT_ AssetNFT proxy address.
+    /// @param ltvBps_ Initial LTV in basis points (e.g. 5000 = 50%).
+    /// @param lenderShareBps_ Percentage of interest allocated to lenders (e.g. 8000 = 80%).
+    /// @param acquisitionWindow_ Phase 1 duration in seconds (e.g. 24 hours).
+    /// @param auctionWindow_ Phase 2 duration in seconds (e.g. 7 days).
+    /// @param packMachineFactory_ PackMachineFactory address for validating target machines.
+    function initialize(
+        address initialOwner_,
         address paymentToken_,
         address assetNFT_,
         uint256 ltvBps_,
@@ -138,36 +123,43 @@ abstract contract AssetLendingPoolConfig is
         uint256 acquisitionWindow_,
         uint256 auctionWindow_,
         address packMachineFactory_
-    ) internal onlyInitializing {
-        if (paymentToken_ == address(0)) revert AssetLendingPool__ZeroAddress();
-        if (assetNFT_ == address(0)) revert AssetLendingPool__ZeroAddress();
+    ) external initializer {
+        if (initialOwner_ == address(0))
+            revert IAssetLendingPool.AssetLendingPool__ZeroAddress();
+        if (paymentToken_ == address(0))
+            revert IAssetLendingPool.AssetLendingPool__ZeroAddress();
+        if (assetNFT_ == address(0))
+            revert IAssetLendingPool.AssetLendingPool__ZeroAddress();
         if (ltvBps_ == 0 || ltvBps_ > BPS)
-            revert AssetLendingPool__InvalidLTV();
-        if (lenderShareBps_ > BPS) revert AssetLendingPool__InvalidBps();
+            revert IAssetLendingPool.AssetLendingPool__InvalidLTV();
+        if (lenderShareBps_ > BPS)
+            revert IAssetLendingPool.AssetLendingPool__InvalidBps();
 
-        AssetLendingPoolStorage storage $ = _getStorage();
+        __Ownable_init(initialOwner_);
+        __Ownable2Step_init();
+
+        ConfigStorage storage $ = _getConfigStorage();
         $.paymentToken = IERC20(paymentToken_);
         $.assetNFT = IAssetNFT(assetNFT_);
         $.ltvBps = ltvBps_;
-        // Default $100 minimum appraisal value, scaled to the payment token's decimals (e.g. 100e6 for USDC).
-        // Admin can adjust or disable this via setEligibilityControls(0, ...).
+
+        // Default $100 minimum appraisal value, scaled to the payment token's decimals.
         uint8 dec = IERC20Metadata(paymentToken_).decimals();
         $.minAppraisalValue = DEFAULT_MIN_APPRAISAL_UNITS * (10 ** dec);
-        $.nextLoanId = 1;
         $.maxAppraisalAge = 7 days;
 
         // Initialize default term configs: 7d/10%, 15d/15%, 30d/20%
-        $.termConfigs[0] = TermConfig({
+        $.termConfigs[0] = IAssetLendingPool.TermConfig({
             duration: 7 days,
             aprBps: 1000,
             active: true
         });
-        $.termConfigs[1] = TermConfig({
+        $.termConfigs[1] = IAssetLendingPool.TermConfig({
             duration: 15 days,
             aprBps: 1500,
             active: true
         });
-        $.termConfigs[2] = TermConfig({
+        $.termConfigs[2] = IAssetLendingPool.TermConfig({
             duration: 30 days,
             aprBps: 2000,
             active: true
@@ -184,30 +176,32 @@ abstract contract AssetLendingPoolConfig is
     }
 
     // =========================================================================
+    // UUPS
+    // =========================================================================
+
+    function _authorizeUpgrade(address) internal override onlyOwner {}
+
+    // =========================================================================
     // Admin: appraisals
     // =========================================================================
 
     /// @notice Record or update an appraisal for a single AssetNFT token.
     /// @dev onlyOwner. Resets the `updatedAt` staleness clock.
     /// @param tokenId AssetNFT token ID to appraise.
-    /// @param value Appraised fair-market value in payment-token units (e.g. USDC with 6 decimals).
-    /// @param grade Numeric condition grade (e.g. PSA 1–10 scaled; higher is better).
-    /// @param category Protocol category ID; 0 = uncategorized (exempt from category whitelist).
+    /// @param value Appraised fair-market value in payment-token units.
+    /// @param grade Numeric condition grade (higher is better).
+    /// @param category Protocol category ID; 0 = uncategorized.
     function setAppraisal(
         uint256 tokenId,
         uint256 value,
         uint256 grade,
         uint256 category
     ) external override onlyOwner {
-        _setAppraisal(_getStorage(), tokenId, value, grade, category);
+        _setAppraisal(_getConfigStorage(), tokenId, value, grade, category);
     }
 
     /// @notice Batch-update appraisals for up to 50 tokens in one transaction.
     /// @dev onlyOwner. All four arrays must be the same length; max length is MAX_BATCH (50).
-    /// @param tokenIds AssetNFT token IDs to appraise.
-    /// @param values Appraised values in payment-token units, parallel to `tokenIds`.
-    /// @param grades Numeric condition grades, parallel to `tokenIds`.
-    /// @param categories Category IDs, parallel to `tokenIds`. 0 = uncategorized.
     function batchSetAppraisals(
         uint256[] calldata tokenIds,
         uint256[] calldata values,
@@ -216,15 +210,18 @@ abstract contract AssetLendingPoolConfig is
     ) external override onlyOwner {
         uint256 len = tokenIds.length;
         if (len > MAX_BATCH)
-            revert AssetLendingPool__BatchTooLarge(len, MAX_BATCH);
+            revert IAssetLendingPool.AssetLendingPool__BatchTooLarge(
+                len,
+                MAX_BATCH
+            );
         if (
             len != values.length ||
             len != grades.length ||
             len != categories.length
         ) {
-            revert AssetLendingPool__ArrayLengthMismatch();
+            revert IAssetLendingPool.AssetLendingPool__ArrayLengthMismatch();
         }
-        AssetLendingPoolStorage storage $ = _getStorage();
+        ConfigStorage storage $ = _getConfigStorage();
         for (uint256 i; i < len; ) {
             _setAppraisal($, tokenIds[i], values[i], grades[i], categories[i]);
             unchecked {
@@ -238,20 +235,17 @@ abstract contract AssetLendingPoolConfig is
     // =========================================================================
 
     /// @notice Create or update a loan term configuration.
-    /// @dev onlyOwner. Extending `termCount` is allowed (termId >= current count auto-increments it).
-    /// @param termId Index of the term slot to write (0-based; 0/1/2 are the protocol defaults).
-    /// @param duration Loan length in seconds (must be > 0).
-    /// @param aprBps Annual percentage rate in basis points (e.g. 1000 = 10% APR).
-    /// @param active Whether borrowers can select this term.
+    /// @dev onlyOwner.
     function setTermConfig(
         uint8 termId,
         uint256 duration,
         uint256 aprBps,
         bool active
     ) external override onlyOwner {
-        if (duration == 0) revert AssetLendingPool__ZeroAmount();
-        AssetLendingPoolStorage storage $ = _getStorage();
-        $.termConfigs[termId] = TermConfig({
+        if (duration == 0)
+            revert IAssetLendingPool.AssetLendingPool__ZeroAmount();
+        ConfigStorage storage $ = _getConfigStorage();
+        $.termConfigs[termId] = IAssetLendingPool.TermConfig({
             duration: duration,
             aprBps: aprBps,
             active: active
@@ -265,21 +259,16 @@ abstract contract AssetLendingPoolConfig is
     // =========================================================================
 
     /// @notice Update global eligibility thresholds and the category whitelist.
-    /// @dev onlyOwner. Categories are toggled atomically: removes are applied after adds.
-    ///      Setting both thresholds to 0 effectively disables value/grade filtering.
-    /// @param minAppraisalValue Minimum appraised value (in payment-token units) required for borrowing.
-    /// @param minGrade Minimum numeric grade required for borrowing.
-    /// @param addCategories Category IDs to mark as eligible collateral.
-    /// @param removeCategories Category IDs to mark as ineligible collateral.
+    /// @dev onlyOwner.
     function setEligibilityControls(
-        uint256 minAppraisalValue,
-        uint256 minGrade,
+        uint256 minAppraisalValue_,
+        uint256 minGrade_,
         uint256[] calldata addCategories,
         uint256[] calldata removeCategories
     ) external override onlyOwner {
-        AssetLendingPoolStorage storage $ = _getStorage();
-        $.minAppraisalValue = minAppraisalValue;
-        $.minGrade = minGrade;
+        ConfigStorage storage $ = _getConfigStorage();
+        $.minAppraisalValue = minAppraisalValue_;
+        $.minGrade = minGrade_;
         for (uint256 i; i < addCategories.length; ) {
             $.eligibleCategories[addCategories[i]] = true;
             unchecked {
@@ -292,57 +281,50 @@ abstract contract AssetLendingPoolConfig is
                 ++i;
             }
         }
-        emit EligibilityControlsUpdated(minAppraisalValue, minGrade);
+        emit EligibilityControlsUpdated(minAppraisalValue_, minGrade_);
     }
 
     /// @notice Update the loan-to-value ratio applied to all future loans.
-    /// @dev onlyOwner. Does not affect loans already originated.
-    /// @param newLtv New LTV in basis points (1–10000; e.g. 5000 = 50%).
+    /// @dev onlyOwner.
     function setLtvBps(uint256 newLtv) external override onlyOwner {
-        if (newLtv == 0 || newLtv > BPS) revert AssetLendingPool__InvalidLTV();
-        AssetLendingPoolStorage storage $ = _getStorage();
+        if (newLtv == 0 || newLtv > BPS)
+            revert IAssetLendingPool.AssetLendingPool__InvalidLTV();
+        ConfigStorage storage $ = _getConfigStorage();
         emit LtvUpdated($.ltvBps, newLtv);
         $.ltvBps = newLtv;
     }
 
     /// @notice Set the maximum fraction of pool capital that may be committed to active loans.
-    /// @dev onlyOwner. Changes take effect on the next loan origination attempt.
-    ///      Setting to 10000 disables the reserve (equivalent to the legacy 100% behaviour).
-    /// @param newMaxUtilization New cap in basis points (1–10000; e.g. 8000 = 80%).
+    /// @dev onlyOwner.
     function setMaxUtilizationBps(
         uint256 newMaxUtilization
     ) external override onlyOwner {
         if (newMaxUtilization == 0 || newMaxUtilization > BPS)
-            revert AssetLendingPool__InvalidBps();
-        AssetLendingPoolStorage storage $ = _getStorage();
+            revert IAssetLendingPool.AssetLendingPool__InvalidBps();
+        ConfigStorage storage $ = _getConfigStorage();
         emit MaxUtilizationUpdated($.maxUtilizationBps, newMaxUtilization);
         $.maxUtilizationBps = newMaxUtilization;
     }
 
     /// @notice Set the origination fee charged on each loan at disbursement.
-    /// @dev onlyOwner. Fee is deducted from the borrower's disbursement (or pulled from the buyer
-    ///      in `financeMarketplacePurchase`). Set `bps` to 0 to disable the fee; `wallet` is
-    ///      ignored when `bps` is 0 but must be non-zero when `bps > 0`.
-    /// @param bps Fee in basis points (0–10000; e.g. 100 = 1%).
-    /// @param wallet Address that receives the collected fee.
+    /// @dev onlyOwner.
     function setOriginationFee(
         uint256 bps,
         address wallet
     ) external override onlyOwner {
-        if (bps > BPS) revert AssetLendingPool__InvalidBps();
+        if (bps > BPS) revert IAssetLendingPool.AssetLendingPool__InvalidBps();
         if (bps > 0 && wallet == address(0))
-            revert AssetLendingPool__ZeroAddress();
-        AssetLendingPoolStorage storage $ = _getStorage();
+            revert IAssetLendingPool.AssetLendingPool__ZeroAddress();
+        ConfigStorage storage $ = _getConfigStorage();
         $.originationFeeBps = bps;
         $.feeWallet = wallet;
         emit OriginationFeeUpdated(bps, wallet);
     }
 
     /// @notice Set the maximum allowed age for an appraisal before it is considered stale.
-    /// @dev onlyOwner. Pass 0 to disable staleness checking entirely (any appraisal age accepted).
-    /// @param newMaxAge Maximum age in seconds (e.g. 7 days = 604800). 0 = no staleness check.
+    /// @dev onlyOwner. Pass 0 to disable staleness checking.
     function setMaxAppraisalAge(uint256 newMaxAge) external override onlyOwner {
-        AssetLendingPoolStorage storage $ = _getStorage();
+        ConfigStorage storage $ = _getConfigStorage();
         emit MaxAppraisalAgeUpdated($.maxAppraisalAge, newMaxAge);
         $.maxAppraisalAge = newMaxAge;
     }
@@ -352,15 +334,14 @@ abstract contract AssetLendingPoolConfig is
     // =========================================================================
 
     /// @notice Configure the lender interest share and enable/disable external deposits.
-    /// @dev onlyOwner. Changes to `shareBps` take effect on the next loan repayment.
-    /// @param shareBps Percentage of interest routed to lenders in basis points (e.g. 8000 = 80%).
-    /// @param enabled Whether external lender deposits are accepted.
+    /// @dev onlyOwner.
     function setLenderConfig(
         uint256 shareBps,
         bool enabled
     ) external override onlyOwner {
-        if (shareBps > BPS) revert AssetLendingPool__InvalidBps();
-        AssetLendingPoolStorage storage $ = _getStorage();
+        if (shareBps > BPS)
+            revert IAssetLendingPool.AssetLendingPool__InvalidBps();
+        ConfigStorage storage $ = _getConfigStorage();
         $.lenderShareBps = shareBps;
         $.lenderDepositsEnabled = enabled;
         emit LenderConfigUpdated(shareBps, enabled);
@@ -370,70 +351,63 @@ abstract contract AssetLendingPoolConfig is
     // Admin: default lifecycle config
     // =========================================================================
 
-    /// @notice Set the durations for Phase 1 (acquisition) and Phase 2 (auction) of the default lifecycle.
-    /// @dev onlyOwner. Changes apply to defaults initiated after this call; existing defaults
-    ///      retain the windows that were active at the time of `initiateDefault`.
-    /// @param acquisitionWindow_ Phase 1 duration in seconds (e.g. 1 days).
-    /// @param auctionWindow_ Phase 2 duration in seconds (e.g. 7 days).
+    /// @notice Set the durations for Phase 1 (acquisition) and Phase 2 (auction).
+    /// @dev onlyOwner.
     function setDefaultLifecycleConfig(
         uint256 acquisitionWindow_,
         uint256 auctionWindow_
     ) external override onlyOwner {
-        AssetLendingPoolStorage storage $ = _getStorage();
+        ConfigStorage storage $ = _getConfigStorage();
         $.acquisitionWindow = acquisitionWindow_;
         $.auctionWindow = auctionWindow_;
         emit DefaultLifecycleConfigUpdated(acquisitionWindow_, auctionWindow_);
     }
 
     /// @notice Set the PackMachineFactory address used to validate target machines.
-    /// @dev onlyOwner. Only machines that pass `IPackMachineFactory.isPackMachine()` may be used
-    ///      in `acquireDefaultedAsset`.
-    /// @param factory_ New PackMachineFactory proxy address (must be non-zero).
+    /// @dev onlyOwner.
     function setPackMachineFactory(
         address factory_
     ) external override onlyOwner {
-        if (factory_ == address(0)) revert AssetLendingPool__ZeroAddress();
-        _getStorage().packMachineFactory = factory_;
+        if (factory_ == address(0))
+            revert IAssetLendingPool.AssetLendingPool__ZeroAddress();
+        _getConfigStorage().packMachineFactory = factory_;
         emit PackMachineFactoryUpdated(factory_);
     }
 
     /// @notice Set the default PackMachine for recycling acquired defaulted assets.
-    /// @dev onlyOwner. Pass address(0) to clear the default machine (acquisition calls must then
-    ///      always specify a target explicitly).
-    /// @param machine_ PackMachine clone address (or address(0) to clear).
+    /// @dev onlyOwner. Pass address(0) to clear the default machine.
     function setDefaultPackMachine(
         address machine_
     ) external override onlyOwner {
-        _getStorage().defaultPackMachine = machine_;
+        _getConfigStorage().defaultPackMachine = machine_;
         emit DefaultPackMachineUpdated(machine_);
     }
 
-    /// @notice Record the rarity tier for a token (used when recycling into a PackMachine).
-    /// @dev onlyOwner. The stored tier is passed to `IPackMachine.depositFromPool` during
-    ///      `acquireDefaultedAsset` when no explicit tier is provided by the caller.
-    /// @param tokenId AssetNFT token ID.
-    /// @param tier Rarity tier value understood by the target PackMachine.
+    /// @notice Record the rarity tier for a token.
+    /// @dev onlyOwner.
     function setTokenTier(
         uint256 tokenId,
         uint8 tier
     ) external override onlyOwner {
-        _getStorage().defaultTokenTiers[tokenId] = tier;
+        _getConfigStorage().defaultTokenTiers[tokenId] = tier;
         emit TokenTierSet(tokenId, tier);
     }
 
     /// @notice Batch version of setTokenTier (max 50 tokens per call).
-    /// @dev onlyOwner. `tokenIds` and `tiers` must be the same length.
-    /// @param tokenIds AssetNFT token IDs.
-    /// @param tiers Rarity tier values, parallel to `tokenIds`.
+    /// @dev onlyOwner.
     function batchSetTokenTiers(
         uint256[] calldata tokenIds,
         uint8[] calldata tiers
     ) external override onlyOwner {
         uint256 len = tokenIds.length;
         if (len > MAX_BATCH)
-            revert AssetLendingPool__BatchTooLarge(len, MAX_BATCH);
-        if (len != tiers.length) revert AssetLendingPool__ArrayLengthMismatch();
-        AssetLendingPoolStorage storage $ = _getStorage();
+            revert IAssetLendingPool.AssetLendingPool__BatchTooLarge(
+                len,
+                MAX_BATCH
+            );
+        if (len != tiers.length)
+            revert IAssetLendingPool.AssetLendingPool__ArrayLengthMismatch();
+        ConfigStorage storage $ = _getConfigStorage();
         for (uint256 i; i < len; ) {
             $.defaultTokenTiers[tokenIds[i]] = tiers[i];
             emit TokenTierSet(tokenIds[i], tiers[i]);
@@ -444,40 +418,29 @@ abstract contract AssetLendingPoolConfig is
     }
 
     // =========================================================================
-    // V3: Marketplace integration setters + views
+    // Admin: finance wallet
+    // =========================================================================
+
+    /// @notice Set the finance wallet that funds Phase-1 defaulted-asset acquisition.
+    /// @dev onlyOwner.
+    function setFinanceWallet(address wallet) external override onlyOwner {
+        if (wallet == address(0))
+            revert IAssetLendingPool.AssetLendingPool__ZeroAddress();
+        _getConfigStorage().financeWallet = wallet;
+        emit FinanceWalletUpdated(wallet);
+    }
+
+    // =========================================================================
+    // Admin: marketplace
     // =========================================================================
 
     /// @notice Set the authorized marketplace contract address.
-    /// @dev onlyOwner. After deploying the marketplace proxy, call this to enable
-    ///      the atomic loan-settlement path (settleLoanRepaymentOnSale).
-    /// @param marketplace_ Address of the NettyWorthMarketplace proxy.
+    /// @dev onlyOwner.
     function setMarketplace(address marketplace_) external override onlyOwner {
-        if (marketplace_ == address(0)) revert AssetLendingPool__ZeroAddress();
-        _getStorage().marketplace = marketplace_;
+        if (marketplace_ == address(0))
+            revert IAssetLendingPool.AssetLendingPool__ZeroAddress();
+        _getConfigStorage().marketplace = marketplace_;
         emit MarketplaceUpdated(marketplace_);
-    }
-
-    /// @inheritdoc IAssetLendingPool
-    function getMarketplace() external view override returns (address) {
-        return _getStorage().marketplace;
-    }
-
-    /// @inheritdoc IAssetLendingPool
-    function getActiveLoanId(uint256 tokenId) external view override returns (uint256) {
-        return _getStorage().tokenIdToActiveLoan[tokenId];
-    }
-
-    /// @inheritdoc IAssetLendingPool
-    function getLoanDebt(
-        uint256 tokenId
-    ) external view override returns (uint256 principal, uint256 interest, uint256 total) {
-        AssetLendingPoolStorage storage $ = _getStorage();
-        uint256 loanId = $.tokenIdToActiveLoan[tokenId];
-        if (loanId == 0) return (0, 0, 0);
-        Loan storage loan = $.loans[loanId];
-        principal = loan.principal;
-        interest = loan.interest;
-        total = principal + interest;
     }
 
     // =========================================================================
@@ -486,39 +449,183 @@ abstract contract AssetLendingPoolConfig is
 
     function getAppraisal(
         uint256 tokenId
-    ) external view override returns (AssetAppraisal memory) {
-        return _getStorage().appraisals[tokenId];
+    ) external view override returns (IAssetLendingPool.AssetAppraisal memory) {
+        return _getConfigStorage().appraisals[tokenId];
     }
 
     function getTermConfig(
         uint8 termId
-    ) external view override returns (TermConfig memory) {
-        return _getStorage().termConfigs[termId];
+    ) external view override returns (IAssetLendingPool.TermConfig memory) {
+        return _getConfigStorage().termConfigs[termId];
     }
 
     function getMaxLoanAmount(
         uint256 tokenId
     ) external view override returns (uint256) {
-        AssetLendingPoolStorage storage $ = _getStorage();
+        ConfigStorage storage $ = _getConfigStorage();
         return ($.appraisals[tokenId].value * $.ltvBps) / BPS;
     }
 
     function isEligible(uint256 tokenId) external view override returns (bool) {
-        return _isEligible(_getStorage(), tokenId);
+        return _isEligible(_getConfigStorage(), tokenId);
+    }
+
+    function getMarketplace() external view override returns (address) {
+        return _getConfigStorage().marketplace;
+    }
+
+    function getFinanceWallet() external view override returns (address) {
+        return _getConfigStorage().financeWallet;
     }
 
     // =========================================================================
-    // Internal config helpers (shared with business logic in the concrete contract)
+    // Scalar field getters
+    // =========================================================================
+
+    function paymentToken() external view override returns (address) {
+        return address(_getConfigStorage().paymentToken);
+    }
+
+    function assetNFT() external view override returns (address) {
+        return address(_getConfigStorage().assetNFT);
+    }
+
+    function ltvBps() external view override returns (uint256) {
+        return _getConfigStorage().ltvBps;
+    }
+
+    function maxUtilizationBps() external view override returns (uint256) {
+        return _getConfigStorage().maxUtilizationBps;
+    }
+
+    function feeWallet() external view override returns (address) {
+        return _getConfigStorage().feeWallet;
+    }
+
+    function originationFeeBps() external view override returns (uint256) {
+        return _getConfigStorage().originationFeeBps;
+    }
+
+    function lenderShareBps() external view override returns (uint256) {
+        return _getConfigStorage().lenderShareBps;
+    }
+
+    function lenderDepositsEnabled() external view override returns (bool) {
+        return _getConfigStorage().lenderDepositsEnabled;
+    }
+
+    function acquisitionWindow() external view override returns (uint256) {
+        return _getConfigStorage().acquisitionWindow;
+    }
+
+    function auctionWindow() external view override returns (uint256) {
+        return _getConfigStorage().auctionWindow;
+    }
+
+    function packMachineFactory() external view override returns (address) {
+        return _getConfigStorage().packMachineFactory;
+    }
+
+    function defaultPackMachine() external view override returns (address) {
+        return _getConfigStorage().defaultPackMachine;
+    }
+
+    function defaultTokenTier(
+        uint256 tokenId
+    ) external view override returns (uint8) {
+        return _getConfigStorage().defaultTokenTiers[tokenId];
+    }
+
+    function minAppraisalValue() external view override returns (uint256) {
+        return _getConfigStorage().minAppraisalValue;
+    }
+
+    function minGrade() external view override returns (uint256) {
+        return _getConfigStorage().minGrade;
+    }
+
+    function maxAppraisalAge() external view override returns (uint256) {
+        return _getConfigStorage().maxAppraisalAge;
+    }
+
+    function termCount() external view override returns (uint8) {
+        return _getConfigStorage().termCount;
+    }
+
+    // =========================================================================
+    // Composite helpers (minimize external calls from AssetLendingPool)
+    // =========================================================================
+
+    /// @inheritdoc IAssetLendingPoolConfig
+    function validateBundleAndSumAppraisals(
+        uint256[] calldata tokenIds
+    ) external view override returns (uint256 summedAppraisal) {
+        uint256 len = tokenIds.length;
+        if (len == 0) revert IAssetLendingPool.AssetLendingPool__EmptyBundle();
+        if (len > MAX_BATCH)
+            revert IAssetLendingPool.AssetLendingPool__BatchTooLarge(
+                len,
+                MAX_BATCH
+            );
+        ConfigStorage storage $ = _getConfigStorage();
+        for (uint256 i; i < len; ) {
+            uint256 t = tokenIds[i];
+            _checkEligibility($, t);
+            summedAppraisal += $.appraisals[t].value;
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @inheritdoc IAssetLendingPoolConfig
+    function checkEligibility(uint256 tokenId) external view override {
+        _checkEligibility(_getConfigStorage(), tokenId);
+    }
+
+    /// @inheritdoc IAssetLendingPoolConfig
+    function calculateOriginationFee(
+        uint256 principal
+    ) external view override returns (uint256) {
+        return _calculateOriginationFee(_getConfigStorage(), principal);
+    }
+
+    /// @inheritdoc IAssetLendingPoolConfig
+    function getConfigSnapshot()
+        external
+        view
+        override
+        returns (ConfigSnapshot memory snap)
+    {
+        ConfigStorage storage $ = _getConfigStorage();
+        snap.paymentToken = address($.paymentToken);
+        snap.assetNFT = address($.assetNFT);
+        snap.termCount = $.termCount;
+        snap.minAppraisalValue = $.minAppraisalValue;
+        snap.minGrade = $.minGrade;
+        snap.originationFeeBps = $.originationFeeBps;
+        snap.feeWallet = $.feeWallet;
+        snap.ltvBps = $.ltvBps;
+        snap.maxAppraisalAge = $.maxAppraisalAge;
+        snap.lenderShareBps = $.lenderShareBps;
+        snap.lenderDepositsEnabled = $.lenderDepositsEnabled;
+        snap.acquisitionWindow = $.acquisitionWindow;
+        snap.auctionWindow = $.auctionWindow;
+        snap.maxUtilizationBps = $.maxUtilizationBps;
+    }
+
+    // =========================================================================
+    // Internal helpers
     // =========================================================================
 
     function _setAppraisal(
-        AssetLendingPoolStorage storage $,
+        ConfigStorage storage $,
         uint256 tokenId,
         uint256 value,
         uint256 grade,
         uint256 category
     ) internal {
-        $.appraisals[tokenId] = AssetAppraisal({
+        $.appraisals[tokenId] = IAssetLendingPool.AssetAppraisal({
             value: value,
             grade: grade,
             category: category,
@@ -528,58 +635,49 @@ abstract contract AssetLendingPoolConfig is
     }
 
     function _isEligible(
-        AssetLendingPoolStorage storage $,
+        ConfigStorage storage $,
         uint256 tokenId
     ) internal view returns (bool) {
-        AssetAppraisal storage appraisal = $.appraisals[tokenId];
+        IAssetLendingPool.AssetAppraisal storage appraisal = $.appraisals[
+            tokenId
+        ];
         if (appraisal.updatedAt == 0) return false;
         if (appraisal.value < $.minAppraisalValue) return false;
         if (appraisal.grade < $.minGrade) return false;
         if (
             !$.eligibleCategories[appraisal.category] && appraisal.category != 0
         ) {
-            // If the category is non-zero and not whitelisted, reject
-            // (category 0 = uncategorised, allowed unless minGrade/minAppraisal block it)
             return false;
         }
         return true;
     }
 
     function _checkEligibility(
-        AssetLendingPoolStorage storage $,
+        ConfigStorage storage $,
         uint256 tokenId
     ) internal view {
-        AssetAppraisal storage appraisal = $.appraisals[tokenId];
-        if (appraisal.updatedAt == 0) revert AssetLendingPool__NoAppraisal();
+        IAssetLendingPool.AssetAppraisal storage appraisal = $.appraisals[
+            tokenId
+        ];
+        if (appraisal.updatedAt == 0)
+            revert IAssetLendingPool.AssetLendingPool__NoAppraisal();
         uint256 maxAge = $.maxAppraisalAge;
         if (maxAge != 0 && block.timestamp - appraisal.updatedAt > maxAge) {
-            revert AssetLendingPool__AppraisalStale(
+            revert IAssetLendingPool.AssetLendingPool__AppraisalStale(
                 tokenId,
                 appraisal.updatedAt,
                 maxAge
             );
         }
         if (!_isEligible($, tokenId))
-            revert AssetLendingPool__IneligibleAsset();
+            revert IAssetLendingPool.AssetLendingPool__IneligibleAsset();
     }
 
     function _calculateOriginationFee(
-        AssetLendingPoolStorage storage $,
+        ConfigStorage storage $,
         uint256 principal
     ) internal view returns (uint256) {
         if ($.originationFeeBps == 0) return 0;
         return (principal * $.originationFeeBps) / BPS;
-    }
-
-    /// @dev Reverts unless originating `amount` keeps total utilization at or below
-    ///      the configured cap. Subsumes the legacy "amount <= idle liquidity" check
-    ///      (equivalent when `maxUtilizationBps == 10000`).
-    function _checkUtilization(
-        AssetLendingPoolStorage storage $,
-        uint256 amount
-    ) internal view {
-        uint256 maxBorrowable = ($.totalDeposited * $.maxUtilizationBps) / BPS;
-        if ($.totalBorrowed + amount > maxBorrowable)
-            revert AssetLendingPool__ExceedsMaxUtilization();
     }
 }

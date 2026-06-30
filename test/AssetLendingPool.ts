@@ -84,12 +84,12 @@ describe("AssetLendingPool", async function () {
     ]);
     const nft = await viem.getContractAt("AssetNFT", nftProxy.address);
 
-    // AssetLendingPool
-    const poolImpl = await viem.deployContract("AssetLendingPool");
-    const poolProxy = await viem.deployContract("ERC1967ProxyHelper", [
-      poolImpl.address,
+    // AssetLendingPoolConfig — separate proxy holding all admin config
+    const configImpl = await viem.deployContract("AssetLendingPoolConfig");
+    const configProxy = await viem.deployContract("ERC1967ProxyHelper", [
+      configImpl.address,
       encodeFunctionData({
-        abi: poolImpl.abi,
+        abi: configImpl.abi,
         functionName: "initialize",
         // 80% lender share, 24h acquisition window, 7d auction window
         // Use address(1) for factory (no PackMachine tests in TS layer)
@@ -103,6 +103,21 @@ describe("AssetLendingPool", async function () {
           BigInt(7 * 24 * 3600),
           "0x0000000000000000000000000000000000000001",
         ],
+      }),
+    ]);
+    const config = await viem.getContractAt(
+      "AssetLendingPoolConfig",
+      configProxy.address,
+    );
+
+    // AssetLendingPool — takes only initialOwner + config address
+    const poolImpl = await viem.deployContract("AssetLendingPool");
+    const poolProxy = await viem.deployContract("ERC1967ProxyHelper", [
+      poolImpl.address,
+      encodeFunctionData({
+        abi: poolImpl.abi,
+        functionName: "initialize",
+        args: [adminAddress, config.address],
       }),
     ]);
     const pool = await viem.getContractAt(
@@ -125,14 +140,13 @@ describe("AssetLendingPool", async function () {
     });
     await pool.write.deposit([POOL_SEED], { account: walletAdmin.account });
 
-    // Set a fake marketplace address so financeMarketplacePurchase can verify listing sigs.
-    // The address just needs to be deterministic — it forms part of the EIP-712 domain.
+    // Set a fake marketplace address on config so financeMarketplacePurchase can verify listing sigs.
     const fakeMarketplace = "0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF" as Address;
-    await pool.write.setMarketplace([fakeMarketplace], {
+    await config.write.setMarketplace([fakeMarketplace], {
       account: walletAdmin.account,
     });
 
-    return { pm, usdc, nft, pool, fakeMarketplace };
+    return { pm, usdc, nft, pool, config, fakeMarketplace };
   }
 
   // ---------------------------------------------------------------------------
@@ -195,7 +209,7 @@ describe("AssetLendingPool", async function () {
 
   describe("Deployment", async function () {
     it("sets owner and default terms", async function () {
-      const { pool } = await deploy();
+      const { pool, config } = await deploy();
       assert.equal(
         getAddress(await pool.read.owner()),
         getAddress(adminAddress),
@@ -213,7 +227,7 @@ describe("AssetLendingPool", async function () {
     });
 
     it("reflects deposited liquidity", async function () {
-      const { pool } = await deploy();
+      const { pool, config } = await deploy();
       assert.equal((await pool.read.getPoolInfo()).totalDeposited, POOL_SEED);
       assert.equal(await pool.read.getAvailableLiquidity(), POOL_SEED);
     });
@@ -225,11 +239,11 @@ describe("AssetLendingPool", async function () {
 
   describe("borrow and repay", async function () {
     it("full cycle: borrow, NFT in Loaned state, repay, NFT returned", async function () {
-      const { usdc, nft, pool } = await deploy();
+      const { usdc, nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
 
       // Appraise and approve
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.approve([pool.address, tokenId], {
@@ -289,9 +303,9 @@ describe("AssetLendingPool", async function () {
     });
 
     it("reverts on insufficient LTV", async function () {
-      const { nft, pool } = await deploy();
+      const { nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.approve([pool.address, tokenId], {
@@ -306,7 +320,7 @@ describe("AssetLendingPool", async function () {
     });
 
     it("reverts with no appraisal", async function () {
-      const { nft, pool } = await deploy();
+      const { nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
       await nft.write.approve([pool.address, tokenId], {
         account: walletBorrower.account,
@@ -320,9 +334,9 @@ describe("AssetLendingPool", async function () {
     });
 
     it("allows repayment after expiry (grace period before liquidation)", async function () {
-      const { usdc, nft, pool } = await deploy();
+      const { usdc, nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.approve([pool.address, tokenId], {
@@ -354,9 +368,9 @@ describe("AssetLendingPool", async function () {
 
   describe("liquidate", async function () {
     it("owner claims NFT after expiry", async function () {
-      const { nft, pool } = await deploy();
+      const { nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.approve([pool.address, tokenId], {
@@ -385,9 +399,9 @@ describe("AssetLendingPool", async function () {
     });
 
     it("rescueNFT transfers defaulted NFT to recipient", async function () {
-      const { nft, pool } = await deploy();
+      const { nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.approve([pool.address, tokenId], {
@@ -421,9 +435,9 @@ describe("AssetLendingPool", async function () {
 
   describe("financeMarketplacePurchase", async function () {
     it("seller receives listing price, NFT loaned to buyer, repay returns NFT", async function () {
-      const { usdc, nft, pool, fakeMarketplace } = await deploy();
+      const { usdc, nft, pool, config, fakeMarketplace } = await deploy();
       const tokenId = await mintNFT(nft, sellerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
 
@@ -492,9 +506,9 @@ describe("AssetLendingPool", async function () {
     });
 
     it("reverts if deposit too high (loanAmount == 0)", async function () {
-      const { usdc, nft, pool, fakeMarketplace } = await deploy();
+      const { usdc, nft, pool, config, fakeMarketplace } = await deploy();
       const tokenId = await mintNFT(nft, sellerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.setApprovalForAll([pool.address, true], {
@@ -528,9 +542,9 @@ describe("AssetLendingPool", async function () {
     });
 
     it("reverts if loan exceeds LTV (deposit too low)", async function () {
-      const { usdc, nft, pool, fakeMarketplace } = await deploy();
+      const { usdc, nft, pool, config, fakeMarketplace } = await deploy();
       const tokenId = await mintNFT(nft, sellerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.setApprovalForAll([pool.address, true], {
@@ -565,9 +579,9 @@ describe("AssetLendingPool", async function () {
     });
 
     it("reverts if signature is invalid", async function () {
-      const { usdc, nft, pool, fakeMarketplace } = await deploy();
+      const { usdc, nft, pool, config, fakeMarketplace } = await deploy();
       const tokenId = await mintNFT(nft, sellerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.setApprovalForAll([pool.address, true], {
@@ -607,7 +621,7 @@ describe("AssetLendingPool", async function () {
 
   describe("admin operations", async function () {
     it("withdraw reduces totalDeposited", async function () {
-      const { pool } = await deploy();
+      const { pool, config } = await deploy();
       const before = (await pool.read.getPoolInfo()).totalDeposited;
       await pool.write.withdraw([100n * 10n ** 6n], {
         account: walletAdmin.account,
@@ -619,9 +633,9 @@ describe("AssetLendingPool", async function () {
     });
 
     it("withdrawInterest after repayment", async function () {
-      const { usdc, nft, pool } = await deploy();
+      const { usdc, nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.approve([pool.address, tokenId], {
@@ -654,14 +668,14 @@ describe("AssetLendingPool", async function () {
     });
 
     it("origination fee deducted from disbursement", async function () {
-      const { usdc, nft, pool } = await deploy();
+      const { usdc, nft, pool, config } = await deploy();
       const feeWallet = walletOther.account.address;
-      await pool.write.setOriginationFee([200n, feeWallet], {
+      await config.write.setOriginationFee([200n, feeWallet], {
         account: walletAdmin.account,
       }); // 2%
 
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.approve([pool.address, tokenId], {
@@ -685,9 +699,9 @@ describe("AssetLendingPool", async function () {
     });
 
     it("pause blocks borrow", async function () {
-      const { nft, pool } = await deploy();
+      const { nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
       await pool.write.pause({ account: walletAdmin.account });
@@ -711,7 +725,7 @@ describe("AssetLendingPool", async function () {
     const SEVEN_DAYS = 7 * 24 * 3600;
 
     it("default maxAppraisalAge is 7 days", async function () {
-      const { pool } = await deploy();
+      const { pool, config } = await deploy();
       assert.equal(
         (await pool.read.getPoolInfo()).maxAppraisalAge,
         BigInt(SEVEN_DAYS),
@@ -719,8 +733,8 @@ describe("AssetLendingPool", async function () {
     });
 
     it("setMaxAppraisalAge updates value", async function () {
-      const { pool } = await deploy();
-      await pool.write.setMaxAppraisalAge([BigInt(SEVEN_DAYS * 2)], {
+      const { pool, config } = await deploy();
+      await config.write.setMaxAppraisalAge([BigInt(SEVEN_DAYS * 2)], {
         account: walletAdmin.account,
       });
       assert.equal(
@@ -730,9 +744,9 @@ describe("AssetLendingPool", async function () {
     });
 
     it("borrow reverts when appraisal is stale", async function () {
-      const { nft, pool } = await deploy();
+      const { nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
 
@@ -750,9 +764,9 @@ describe("AssetLendingPool", async function () {
     });
 
     it("borrow succeeds after appraisal is refreshed", async function () {
-      const { nft, pool } = await deploy();
+      const { nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
 
@@ -760,7 +774,7 @@ describe("AssetLendingPool", async function () {
       await testClient.mine({ blocks: 1 });
 
       // Refresh appraisal
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
 
@@ -773,13 +787,13 @@ describe("AssetLendingPool", async function () {
     });
 
     it("setMaxAppraisalAge(0) disables check even with very stale appraisal", async function () {
-      const { nft, pool } = await deploy();
+      const { nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
 
-      await pool.write.setMaxAppraisalAge([0n], {
+      await config.write.setMaxAppraisalAge([0n], {
         account: walletAdmin.account,
       });
 
@@ -795,9 +809,9 @@ describe("AssetLendingPool", async function () {
     });
 
     it("isEligible is unaffected by staleness", async function () {
-      const { nft, pool } = await deploy();
+      const { nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
 
@@ -818,8 +832,8 @@ describe("AssetLendingPool", async function () {
 
   describe("lender capital", async function () {
     it("lenderDeposit increases totalDeposited and lender balance", async function () {
-      const { usdc, pool } = await deploy();
-      await pool.write.setLenderConfig([8000n, true], {
+      const { usdc, pool, config } = await deploy();
+      await config.write.setLenderConfig([8000n, true], {
         account: walletAdmin.account,
       });
 
@@ -841,8 +855,8 @@ describe("AssetLendingPool", async function () {
     });
 
     it("lenderWithdraw reverts when capital is locked in loans", async function () {
-      const { usdc, nft, pool } = await deploy();
-      await pool.write.setLenderConfig([8000n, true], {
+      const { usdc, nft, pool, config } = await deploy();
+      await config.write.setLenderConfig([8000n, true], {
         account: walletAdmin.account,
       });
 
@@ -856,14 +870,14 @@ describe("AssetLendingPool", async function () {
       });
 
       // Temporarily disable utilization cap so the precondition borrow can fill the pool.
-      await pool.write.setMaxUtilizationBps([10_000n], {
+      await config.write.setMaxUtilizationBps([10_000n], {
         account: walletAdmin.account,
       });
 
       // Borrow all available liquidity
       const tokenId = await mintNFT(nft, borrowerAddress);
       const bigVal = (POOL_SEED + depositAmt) * 3n;
-      await pool.write.setAppraisal([tokenId, bigVal, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, bigVal, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.approve([pool.address, tokenId], {
@@ -882,8 +896,8 @@ describe("AssetLendingPool", async function () {
     });
 
     it("lender earns 80% of interest on repay", async function () {
-      const { usdc, nft, pool } = await deploy();
-      await pool.write.setLenderConfig([8000n, true], {
+      const { usdc, nft, pool, config } = await deploy();
+      await config.write.setLenderConfig([8000n, true], {
         account: walletAdmin.account,
       });
 
@@ -897,7 +911,7 @@ describe("AssetLendingPool", async function () {
       });
 
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.approve([pool.address, tokenId], {
@@ -948,10 +962,11 @@ describe("AssetLendingPool", async function () {
       usdc: Awaited<ReturnType<typeof deploy>>["usdc"],
       nft: Awaited<ReturnType<typeof deploy>>["nft"],
       pool: Awaited<ReturnType<typeof deploy>>["pool"],
+      config: Awaited<ReturnType<typeof deploy>>["config"],
       principal: bigint,
     ) {
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, APPRAISAL_VALUE, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.approve([pool.address, tokenId], {
@@ -975,12 +990,13 @@ describe("AssetLendingPool", async function () {
     }
 
     it("initiateDefault creates default record and tracks principal", async function () {
-      const { usdc, nft, pool } = await deploy();
+      const { usdc, nft, pool, config } = await deploy();
       const principal = 400n * 10n ** 6n;
       const { loanId, tokenId } = await createDefaultedLoan(
         usdc,
         nft,
         pool,
+        config,
         principal,
       );
 
@@ -998,11 +1014,12 @@ describe("AssetLendingPool", async function () {
     });
 
     it("phase transitions to Auction after acquisition window", async function () {
-      const { usdc, nft, pool } = await deploy();
+      const { usdc, nft, pool, config } = await deploy();
       const { loanId } = await createDefaultedLoan(
         usdc,
         nft,
         pool,
+        config,
         400n * 10n ** 6n,
       );
 
@@ -1013,11 +1030,12 @@ describe("AssetLendingPool", async function () {
     });
 
     it("phase transitions to FixedListing after auction window", async function () {
-      const { usdc, nft, pool } = await deploy();
+      const { usdc, nft, pool, config } = await deploy();
       const { loanId } = await createDefaultedLoan(
         usdc,
         nft,
         pool,
+        config,
         400n * 10n ** 6n,
       );
 
@@ -1029,61 +1047,45 @@ describe("AssetLendingPool", async function () {
       assert.equal(await pool.read.getDefaultPhase([loanId]), 3);
     });
 
-    it("purchaseDefaultedAsset in Phase 2 restores pool capital", async function () {
-      const { usdc, nft, pool } = await deploy();
+    it("default record is created and phase progresses through auction window", async function () {
+      const { usdc, nft, pool, config } = await deploy();
       const principal = 400n * 10n ** 6n;
-      const { loanId, tokenId } = await createDefaultedLoan(
-        usdc,
-        nft,
-        pool,
-        principal,
-      );
-
-      const depositedBefore = (await pool.read.getPoolInfo()).totalDeposited;
-
-      // Advance to Phase 2
-      await testClient.increaseTime({ seconds: ACQUISITION_WINDOW + 1 });
-      await testClient.mine({ blocks: 1 });
-
-      const buyer = walletOther.account.address;
-      await usdc.write.mint([buyer, principal]);
-      await usdc.write.approve([pool.address, principal], {
-        account: walletOther.account,
-      });
-      await pool.write.purchaseDefaultedAsset([loanId], {
-        account: walletOther.account,
-      });
-
-      // NFT transferred to buyer
-      assert.equal(
-        getAddress(await nft.read.ownerOf([tokenId])),
-        getAddress(buyer),
-      );
-      // Pool made whole
-      assert.equal(
-        (await pool.read.getPoolInfo()).totalDeposited,
-        depositedBefore + principal,
-      );
-      assert.equal(
-        (await pool.read.getPoolInfo()).totalDefaultedPrincipal,
-        0n,
-      );
-      // Resolved
-      assert.equal(await pool.read.getDefaultPhase([loanId]), 4); // Resolved
-    });
-
-    it("purchaseDefaultedAsset reverts in Phase 1", async function () {
-      const { usdc, nft, pool } = await deploy();
       const { loanId } = await createDefaultedLoan(
         usdc,
         nft,
         pool,
+        config,
+        principal,
+      );
+
+      // Phase 1: Acquisition
+      assert.equal(await pool.read.getDefaultPhase([loanId]), 1);
+
+      // Advance past acquisition window → Phase 2: Auction
+      await testClient.increaseTime({ seconds: ACQUISITION_WINDOW + 1 });
+      await testClient.mine({ blocks: 1 });
+      assert.equal(await pool.read.getDefaultPhase([loanId]), 2);
+
+      // Advance past auction window → Phase 3: FixedListing
+      await testClient.increaseTime({ seconds: AUCTION_WINDOW + 1 });
+      await testClient.mine({ blocks: 1 });
+      assert.equal(await pool.read.getDefaultPhase([loanId]), 3);
+    });
+
+    it("prepareDefaultedListing reverts during acquisition window", async function () {
+      const { usdc, nft, pool, config } = await deploy();
+      const { loanId } = await createDefaultedLoan(
+        usdc,
+        nft,
+        pool,
+        config,
         400n * 10n ** 6n,
       );
 
+      // Still in Phase 1 — prepareDefaultedListing should revert
       await assert.rejects(
-        pool.write.purchaseDefaultedAsset([loanId], {
-          account: walletOther.account,
+        pool.write.prepareDefaultedListing([loanId], {
+          account: walletAdmin.account,
         }),
       );
     });
@@ -1095,14 +1097,14 @@ describe("AssetLendingPool", async function () {
 
   describe("$100 default minimum appraisal", async function () {
     it("minAppraisalValue defaults to 100e6 on deployment", async function () {
-      const { pool } = await deploy();
+      const { pool, config } = await deploy();
       assert.equal((await pool.read.getPoolInfo()).minAppraisalValue, 100n * 10n ** 6n);
     });
 
     it("borrow reverts if appraisal is below the $100 default", async function () {
-      const { usdc: _usdc, nft, pool } = await deploy();
+      const { usdc: _usdc, nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await pool.write.setAppraisal([tokenId, 50n * 10n ** 6n, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, 50n * 10n ** 6n, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.approve([pool.address, tokenId], {
@@ -1122,7 +1124,7 @@ describe("AssetLendingPool", async function () {
 
   describe("borrowBundle", async function () {
     it("happy path: 3-token bundle borrow then repay", async function () {
-      const { usdc, nft, pool } = await deploy();
+      const { usdc, nft, pool, config } = await deploy();
 
       const t1 = await mintNFT(nft, borrowerAddress);
       const t2 = await mintNFT(nft, borrowerAddress);
@@ -1130,7 +1132,7 @@ describe("AssetLendingPool", async function () {
 
       // Appraise each at 1000 USDC → summed 3000, max loan 1500
       for (const id of [t1, t2, t3]) {
-        await pool.write.setAppraisal([id, APPRAISAL_VALUE, 0n, 0n], {
+        await config.write.setAppraisal([id, APPRAISAL_VALUE, 0n, 0n], {
           account: walletAdmin.account,
         });
         await nft.write.approve([pool.address, id], {
@@ -1175,7 +1177,7 @@ describe("AssetLendingPool", async function () {
     });
 
     it("reverts with EmptyBundle if tokenIds array is empty", async function () {
-      const { pool } = await deploy();
+      const { pool, config } = await deploy();
       await assert.rejects(
         pool.write.borrowBundle([[], 100n * 10n ** 6n, 0], {
           account: walletBorrower.account,

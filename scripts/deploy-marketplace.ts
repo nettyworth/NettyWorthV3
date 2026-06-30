@@ -1,9 +1,16 @@
 import { network } from "hardhat";
 import { encodeFunctionData, getAddress, keccak256, toBytes } from "viem";
 import { createInterface } from "node:readline/promises";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  readDeployments,
+  saveDeployment,
+  waitForCode,
+} from "./lib/deployments.js";
+
+// ─── Rate-limit guard — pause between steps to avoid 429s on live RPCs ───────
+const STEP_DELAY_MS = Number(process.env.DEPLOY_STEP_DELAY_MS ?? "3000");
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 // MARKETPLACE_ROLE = keccak256("MARKETPLACE_ROLE") — matches contracts/lib/Roles.sol
 const MARKETPLACE_ROLE = keccak256(toBytes("MARKETPLACE_ROLE"));
@@ -44,20 +51,30 @@ const [deployerClient] = await viem.getWalletClients();
 const deployerAddress = deployerClient.account.address;
 const chainId = await publicClient.getChainId();
 
-const deploymentsDir = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "../deployments",
-);
-const deploymentPath = join(deploymentsDir, `${connection.networkName}.json`);
+const isLive = connection.networkConfig.type === "http";
+const networkName = connection.networkName;
 
-async function readDeployments(): Promise<Record<string, unknown>> {
-  try {
-    return JSON.parse(await readFile(deploymentPath, "utf8"));
-  } catch {
-    return {};
+// ─── Resume helper — returns an already-deployed address if chain has code there
+async function reuseAddress(
+  key: string,
+  field: string,
+  deployments: Record<string, unknown>,
+): Promise<`0x${string}` | undefined> {
+  const entry = deployments[key] as Record<string, unknown> | undefined;
+  const raw = entry?.[field];
+  if (typeof raw !== "string" || !raw.startsWith("0x")) return undefined;
+  const addr = getAddress(raw) as `0x${string}`;
+  const code = await publicClient.getCode({ address: addr });
+  if (!code || code === "0x") {
+    console.log(
+      `  ⚠ ${key}.${field} found in JSON (${addr}) but no bytecode on chain — will redeploy`,
+    );
+    return undefined;
   }
+  return addr;
 }
 
+// ─── Resolve dependencies from env or deployments JSON ───────────────────────
 function resolveFromEnvOrDeployments(
   envKey: string,
   deploymentKey: string,
@@ -67,7 +84,7 @@ function resolveFromEnvOrDeployments(
   if (process.env[envKey]) {
     return getAddress(process.env[envKey]!) as `0x${string}`;
   }
-  if (connection.networkConfig.type === "http") {
+  if (isLive) {
     const entry = data[deploymentKey] as Record<string, unknown> | undefined;
     if (entry?.proxy) return getAddress(entry.proxy as string) as `0x${string}`;
   }
@@ -77,7 +94,7 @@ function resolveFromEnvOrDeployments(
   process.exit(1);
 }
 
-const data = await readDeployments();
+const data = isLive ? await readDeployments(networkName) : {};
 
 const permissionManagerProxy = resolveFromEnvOrDeployments(
   "PERMISSION_MANAGER_PROXY",
@@ -96,6 +113,12 @@ const lendingPoolProxy = resolveFromEnvOrDeployments(
   "AssetLendingPool",
   data,
   "AssetLendingPool proxy",
+);
+const lendingPoolConfigProxy = resolveFromEnvOrDeployments(
+  "LENDING_POOL_CONFIG_PROXY",
+  "AssetLendingPoolConfig",
+  data,
+  "AssetLendingPoolConfig proxy",
 );
 const assetNFTProxy = resolveFromEnvOrDeployments(
   "ASSET_NFT_PROXY",
@@ -124,10 +147,10 @@ if (process.env.TREASURY) {
   process.exit(1);
 }
 
-// ─── Confirmation prompt ──────────────────────────────────────────────────────
-if (connection.networkConfig.type === "http") {
+// ─── Confirmation prompt (live networks only) ─────────────────────────────────
+if (isLive) {
   const ok = await confirm(
-    connection.networkName,
+    networkName,
     chainId,
     deployerAddress,
     permissionManagerProxy,
@@ -143,45 +166,113 @@ if (connection.networkConfig.type === "http") {
   }
 }
 
-// ─── [1/6] Deploy implementation ─────────────────────────────────────────────
-console.log("\n[1/6] Deploying NettyWorthMarketplace implementation...");
-const impl = await viem.deployContract("NettyWorthMarketplace");
-console.log(`  Implementation: ${impl.address}`);
+// Re-read after confirmation so interactive pause doesn't matter.
+const savedDeployments = isLive ? await readDeployments(networkName) : {};
 
-// ─── [2/6] Encode initialize calldata ────────────────────────────────────────
-console.log("[2/6] Encoding initialize calldata...");
-const initData = encodeFunctionData({
-  abi: impl.abi,
-  functionName: "initialize",
-  args: [
-    permissionManagerProxy,
-    feeControllerProxy,
-    lendingPoolProxy,
-    assetNFTProxy,
+// ─── [1/6]+[2/6] Deploy NettyWorthMarketplace (impl + proxy) ─────────────────
+console.log("\n[1/6] Deploying NettyWorthMarketplace implementation...");
+
+let implAddress = await reuseAddress(
+  "NettyWorthMarketplace",
+  "implementation",
+  savedDeployments,
+);
+let proxyAddress = await reuseAddress(
+  "NettyWorthMarketplace",
+  "proxy",
+  savedDeployments,
+);
+
+if (implAddress && proxyAddress) {
+  console.log(`  ↻ reusing NettyWorthMarketplace impl  ${implAddress}`);
+  console.log(`  ↻ reusing NettyWorthMarketplace proxy ${proxyAddress}`);
+} else {
+  if (!implAddress) {
+    const impl = await viem.deployContract("NettyWorthMarketplace");
+    implAddress = impl.address;
+    console.log(`  Implementation: ${implAddress}`);
+    // Checkpoint impl immediately so a proxy-deploy failure doesn't lose it.
+    if (isLive) {
+      await saveDeployment(networkName, "NettyWorthMarketplace", {
+        implementation: implAddress,
+        deployedAt: new Date().toISOString(),
+      });
+    }
+  } else {
+    console.log(`  ↻ reusing NettyWorthMarketplace impl ${implAddress}`);
+  }
+
+  console.log("[2/6] Deploying ERC1967 proxy...");
+  const implContract = await viem.getContractAt(
+    "NettyWorthMarketplace",
+    implAddress,
+  );
+  const initData = encodeFunctionData({
+    abi: implContract.abi,
+    functionName: "initialize",
+    args: [
+      permissionManagerProxy,
+      feeControllerProxy,
+      lendingPoolProxy,
+      assetNFTProxy,
+      paymentToken,
+      treasury,
+    ],
+  });
+  await waitForCode(publicClient, implAddress);
+  const proxy = await viem.deployContract("ERC1967ProxyHelper", [
+    implAddress,
+    initData,
+  ]);
+  proxyAddress = proxy.address;
+  console.log(`  Proxy: ${proxyAddress}`);
+}
+
+if (isLive) {
+  await saveDeployment(networkName, "NettyWorthMarketplace", {
+    proxy: proxyAddress,
+    implementation: implAddress,
+    permissionManager: permissionManagerProxy,
+    feeController: feeControllerProxy,
+    lendingPool: lendingPoolProxy,
+    assetNFT: assetNFTProxy,
     paymentToken,
     treasury,
-  ],
-});
+    deployedAt: new Date().toISOString(),
+  });
+  console.log("  ✓ checkpoint saved");
+}
+await sleep(STEP_DELAY_MS);
 
-// ─── [3/6] Deploy ERC-1967 proxy ─────────────────────────────────────────────
-console.log("[3/6] Deploying ERC1967 proxy...");
-const proxy = await viem.deployContract("ERC1967ProxyHelper", [
-  impl.address,
-  initData,
-]);
-console.log(`  Proxy: ${proxy.address}`);
-
-// ─── [4/6] Wiring: authorize marketplace on lending pool ─────────────────────
+// ─── [3/6] Wiring: authorize marketplace on lending pool (idempotent) ─────────
+// getMarketplace is on AssetLendingPool; setMarketplace is on AssetLendingPoolConfig
+// (which AssetLendingPool inherits). Use the config ABI for the write.
 console.log(
-  "[4/6] Authorizing marketplace on AssetLendingPool (setMarketplace)...",
+  "[3/6] Authorizing marketplace on AssetLendingPool (setMarketplace)...",
 );
 const pool = await viem.getContractAt("AssetLendingPool", lendingPoolProxy);
-const hash = await pool.write.setMarketplace([proxy.address]);
-console.log(`  pool.marketplace = ${proxy.address}`);
-await publicClient.waitForTransactionReceipt({ hash });
+const poolConfig = await viem.getContractAt(
+  "AssetLendingPoolConfig",
+  lendingPoolConfigProxy,
+);
 
-// ─── [5/6] Wiring: configure AssetNFT shipment refs (if env vars provided) ───
-console.log("[5/6] Configuring AssetNFT shipment references...");
+const currentMarketplace = await pool.read.getMarketplace();
+if (currentMarketplace.toLowerCase() === proxyAddress.toLowerCase()) {
+  console.log(`  ↻ skipping setMarketplace (already set)`);
+} else {
+  const owner = await poolConfig.read.owner();
+  console.log("owner ", owner);
+  const hash = await poolConfig.write.setMarketplace([proxyAddress]);
+  await publicClient.waitForTransactionReceipt({ hash });
+  console.log(`  pool.marketplace = ${proxyAddress}`);
+}
+await sleep(STEP_DELAY_MS);
+
+// ─── [4/6] Wiring: configure AssetNFT shipment refs (if env vars provided) ───
+// AssetNFT does not expose getters for these fields, so this step is not
+// idempotent. Set SKIP_NFT_WIRING=true when re-running after a partial failure
+// if NFT wiring already completed.
+console.log("[4/6] Configuring AssetNFT shipment references...");
 const nft = await viem.getContractAt("AssetNFT", assetNFTProxy);
 if (process.env.SKIP_NFT_WIRING !== "true") {
   let hash = await nft.write.setPaymentToken([paymentToken]);
@@ -200,10 +291,10 @@ if (process.env.SKIP_NFT_WIRING !== "true") {
     "  SKIP_NFT_WIRING=true — skipping AssetNFT wiring (call setters manually)",
   );
 }
+await sleep(STEP_DELAY_MS);
 
-// ─── [6/6] Verify deployment ──────────────────────────────────────────────────
-console.log("[6/6] Verifying deployment...");
-const market = await viem.getContractAt("NettyWorthMarketplace", proxy.address);
+// ─── [5/6] Verify deployment ──────────────────────────────────────────────────
+console.log("[5/6] Verifying deployment...");
 const pm = await viem.getContractAt(
   "PermissionManager",
   permissionManagerProxy,
@@ -216,9 +307,9 @@ const adminHasMarketplaceRole = await pm.read.hasProtocolRole([
 ]);
 
 const errors: string[] = [];
-if (actualMarketplace.toLowerCase() !== proxy.address.toLowerCase()) {
+if (actualMarketplace.toLowerCase() !== proxyAddress.toLowerCase()) {
   errors.push(
-    `  pool.marketplace: expected "${proxy.address}", got "${actualMarketplace}"`,
+    `  pool.marketplace: expected "${proxyAddress}", got "${actualMarketplace}"`,
   );
 }
 
@@ -229,11 +320,9 @@ if (errors.length > 0) {
 }
 
 console.log("\n=== NettyWorthMarketplace Deployment Successful ===");
-console.log(
-  `Network:              ${connection.networkName} (chainId: ${chainId})`,
-);
-console.log(`Implementation:       ${impl.address}`);
-console.log(`Proxy:                ${proxy.address}`);
+console.log(`Network:              ${networkName} (chainId: ${chainId})`);
+console.log(`Implementation:       ${implAddress}`);
+console.log(`Proxy:                ${proxyAddress}`);
 console.log(`PermissionManager:    ${permissionManagerProxy}`);
 console.log(`FeeController:        ${feeControllerProxy}`);
 console.log(`LendingPool:          ${lendingPoolProxy}`);
@@ -246,18 +335,11 @@ console.log(
 );
 console.log("====================================================\n");
 
-// ─── Persist deployment record ────────────────────────────────────────────────
-if (connection.networkConfig.type === "http") {
-  let existing: Record<string, unknown> = {};
-  try {
-    existing = JSON.parse(await readFile(deploymentPath, "utf8"));
-  } catch {
-    /**/
-  }
-
-  existing["NettyWorthMarketplace"] = {
-    proxy: proxy.address,
-    implementation: impl.address,
+// ─── [6/6] Final checkpoint ───────────────────────────────────────────────────
+if (isLive) {
+  await saveDeployment(networkName, "NettyWorthMarketplace", {
+    proxy: proxyAddress,
+    implementation: implAddress,
     permissionManager: permissionManagerProxy,
     feeController: feeControllerProxy,
     lendingPool: lendingPoolProxy,
@@ -265,11 +347,6 @@ if (connection.networkConfig.type === "http") {
     paymentToken,
     treasury,
     deployedAt: new Date().toISOString(),
-  };
-
-  await mkdir(deploymentsDir, { recursive: true });
-  await writeFile(deploymentPath, JSON.stringify(existing, null, 2) + "\n");
-  console.log(
-    `Deployment info saved to deployments/${connection.networkName}.json`,
-  );
+  });
+  console.log(`Deployment info saved to deployments/${networkName}.json`);
 }

@@ -47,6 +47,18 @@ const MARKETPLACE_ROLE = roleHash("MARKETPLACE_ROLE");
 // EIP-712 type definitions (must match Solidity typehashes exactly)
 // ---------------------------------------------------------------------------
 
+const SIGNED_OFFER_TYPES = {
+  SignedOffer: [
+    { name: "buyer", type: "address" },
+    { name: "collection", type: "address" },
+    { name: "tokenId", type: "uint256" },
+    { name: "paymentToken", type: "address" },
+    { name: "price", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "expiry", type: "uint256" },
+  ],
+} as const;
+
 const SIGNED_AUCTION_TYPES = {
   SignedAuction: [
     { name: "seller", type: "address" },
@@ -72,6 +84,16 @@ const SIGNED_BID_TYPES = {
     { name: "expiry", type: "uint256" },
   ],
 } as const;
+
+type SignedOffer = {
+  buyer: Address;
+  collection: Address;
+  tokenId: bigint;
+  paymentToken: Address;
+  price: bigint;
+  nonce: bigint;
+  expiry: bigint;
+};
 
 type SignedAuction = {
   seller: Address;
@@ -111,6 +133,7 @@ describe("NettyWorthMarketplace", async function () {
     walletBidder2,
     walletOperator,
     walletOther,
+    walletBuyer,
   ] = await viem.getWalletClients();
 
   const adminAddress = walletAdmin.account.address;
@@ -118,6 +141,7 @@ describe("NettyWorthMarketplace", async function () {
   const bidderAddress = walletBidder.account.address;
   const bidder2Address = walletBidder2.account.address;
   const operatorAddress = walletOperator.account.address;
+  const buyerAddress = walletBuyer.account.address;
 
   // treasury and royaltyReceiver are fixed addresses (not wallet clients)
   const treasuryAddress =
@@ -184,6 +208,26 @@ describe("NettyWorthMarketplace", async function () {
     });
   }
 
+  async function signOffer(
+    wallet: WalletClient,
+    offer: SignedOffer,
+    marketAddress: Address,
+  ): Promise<`0x${string}`> {
+    const chainId = await wallet.getChainId();
+    return wallet.signTypedData({
+      account: wallet.account!,
+      domain: {
+        name: "NettyWorthMarketplace",
+        version: "1",
+        chainId,
+        verifyingContract: marketAddress,
+      },
+      types: SIGNED_OFFER_TYPES,
+      primaryType: "SignedOffer",
+      message: offer,
+    });
+  }
+
   function makeDefaultAuction(
     tokenId: bigint,
     seller: Address,
@@ -246,16 +290,16 @@ describe("NettyWorthMarketplace", async function () {
     ]);
     const nft = await viem.getContractAt("AssetNFT", nftProxy.address);
 
-    // 4. AssetLendingPool
+    // 4. AssetLendingPoolConfig + AssetLendingPool
     //    For auction flow tests, the factory only needs isPackMachine() — use MockPackMachineFactory.
     const factory = await viem.deployContract(
       "contracts/test-helpers/MockPackMachineFactory.sol:MockPackMachineFactory",
     );
-    const poolImpl = await viem.deployContract("AssetLendingPool");
-    const poolProxy = await viem.deployContract("ERC1967ProxyHelper", [
-      poolImpl.address,
+    const configImpl = await viem.deployContract("AssetLendingPoolConfig");
+    const configProxy = await viem.deployContract("ERC1967ProxyHelper", [
+      configImpl.address,
       encodeFunctionData({
-        abi: poolImpl.abi,
+        abi: configImpl.abi,
         functionName: "initialize",
         args: [
           adminAddress,
@@ -267,6 +311,20 @@ describe("NettyWorthMarketplace", async function () {
           BigInt(7 * 24 * 3600),
           factory.address,
         ],
+      }),
+    ]);
+    const lendingConfig = await viem.getContractAt(
+      "AssetLendingPoolConfig",
+      configProxy.address,
+    );
+
+    const poolImpl = await viem.deployContract("AssetLendingPool");
+    const poolProxy = await viem.deployContract("ERC1967ProxyHelper", [
+      poolImpl.address,
+      encodeFunctionData({
+        abi: poolImpl.abi,
+        functionName: "initialize",
+        args: [adminAddress, lendingConfig.address],
       }),
     ]);
     const pool = await viem.getContractAt(
@@ -311,11 +369,11 @@ describe("NettyWorthMarketplace", async function () {
     // -----------------------------------------------------------------------
     // Wiring
     // -----------------------------------------------------------------------
-    // Pool: grant STATE_MANAGER_ROLE, authorize marketplace
+    // Pool: grant STATE_MANAGER_ROLE; authorize marketplace via config
     await pm.write.grantRole([STATE_MANAGER_ROLE, pool.address], {
       account: walletAdmin.account,
     });
-    await pool.write.setMarketplace([market.address], {
+    await lendingConfig.write.setMarketplace([market.address], {
       account: walletAdmin.account,
     });
 
@@ -338,19 +396,20 @@ describe("NettyWorthMarketplace", async function () {
     });
     await pool.write.deposit([POOL_SEED], { account: walletAdmin.account });
 
-    // Set appraisals (category 0 = uncategorized)
-    await pool.write.setAppraisal([1n, APPRAISAL, 80n, 0n], {
+    // Set appraisals via config (category 0 = uncategorized)
+    await lendingConfig.write.setAppraisal([1n, APPRAISAL, 80n, 0n], {
       account: walletAdmin.account,
     });
-    await pool.write.setAppraisal([2n, APPRAISAL, 80n, 0n], {
+    await lendingConfig.write.setAppraisal([2n, APPRAISAL, 80n, 0n], {
       account: walletAdmin.account,
     });
 
-    // Pre-fund bidder and operator; pre-approve marketplace
+    // Pre-fund bidder, buyer and operator; pre-approve marketplace
     for (const [addr, wallet] of [
       [bidderAddress, walletBidder],
       [bidder2Address, walletBidder2],
       [operatorAddress, walletOperator],
+      [buyerAddress, walletBuyer],
     ] as [Address, WalletClient][]) {
       await usdc.write.mint([addr, 10_000n * 10n ** 6n]);
       await usdc.write.approve([market.address, MAX_UINT], {
@@ -784,71 +843,70 @@ describe("NettyWorthMarketplace", async function () {
       await testClient.increaseTime({ seconds: 24 * 3600 + 1 });
       await testClient.mine({ blocks: 1 });
 
-      // ---- Step 3: operator purchases the defaulted asset ----
-      // DefaultRecord.outstandingValue == principal (interest not included in default record)
+      // ---- Step 3: MARKETPLACE_ROLE admin lists the defaulted asset via the marketplace ----
+      // market.listDefaultedAsset() calls pool.prepareDefaultedListing() internally.
+      // Admin holds MARKETPLACE_ROLE from setUp.
       const rec = await pool.read.getDefaultRecord([loanId]);
-      const claimPrice = rec.outstandingValue;
-
-      await usdc.write.approve([pool.address, claimPrice], {
-        account: walletOperator.account,
-      });
-      await pool.write.purchaseDefaultedAsset([loanId], {
-        account: walletOperator.account,
-      });
-
-      // Operator now owns token 1 in Held state
-      assert.equal(
-        getAddress(await nft.read.ownerOf([1n])),
-        getAddress(operatorAddress),
-      );
-      assert.equal(await nft.read.getAssetState([1n]), AssetState.Held);
-
-      // ---- Step 4: operator lists at auction (reserve = outstanding principal+interest) ----
-      await nft.write.approve([market.address, 1n], {
-        account: walletOperator.account,
-      });
+      const outstandingWithInterest = rec.outstandingValue + rec.interestValue;
+      const reservePrice = outstandingWithInterest;
 
       const auctionStart = await getBlockTimestamp();
-      const auction: SignedAuction = {
-        seller: operatorAddress,
-        collection: nft.address,
-        tokenId: 1n,
-        paymentToken: usdc.address,
-        reservePrice: outstanding,
-        minIncrement: MIN_INCREMENT,
-        startTime: auctionStart,
-        endTime: auctionStart + 86400n,
-        extensionWindow: EXTENSION_WINDOW,
-        extensionDuration: EXTENSION_DURATION,
-        nonce: 1n,
-      };
-      const auctionId = computeAuctionId(auction);
-      const auctionSig = await signAuction(
-        walletOperator,
-        auction,
-        market.address,
+      const endTime = auctionStart + 86400n;
+
+      const listTxHash = await market.write.listDefaultedAsset(
+        [
+          loanId,
+          1n, // tokenId
+          reservePrice,
+          MIN_INCREMENT,
+          auctionStart,
+          endTime,
+          EXTENSION_WINDOW,
+          EXTENSION_DURATION,
+        ],
+        { account: walletAdmin.account },
       );
 
-      // ---- Step 5: bidder commits a winning bid ----
-      const bidAmount = outstanding + 50n * 10n ** 6n;
+      // Extract auctionId from DefaultedAssetListed event (topic[2])
+      const listReceipt = await publicClient.waitForTransactionReceipt({ hash: listTxHash });
+      const defaultedAssetListedSig = "0x" + Buffer.from(
+        "DefaultedAssetListed(uint256,uint256,bytes32,uint256,uint256)"
+      ).reduce((acc, b) => acc + b.toString(16).padStart(2, "0"), "") as `0x${string}`;
+      // Use keccak256 of the event signature to find the log
+      const { keccak256: keccak256fn, toBytes: toBytesViem } = await import("viem");
+      const eventSig = keccak256fn(toBytesViem("DefaultedAssetListed(uint256,uint256,bytes32,uint256,uint256)"));
+      const listedLog = listReceipt.logs.find(l => l.topics[0] === eventSig);
+      assert.ok(listedLog, "DefaultedAssetListed event not found");
+      const auctionId = listedLog!.topics[3] as `0x${string}`;
+
+      // Pool still owns the NFT; NFT is in Held state
+      assert.equal(await nft.read.getAssetState([1n]), AssetState.Held);
+
+      // ---- Step 4: bidder approves marketplace and commits a pool bid ----
+      await usdc.write.approve([market.address, 10_000n * 10n ** 6n], {
+        account: walletBidder.account,
+      });
+
+      const bidAmount = outstandingWithInterest + 50n * 10n ** 6n;
+      const bidExpiry = auctionStart + 2n * 86400n;
       const bid: SignedBid = {
         auctionId,
         bidder: bidderAddress,
         amount: bidAmount,
-        nonce: 1n,
-        expiry: auctionStart + 2n * 86400n,
+        nonce: 100n,
+        expiry: bidExpiry,
       };
       const bidSig = await signBid(walletBidder, bid, market.address);
 
-      const operatorBefore = await usdc.read.balanceOf([operatorAddress]);
       const bidderTokensBefore = await usdc.read.balanceOf([bidderAddress]);
-      const treasuryBefore = await usdc.read.balanceOf([treasuryAddress]);
+      const poolBefore = await usdc.read.balanceOf([pool.address]);
 
-      await market.write.commitBid([auction, auctionSig, bid, bidSig], {
+      // Pool-default bids use commitPoolBid (no SignedAuction required)
+      await market.write.commitPoolBid([auctionId, bid, bidSig], {
         account: walletBidder.account,
       });
 
-      // ---- Step 6: settle after end ----
+      // ---- Step 5: settle after end ----
       await testClient.increaseTime({ seconds: 86401 });
       await testClient.mine({ blocks: 1 });
 
@@ -856,7 +914,7 @@ describe("NettyWorthMarketplace", async function () {
         account: walletOther.account,
       });
 
-      // NFT delivered to bidder in Held state
+      // NFT delivered to bidder
       assert.equal(
         getAddress(await nft.read.ownerOf([1n])),
         getAddress(bidderAddress),
@@ -869,19 +927,290 @@ describe("NettyWorthMarketplace", async function () {
         bidAmount,
       );
 
-      // Treasury received collectible fee (5% of bidAmount)
-      const expectedFee = (bidAmount * 500n) / 10_000n;
+      // Pool received proceeds (fees/royalty waived for pool-default sales)
+      assert.ok(await usdc.read.balanceOf([pool.address]) >= poolBefore + bidAmount);
+
+      // Auction settled; default record resolved
+      assert.equal((await market.read.getAuction([auctionId])).settled, true);
+      assert.equal((await pool.read.getDefaultRecord([loanId])).resolved, true);
+    });
+  });
+
+  // =========================================================================
+  // acceptOffer — happy path, no loan
+  // =========================================================================
+
+  describe("acceptOffer — happy path, no loan", async function () {
+    it("delivers NFT to buyer and distributes funds correctly", async function () {
+      const { usdc, nft, market } = await deploy();
+      const gross = 1_000n * 10n ** 6n;
+      const tokenId = 1n;
+
+      // Seller approves marketplace
+      await nft.write.approve([market.address, tokenId], {
+        account: walletSeller.account,
+      });
+
+      const ts = await getBlockTimestamp();
+      const offer: SignedOffer = {
+        buyer: buyerAddress,
+        collection: nft.address,
+        tokenId,
+        paymentToken: usdc.address,
+        price: gross,
+        nonce: 1n,
+        expiry: ts + 3600n,
+      };
+      const offerSig = await signOffer(walletBuyer, offer, market.address);
+
+      const buyerBefore = await usdc.read.balanceOf([buyerAddress]);
+      const treasuryBefore = await usdc.read.balanceOf([treasuryAddress]);
+      const royaltyBefore = await usdc.read.balanceOf([royaltyReceiverAddress]);
+      const sellerBefore = await usdc.read.balanceOf([sellerAddress]);
+
+      // Seller accepts the offer
+      await market.write.acceptOffer([offer, offerSig], {
+        account: walletSeller.account,
+      });
+
+      // NFT delivered to buyer
+      assert.equal(
+        getAddress(await nft.read.ownerOf([tokenId])),
+        getAddress(buyerAddress),
+      );
+
+      // Buyer paid gross
+      assert.equal(
+        buyerBefore - (await usdc.read.balanceOf([buyerAddress])),
+        gross,
+      );
+
+      // Treasury received 5% collectible fee
+      const expectedFee = (gross * 500n) / 10_000n;
       assert.equal(
         await usdc.read.balanceOf([treasuryAddress]),
         treasuryBefore + expectedFee,
       );
 
-      // Operator received net proceeds (bid - fee - royalty)
-      const operatorAfter = await usdc.read.balanceOf([operatorAddress]);
-      assert.ok(operatorAfter > operatorBefore);
+      // Royalty receiver received 5% royalty
+      const expectedRoyalty = (gross * 500n) / 10_000n;
+      assert.equal(
+        await usdc.read.balanceOf([royaltyReceiverAddress]),
+        royaltyBefore + expectedRoyalty,
+      );
 
-      // Auction settled
-      assert.equal((await market.read.getAuction([auctionId])).settled, true);
+      // Seller received net proceeds (gross - fee - royalty)
+      assert.equal(
+        (await usdc.read.balanceOf([sellerAddress])) - sellerBefore,
+        gross - expectedFee - expectedRoyalty,
+      );
+    });
+  });
+
+  // =========================================================================
+  // acceptOffer — loan branch: borrower accepts, loan auto-repaid
+  // =========================================================================
+
+  describe("acceptOffer — with active loan, borrower accepts", async function () {
+    it("repays loan atomically and delivers NFT to buyer", async function () {
+      const { usdc, nft, pool, market } = await deploy();
+      const tokenId = 1n;
+      const loanAmount = 400n * 10n ** 6n;
+
+      // Seller borrows against token 1
+      await nft.write.approve([pool.address, tokenId], {
+        account: walletSeller.account,
+      });
+      await pool.write.borrow([tokenId, loanAmount, 0], {
+        account: walletSeller.account,
+      });
+
+      const loanDebt = await pool.read.getLoanDebt([tokenId]);
+      const totalDebt = loanDebt[2]; // principal + interest
+
+      // Gross must cover fee (5%) + royalty (5%) + loanDebt
+      // gross = totalDebt / (1 - 0.10) + buffer
+      const gross = (totalDebt * 10_000n) / 8_000n + 2_000_000n;
+
+      const ts = await getBlockTimestamp();
+      const offer: SignedOffer = {
+        buyer: buyerAddress,
+        collection: nft.address,
+        tokenId,
+        paymentToken: usdc.address,
+        price: gross,
+        nonce: 10n,
+        expiry: ts + 3600n,
+      };
+      const offerSig = await signOffer(walletBuyer, offer, market.address);
+
+      const poolBefore = await usdc.read.balanceOf([pool.address]);
+      const sellerBefore = await usdc.read.balanceOf([sellerAddress]);
+
+      // Borrower (seller) accepts
+      await market.write.acceptOffer([offer, offerSig], {
+        account: walletSeller.account,
+      });
+
+      // NFT delivered to buyer
+      assert.equal(
+        getAddress(await nft.read.ownerOf([tokenId])),
+        getAddress(buyerAddress),
+      );
+      // Active loan cleared
+      assert.equal(await pool.read.getActiveLoanId([tokenId]), 0n);
+      // Pool received at least the loan debt
+      assert.ok(
+        (await usdc.read.balanceOf([pool.address])) >= poolBefore + totalDebt,
+      );
+      // Seller received net proceeds
+      assert.ok((await usdc.read.balanceOf([sellerAddress])) > sellerBefore);
+    });
+  });
+
+  // =========================================================================
+  // acceptOffer — non-borrower cannot accept on a collateralised token
+  // =========================================================================
+
+  describe("acceptOffer — non-borrower cannot accept on loaned token", async function () {
+    it("reverts NotTokenOwner when caller is not the loan borrower", async function () {
+      const { usdc, nft, pool, market } = await deploy();
+      const tokenId = 1n;
+
+      // Seller borrows against token 1
+      await nft.write.approve([pool.address, tokenId], {
+        account: walletSeller.account,
+      });
+      await pool.write.borrow([tokenId, 400n * 10n ** 6n, 0], {
+        account: walletSeller.account,
+      });
+
+      const loanDebt = (await pool.read.getLoanDebt([tokenId]))[2];
+      const gross = loanDebt * 2n;
+
+      const ts = await getBlockTimestamp();
+      const offer: SignedOffer = {
+        buyer: buyerAddress,
+        collection: nft.address,
+        tokenId,
+        paymentToken: usdc.address,
+        price: gross,
+        nonce: 20n,
+        expiry: ts + 3600n,
+      };
+      const offerSig = await signOffer(walletBuyer, offer, market.address);
+
+      // walletOther (not the borrower) calls acceptOffer → must revert
+      await assert.rejects(
+        market.write.acceptOffer([offer, offerSig], {
+          account: walletOther.account,
+        }),
+        /NotTokenOwner/,
+      );
+    });
+  });
+
+  // =========================================================================
+  // acceptOffer — revert on bad signature
+  // =========================================================================
+
+  describe("acceptOffer — bad signature reverts", async function () {
+    it("reverts InvalidSignature when sig was not made by offer.buyer", async function () {
+      const { usdc, nft, market } = await deploy();
+
+      await nft.write.approve([market.address, 1n], {
+        account: walletSeller.account,
+      });
+
+      const ts = await getBlockTimestamp();
+      const offer: SignedOffer = {
+        buyer: buyerAddress,
+        collection: nft.address,
+        tokenId: 1n,
+        paymentToken: usdc.address,
+        price: 1_000n * 10n ** 6n,
+        nonce: 1n,
+        expiry: ts + 3600n,
+      };
+      // Sign with a different wallet (bidder)
+      const badSig = await signOffer(walletBidder, offer, market.address);
+
+      await assert.rejects(
+        market.write.acceptOffer([offer, badSig], {
+          account: walletSeller.account,
+        }),
+        /InvalidSignature/,
+      );
+    });
+  });
+
+  // =========================================================================
+  // acceptOffer — revert on expired offer
+  // =========================================================================
+
+  describe("acceptOffer — expired offer reverts", async function () {
+    it("reverts Expired when block.timestamp > offer.expiry", async function () {
+      const { usdc, nft, market } = await deploy();
+
+      await nft.write.approve([market.address, 1n], {
+        account: walletSeller.account,
+      });
+
+      const ts = await getBlockTimestamp();
+      const offer: SignedOffer = {
+        buyer: buyerAddress,
+        collection: nft.address,
+        tokenId: 1n,
+        paymentToken: usdc.address,
+        price: 1_000n * 10n ** 6n,
+        nonce: 1n,
+        expiry: ts - 1n, // already expired
+      };
+      const offerSig = await signOffer(walletBuyer, offer, market.address);
+
+      await assert.rejects(
+        market.write.acceptOffer([offer, offerSig], {
+          account: walletSeller.account,
+        }),
+        /Expired/,
+      );
+    });
+  });
+
+  // =========================================================================
+  // acceptOffer — cancelNonce blocks acceptance
+  // =========================================================================
+
+  describe("acceptOffer — cancelNonce blocks future acceptance", async function () {
+    it("buyer can invalidate their nonce to prevent acceptance", async function () {
+      const { usdc, nft, market } = await deploy();
+
+      await nft.write.approve([market.address, 1n], {
+        account: walletSeller.account,
+      });
+
+      // Buyer cancels nonce 77
+      await market.write.cancelNonce([77n], { account: walletBuyer.account });
+      assert.equal(await market.read.isNonceUsed([buyerAddress, 77n]), true);
+
+      const ts = await getBlockTimestamp();
+      const offer: SignedOffer = {
+        buyer: buyerAddress,
+        collection: nft.address,
+        tokenId: 1n,
+        paymentToken: usdc.address,
+        price: 1_000n * 10n ** 6n,
+        nonce: 77n,
+        expiry: ts + 3600n,
+      };
+      const offerSig = await signOffer(walletBuyer, offer, market.address);
+
+      await assert.rejects(
+        market.write.acceptOffer([offer, offerSig], {
+          account: walletSeller.account,
+        }),
+        /NonceUsed/,
+      );
     });
   });
 });

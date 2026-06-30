@@ -75,6 +75,17 @@ contract NettyWorthMarketplace is
         "SignedBid(bytes32 auctionId,address bidder,uint256 amount,uint256 nonce,uint256 expiry)"
     );
 
+    bytes32 private constant SIGNED_OFFER_TYPEHASH = keccak256(
+        "SignedOffer(address buyer,address collection,uint256 tokenId,address paymentToken,"
+        "uint256 price,uint256 nonce,uint256 expiry)"
+    );
+
+    /// @dev Domain tag for pool-default auction IDs. Distinct from the EIP-712 SIGNED_AUCTION_TYPEHASH
+    ///      space so a pool auctionId can never alias a seller-signed auctionId.
+    bytes32 private constant POOL_AUCTION_TAG = keccak256(
+        "nettyworth.pool.default.auction"
+    );
+
     // =========================================================================
     // Storage (ERC-7201)
     // =========================================================================
@@ -92,13 +103,27 @@ contract NettyWorthMarketplace is
         mapping(address signer => mapping(uint256 nonce => bool)) usedNonces;
         /// @dev On-chain auction state keyed by auctionId (materialised on first valid bid).
         mapping(bytes32 auctionId => AuctionState) auctions;
+        // ---- appended fields (append-only for upgrade safety) ----
+        /// @dev For pool-default sales: maps collateral tokenId → loanId.
+        ///      Non-zero means this tokenId is part of a defaulted-asset auction listed by
+        ///      listDefaultedAsset. Used in _executeSale to detect pool-default sales and waive
+        ///      fees/royalty. Cleared on settlement or cancellation.
+        mapping(uint256 tokenId => uint256 loanId) poolDefaultLoanOf;
+        /// @dev For pool-default sales: maps auctionId → loanId.
+        ///      Used in settleAuction and cancelAuction to route the pool callback.
+        ///      Cleared on settlement or cancellation.
+        mapping(bytes32 auctionId => uint256 loanId) poolDefaultAuctionLoanOf;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.NettyWorthMarketplace")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant MARKETPLACE_STORAGE_SLOT =
         0x1b62b54db2d4d5c73083078cc269c4036b01ae06fa994c0368f121e766c05600;
 
-    function _getMarketplaceStorage() private pure returns (MarketplaceStorage storage $) {
+    function _getMarketplaceStorage()
+        private
+        pure
+        returns (MarketplaceStorage storage $)
+    {
         // solhint-disable-next-line no-inline-assembly
         assembly {
             $.slot := MARKETPLACE_STORAGE_SLOT
@@ -215,6 +240,79 @@ contract NettyWorthMarketplace is
     }
 
     // =========================================================================
+    // Buy offer: accept
+    // =========================================================================
+
+    /// @inheritdoc INettyWorthMarketplace
+    function acceptOffer(
+        SignedOffer calldata offer,
+        bytes calldata sig
+    ) external override nonReentrant whenNotPaused {
+        MarketplaceStorage storage $ = _getMarketplaceStorage();
+
+        // --- Validate buyer's signature ---
+        bytes32 structHash = keccak256(
+            abi.encode(
+                SIGNED_OFFER_TYPEHASH,
+                offer.buyer,
+                offer.collection,
+                offer.tokenId,
+                offer.paymentToken,
+                offer.price,
+                offer.nonce,
+                offer.expiry
+            )
+        );
+        address signer = _hashTypedDataV4(structHash).recover(sig);
+        if (signer != offer.buyer) revert Marketplace__InvalidSignature();
+
+        // --- Replay protection (CEI: mark before external calls) ---
+        if ($.usedNonces[offer.buyer][offer.nonce]) {
+            revert Marketplace__NonceUsed(offer.buyer, offer.nonce);
+        }
+        $.usedNonces[offer.buyer][offer.nonce] = true;
+
+        // --- Validate offer parameters ---
+        if (block.timestamp > offer.expiry) revert Marketplace__Expired();
+        if (!$.allowedCollections[offer.collection]) {
+            revert Marketplace__CollectionNotAllowed(offer.collection);
+        }
+        if (!$.allowedPaymentTokens[offer.paymentToken]) {
+            revert Marketplace__PaymentTokenNotAllowed(offer.paymentToken);
+        }
+
+        // --- Authorization guard for collateralised tokens ---
+        // Non-loaned branch: transferFrom(seller, buyer) in _executeSale is self-enforcing
+        // (msg.sender must own the NFT and have approved the marketplace).
+        // Loaned branch: the pool delivers the NFT regardless of who calls, so we must
+        // explicitly verify msg.sender is the borrower before external calls (CEI).
+        uint256 activeLoanId = $.lendingPool.getActiveLoanId(offer.tokenId);
+        if (activeLoanId != 0) {
+            address borrower = $.lendingPool.getLoan(activeLoanId).borrower;
+            if (msg.sender != borrower) revert Marketplace__NotTokenOwner();
+        }
+
+        _executeSale(
+            $,
+            msg.sender, // seller
+            offer.collection,
+            offer.tokenId,
+            offer.paymentToken,
+            offer.price,
+            offer.buyer
+        );
+
+        emit OfferAccepted(
+            offer.buyer,
+            msg.sender,
+            offer.collection,
+            offer.tokenId,
+            offer.paymentToken,
+            offer.price
+        );
+    }
+
+    // =========================================================================
     // Auction: commit bid
     // =========================================================================
 
@@ -230,8 +328,11 @@ contract NettyWorthMarketplace is
         // --- Validate auction signature ---
         bytes32 auctionId = _hashAuction(auction);
         {
-            address auctionSigner = _hashTypedDataV4(auctionId).recover(auctionSig);
-            if (auctionSigner != auction.seller) revert Marketplace__InvalidSignature();
+            address auctionSigner = _hashTypedDataV4(auctionId).recover(
+                auctionSig
+            );
+            if (auctionSigner != auction.seller)
+                revert Marketplace__InvalidSignature();
         }
 
         // --- Validate bid signature ---
@@ -268,14 +369,17 @@ contract NettyWorthMarketplace is
         }
 
         // --- Validate bid timing ---
-        if (block.timestamp < auction.startTime) revert Marketplace__NotStarted();
-        if (bid.expiry != 0 && block.timestamp > bid.expiry) revert Marketplace__Expired();
+        if (block.timestamp < auction.startTime)
+            revert Marketplace__NotStarted();
+        if (bid.expiry != 0 && block.timestamp > bid.expiry)
+            revert Marketplace__Expired();
 
         AuctionState storage state = $.auctions[auctionId];
 
         if (!state.exists) {
             // First bid: materialise auction state from the signed auction
-            if (block.timestamp > auction.endTime) revert Marketplace__AuctionEnded();
+            if (block.timestamp > auction.endTime)
+                revert Marketplace__AuctionEnded();
             if (bid.amount < auction.reservePrice) {
                 revert Marketplace__BidTooLow(bid.amount, auction.reservePrice);
             }
@@ -292,9 +396,11 @@ contract NettyWorthMarketplace is
         } else {
             // Subsequent bid: must beat current highest + minIncrement
             if (state.settled) revert Marketplace__AuctionAlreadySettled();
-            if (block.timestamp > state.endTime) revert Marketplace__AuctionEnded();
+            if (block.timestamp > state.endTime)
+                revert Marketplace__AuctionEnded();
             uint256 minRequired = state.highestBid + state.minIncrement;
-            if (bid.amount < minRequired) revert Marketplace__BidTooLow(bid.amount, minRequired);
+            if (bid.amount < minRequired)
+                revert Marketplace__BidTooLow(bid.amount, minRequired);
         }
 
         state.highestBidder = bid.bidder;
@@ -318,7 +424,9 @@ contract NettyWorthMarketplace is
     // =========================================================================
 
     /// @inheritdoc INettyWorthMarketplace
-    function settleAuction(bytes32 auctionId) external override nonReentrant whenNotPaused {
+    function settleAuction(
+        bytes32 auctionId
+    ) external override nonReentrant whenNotPaused {
         MarketplaceStorage storage $ = _getMarketplaceStorage();
         AuctionState storage state = $.auctions[auctionId];
 
@@ -327,8 +435,18 @@ contract NettyWorthMarketplace is
         if (state.highestBidder == address(0)) revert Marketplace__NoBids();
 
         // Anyone may settle after endTime; MARKETPLACE_ROLE may force-close early
-        bool isAdmin = _getPermissionManager().hasProtocolRole(Roles.MARKETPLACE_ROLE, msg.sender);
-        if (!isAdmin && block.timestamp <= state.endTime) revert Marketplace__AuctionNotEnded();
+        bool isAdmin = _getPermissionManager().hasProtocolRole(
+            Roles.MARKETPLACE_ROLE,
+            msg.sender
+        );
+        if (!isAdmin && block.timestamp <= state.endTime)
+            revert Marketplace__AuctionNotEnded();
+
+        // Cache values needed after _executeSale (state.highestBid read before settled=true is fine;
+        // settled is set first per CEI to prevent re-entry through the pool callback).
+        uint256 winningBid = state.highestBid;
+        address winner = state.highestBidder;
+        uint256 tokenId = state.tokenId;
 
         // Mark settled before external calls (CEI)
         state.settled = true;
@@ -337,13 +455,187 @@ contract NettyWorthMarketplace is
             $,
             state.seller,
             state.collection,
-            state.tokenId,
+            tokenId,
             state.paymentToken,
-            state.highestBid,
-            state.highestBidder
+            winningBid,
+            winner
         );
 
-        emit AuctionSettled(auctionId, state.highestBidder, state.highestBid);
+        // Pool-default callback: if this was a pool-default auction, resolve the default record.
+        // Called after _executeSale (proceeds already transferred to pool as sellerProceeds).
+        uint256 poolLoanId = $.poolDefaultAuctionLoanOf[auctionId];
+        if (poolLoanId != 0) {
+            // Clear maps before the external callback (CEI).
+            delete $.poolDefaultAuctionLoanOf[auctionId];
+            delete $.poolDefaultLoanOf[tokenId];
+            // Inform the pool: principal round-trip, interest distribution, surplus booking.
+            $.lendingPool.onDefaultedAssetSold(poolLoanId, winningBid);
+        }
+
+        emit AuctionSettled(auctionId, winner, winningBid);
+    }
+
+    // =========================================================================
+    // Pool-default auction: list + bid
+    // =========================================================================
+
+    /// @inheritdoc INettyWorthMarketplace
+    function listDefaultedAsset(
+        uint256 loanId,
+        uint256 tokenId,
+        uint256 reservePrice,
+        uint256 minIncrement,
+        uint256 /* startTime */, // not stored in AuctionState; bidders enforce via bid.expiry
+        uint256 endTime,
+        uint256 extensionWindow,
+        uint256 extensionDuration
+    ) external override onlyProtocolRole(Roles.MARKETPLACE_ROLE) whenNotPaused {
+        MarketplaceStorage storage $ = _getMarketplaceStorage();
+
+        // Validate via pool: must be past acquisition window, unresolved, single-token.
+        // prepareDefaultedListing enforces all of the above and sets listedOnMarketplace=true.
+        uint256[] memory tokenIds = $.lendingPool.prepareDefaultedListing(
+            loanId
+        );
+        // prepareDefaultedListing already enforces tokenIds.length == 1, but confirm tokenId matches.
+        if (tokenIds[0] != tokenId) revert Marketplace__InvalidSignature(); // reuse; means param mismatch
+
+        // Validate reserve >= outstanding value.
+        // outstanding = principal + interest; getLoanDebt returns 0 for defaulted tokens,
+        // so we read directly from the pool's default record via a view added in the interface.
+        {
+            IAssetLendingPool.DefaultRecord memory rec = $
+                .lendingPool
+                .getDefaultRecord(loanId);
+            uint256 outstanding = rec.outstandingValue + rec.interestValue;
+            if (reservePrice < outstanding)
+                revert Marketplace__ReserveBelowOutstanding(
+                    reservePrice,
+                    outstanding
+                );
+        }
+
+        address lendingPool = address($.lendingPool);
+
+        // Read collection + paymentToken from the pool's PoolInfo (avoids adding new getters).
+        IAssetLendingPool.PoolInfo memory poolInfo = $
+            .lendingPool
+            .getPoolInfo();
+        address collection = poolInfo.assetNFT;
+        address paymentToken = poolInfo.paymentToken;
+
+        // Compute a domain-separated auctionId distinct from the EIP-712 seller-signed space.
+        bytes32 auctionId = keccak256(
+            abi.encode(
+                POOL_AUCTION_TAG,
+                loanId,
+                tokenId,
+                endTime,
+                block.timestamp
+            )
+        );
+
+        // Materialize the AuctionState directly (no seller signature required).
+        AuctionState storage state = $.auctions[auctionId];
+        // Guard against an astronomically unlikely collision.
+        if (state.exists) revert Marketplace__AuctionAlreadySettled();
+
+        state.seller = lendingPool;
+        state.collection = collection;
+        state.tokenId = tokenId;
+        state.paymentToken = paymentToken;
+        state.endTime = endTime;
+        state.extensionWindow = extensionWindow;
+        state.extensionDuration = extensionDuration;
+        state.minIncrement = minIncrement;
+        state.reservePrice = reservePrice;
+        state.exists = true;
+        state.settled = false;
+
+        // Record the loanId linkage for settleAuction/cancelAuction callbacks.
+        $.poolDefaultLoanOf[tokenId] = loanId;
+        $.poolDefaultAuctionLoanOf[auctionId] = loanId;
+
+        emit DefaultedAssetListed(
+            loanId,
+            tokenId,
+            auctionId,
+            reservePrice,
+            endTime
+        );
+    }
+
+    /// @inheritdoc INettyWorthMarketplace
+    function commitPoolBid(
+        bytes32 auctionId,
+        SignedBid calldata bid,
+        bytes calldata bidSig
+    ) external override nonReentrant whenNotPaused {
+        MarketplaceStorage storage $ = _getMarketplaceStorage();
+        AuctionState storage state = $.auctions[auctionId];
+
+        // Must be a pre-materialized pool-default auction.
+        if (!state.exists) revert Marketplace__AuctionNotFound();
+        if ($.poolDefaultAuctionLoanOf[auctionId] == 0)
+            revert Marketplace__NotPoolDefaultAuction();
+
+        // --- Validate bid signature ---
+        bytes32 bidStructHash = keccak256(
+            abi.encode(
+                SIGNED_BID_TYPEHASH,
+                bid.auctionId,
+                bid.bidder,
+                bid.amount,
+                bid.nonce,
+                bid.expiry
+            )
+        );
+        {
+            address bidSigner = _hashTypedDataV4(bidStructHash).recover(bidSig);
+            if (bidSigner != bid.bidder) revert Marketplace__InvalidSignature();
+        }
+
+        // Cross-reference: bid must target this auctionId.
+        if (bid.auctionId != auctionId) revert Marketplace__InvalidSignature();
+
+        // --- Bid nonce replay protection (CEI) ---
+        if ($.usedNonces[bid.bidder][bid.nonce]) {
+            revert Marketplace__NonceUsed(bid.bidder, bid.nonce);
+        }
+        $.usedNonces[bid.bidder][bid.nonce] = true;
+
+        // --- Timing ---
+        if (bid.expiry != 0 && block.timestamp > bid.expiry)
+            revert Marketplace__Expired();
+        if (state.settled) revert Marketplace__AuctionAlreadySettled();
+        if (block.timestamp > state.endTime) revert Marketplace__AuctionEnded();
+
+        // --- Reserve / increment enforcement ---
+        if (state.highestBidder == address(0)) {
+            // First bid: must meet reserve.
+            if (bid.amount < state.reservePrice)
+                revert Marketplace__BidTooLow(bid.amount, state.reservePrice);
+        } else {
+            // Subsequent bid: must beat current highest + minIncrement.
+            uint256 minRequired = state.highestBid + state.minIncrement;
+            if (bid.amount < minRequired)
+                revert Marketplace__BidTooLow(bid.amount, minRequired);
+        }
+
+        state.highestBidder = bid.bidder;
+        state.highestBid = bid.amount;
+
+        // --- Last-minute time extension ---
+        uint256 newEndTime = state.endTime;
+        if (
+            state.extensionWindow > 0 &&
+            block.timestamp > state.endTime - state.extensionWindow
+        ) {
+            newEndTime = state.endTime + state.extensionDuration;
+            state.endTime = newEndTime;
+        }
+
+        emit BidCommitted(auctionId, bid.bidder, bid.amount, newEndTime);
     }
 
     // =========================================================================
@@ -353,23 +645,40 @@ contract NettyWorthMarketplace is
     /// @inheritdoc INettyWorthMarketplace
     function cancelNonce(uint256 nonce) external override {
         MarketplaceStorage storage $ = _getMarketplaceStorage();
-        if ($.usedNonces[msg.sender][nonce]) revert Marketplace__NonceUsed(msg.sender, nonce);
+        if ($.usedNonces[msg.sender][nonce])
+            revert Marketplace__NonceUsed(msg.sender, nonce);
         $.usedNonces[msg.sender][nonce] = true;
         emit NonceCancelled(msg.sender, nonce);
     }
 
     /// @inheritdoc INettyWorthMarketplace
-    function cancelAuction(bytes32 auctionId) external override {
+    function cancelAuction(bytes32 auctionId) external override nonReentrant {
         MarketplaceStorage storage $ = _getMarketplaceStorage();
         AuctionState storage state = $.auctions[auctionId];
 
         if (!state.exists) revert Marketplace__AuctionNotFound();
         if (state.settled) revert Marketplace__AuctionAlreadySettled();
 
-        bool isAdmin = _getPermissionManager().hasProtocolRole(Roles.MARKETPLACE_ROLE, msg.sender);
-        if (!isAdmin && msg.sender != state.seller) revert Marketplace__NotSeller();
+        bool isAdmin = _getPermissionManager().hasProtocolRole(
+            Roles.MARKETPLACE_ROLE,
+            msg.sender
+        );
+        if (!isAdmin && msg.sender != state.seller)
+            revert Marketplace__NotSeller();
 
+        uint256 tokenId = state.tokenId;
         state.settled = true; // mark as done so it can't be re-settled
+
+        // Pool-default cleanup: reset the pool's listedOnMarketplace flag so the operator can relist.
+        uint256 poolLoanId = $.poolDefaultAuctionLoanOf[auctionId];
+        if (poolLoanId != 0) {
+            // Clear maps before the external callback (CEI).
+            delete $.poolDefaultAuctionLoanOf[auctionId];
+            delete $.poolDefaultLoanOf[tokenId];
+            // Notify the pool so it can reset listedOnMarketplace for relist.
+            $.lendingPool.onDefaultedListingCancelled(poolLoanId);
+        }
+
         emit AuctionCancelled(auctionId, msg.sender);
     }
 
@@ -437,7 +746,9 @@ contract NettyWorthMarketplace is
     // =========================================================================
 
     /// @inheritdoc INettyWorthMarketplace
-    function getAuction(bytes32 auctionId) external view override returns (AuctionState memory) {
+    function getAuction(
+        bytes32 auctionId
+    ) external view override returns (AuctionState memory) {
         return _getMarketplaceStorage().auctions[auctionId];
     }
 
@@ -462,15 +773,18 @@ contract NettyWorthMarketplace is
 
     /// @dev Shared sale path for both fixed-price and auction settlement.
     ///      Steps (CEI respected — nonce/settled flag set before this call):
-    ///        1. Compute collectible fee from FeeController.
-    ///        2. Compute royalty from EIP-2981 (capped).
-    ///        3. Check minPrice (gross >= collectibleFee + royalty + loanDebt).
-    ///        4. Pull gross from buyer into this contract.
-    ///        5. Distribute collectible fee → treasury.
-    ///        6. Distribute royalty → royalty receiver.
-    ///        7a. If loan: approve pool + call settleLoanRepaymentOnSale (pool delivers NFT).
-    ///        7b. If no loan: transferFrom(seller, buyer).
-    ///        8. Pay seller net proceeds.
+    ///        1. Detect pool-default sale (tokenId in poolDefaultLoanOf map) — waive fee+royalty.
+    ///        2. Compute collectible fee from FeeController (skipped for pool-default).
+    ///        3. Compute royalty from EIP-2981 (skipped for pool-default; capped otherwise).
+    ///        4. Check minPrice (gross >= collectibleFee + royalty + loanDebt).
+    ///        5. Pull gross from buyer into this contract.
+    ///        6. Distribute collectible fee → treasury.
+    ///        7. Distribute royalty → royalty receiver.
+    ///        8a. If active loan: approve pool + call settleLoanRepaymentOnSale (pool delivers NFT).
+    ///        8b. If no loan (incl. pool-default): transferFrom(seller, buyer).
+    ///        9. Pay seller net proceeds.
+    ///        Note: for pool-default sales, settleAuction calls onDefaultedAssetSold afterward
+    ///        (after this function returns) to resolve the default record in the pool.
     function _executeSale(
         MarketplaceStorage storage $,
         address seller,
@@ -480,65 +794,83 @@ contract NettyWorthMarketplace is
         uint256 gross,
         address buyer
     ) internal {
-        // 1. Collectible fee
-        (uint256 collectibleFee, ) = $.feeController.getCollectibleFee(gross);
+        // 1. Pool-default detection: if this tokenId was listed by listDefaultedAsset, waive
+        //    collectible fee and royalty so the pool receives full gross proceeds (= winning bid).
+        //    Reserve enforcement already ensured gross >= principal+interest at bid time.
+        bool isPoolDefault = $.poolDefaultLoanOf[tokenId] != 0;
 
-        // 2. Royalty (EIP-2981, try/catch, capped so it can't consume all proceeds)
+        uint256 collectibleFee = 0;
         uint256 royalty = 0;
         address royaltyReceiver = address(0);
-        try IERC2981(collection).royaltyInfo(tokenId, gross) returns (
-            address receiver,
-            uint256 amount
-        ) {
-            // Cap: royalty + collectible fee must not exceed gross - loanDebt
-            // (we re-cap after loan lookup below; preliminary cap to avoid overflow)
-            royaltyReceiver = receiver;
-            royalty = amount;
-        } catch {} // solhint-disable-line no-empty-blocks
 
-        // 3. Loan debt
-        ( , , uint256 loanDebt) = $.lendingPool.getLoanDebt(tokenId);
-        uint256 loanId = loanDebt > 0 ? $.lendingPool.getActiveLoanId(tokenId) : 0;
+        if (!isPoolDefault) {
+            // 2. Collectible fee (normal path only)
+            (collectibleFee, ) = $.feeController.getCollectibleFee(gross);
 
-        // Cap royalty: royalty must not exceed (gross - collectibleFee - loanDebt)
-        if (collectibleFee + loanDebt < gross) {
-            uint256 maxRoyalty = gross - collectibleFee - loanDebt;
-            if (royalty > maxRoyalty) royalty = maxRoyalty;
-        } else {
-            royalty = 0;
+            // 3. Royalty (EIP-2981, try/catch, capped; normal path only)
+            try IERC2981(collection).royaltyInfo(tokenId, gross) returns (
+                address receiver,
+                uint256 amount
+            ) {
+                royaltyReceiver = receiver;
+                royalty = amount;
+            } catch {} // solhint-disable-line no-empty-blocks
         }
 
-        // MinPrice enforcement: gross must cover fees + loan
+        // 4. Loan debt (active loan check — always zero for pool-default since tokenIdToActiveLoan
+        //    was cleared by _initiateDefault, but checked uniformly for correctness)
+        (, , uint256 loanDebt) = $.lendingPool.getLoanDebt(tokenId);
+        uint256 activeLoanId =
+            loanDebt > 0 ? $.lendingPool.getActiveLoanId(tokenId) : 0;
+
+        if (!isPoolDefault) {
+            // Cap royalty: must not exceed (gross - collectibleFee - loanDebt)
+            if (collectibleFee + loanDebt < gross) {
+                uint256 maxRoyalty = gross - collectibleFee - loanDebt;
+                if (royalty > maxRoyalty) royalty = maxRoyalty;
+            } else {
+                royalty = 0;
+            }
+        }
+
+        // MinPrice enforcement: gross must cover fees + loan (for pool-default: fees=0, loanDebt=0)
         uint256 required = collectibleFee + royalty + loanDebt;
-        if (gross < required) revert Marketplace__PriceBelowMinimum(gross, required);
+        if (gross < required)
+            revert Marketplace__PriceBelowMinimum(gross, required);
 
         uint256 sellerProceeds = gross - collectibleFee - royalty - loanDebt;
 
-        // 4. Pull gross from buyer
+        // 5. Pull gross from buyer
         IERC20(paymentToken).safeTransferFrom(buyer, address(this), gross);
 
-        // 5. Collectible fee → treasury
+        // 6. Collectible fee → treasury
         if (collectibleFee > 0) {
             IERC20(paymentToken).safeTransfer($.treasury, collectibleFee);
         }
 
-        // 6. Royalty → receiver
+        // 7. Royalty → receiver
         if (royalty > 0 && royaltyReceiver != address(0)) {
             IERC20(paymentToken).safeTransfer(royaltyReceiver, royalty);
         }
 
-        // 7. NFT delivery
+        // 8. NFT delivery
         if (loanDebt > 0) {
-            // 7a. Loan branch: approve pool then settle atomically
+            // 8a. Active loan branch: approve pool then settle atomically.
             //     Pool pulls loanDebt from this contract, clears the loan, and delivers NFT to buyer.
             IERC20(paymentToken).forceApprove(address($.lendingPool), loanDebt);
-            $.lendingPool.settleLoanRepaymentOnSale(loanId, address(this), buyer);
+            $.lendingPool.settleLoanRepaymentOnSale(
+                activeLoanId,
+                address(this),
+                buyer
+            );
         } else {
-            // 7b. No loan: seller still holds the NFT in Held state; transfer directly.
+            // 8b. No active loan (normal seller or pool-default): transfer from seller directly.
+            //     For pool-default, seller == lendingPool and the pool pre-approved this contract
+            //     via prepareDefaultedListing.
             IAssetNFT(collection).transferFrom(seller, buyer, tokenId);
         }
 
-        // 8. Seller proceeds
+        // 9. Seller proceeds → seller (for pool-default: sellerProceeds == gross → pool)
         if (sellerProceeds > 0) {
             IERC20(paymentToken).safeTransfer(seller, sellerProceeds);
         }
@@ -561,23 +893,26 @@ contract NettyWorthMarketplace is
     // Internal: EIP-712 struct hashing helpers
     // =========================================================================
 
-    function _hashAuction(SignedAuction calldata auction) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                SIGNED_AUCTION_TYPEHASH,
-                auction.seller,
-                auction.collection,
-                auction.tokenId,
-                auction.paymentToken,
-                auction.reservePrice,
-                auction.minIncrement,
-                auction.startTime,
-                auction.endTime,
-                auction.extensionWindow,
-                auction.extensionDuration,
-                auction.nonce
-            )
-        );
+    function _hashAuction(
+        SignedAuction calldata auction
+    ) internal pure returns (bytes32) {
+        return
+            keccak256(
+                abi.encode(
+                    SIGNED_AUCTION_TYPEHASH,
+                    auction.seller,
+                    auction.collection,
+                    auction.tokenId,
+                    auction.paymentToken,
+                    auction.reservePrice,
+                    auction.minIncrement,
+                    auction.startTime,
+                    auction.endTime,
+                    auction.extensionWindow,
+                    auction.extensionDuration,
+                    auction.nonce
+                )
+            );
     }
 
     // =========================================================================
@@ -601,7 +936,11 @@ contract NettyWorthMarketplace is
     // =========================================================================
 
     /// @dev Returns the active PermissionManager as IPermissionManager, for ad-hoc role checks.
-    function _getPermissionManager() internal view returns (IPermissionManager) {
+    function _getPermissionManager()
+        internal
+        view
+        returns (IPermissionManager)
+    {
         return IPermissionManager(getPermissionManager());
     }
 }

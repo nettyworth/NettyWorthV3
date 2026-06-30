@@ -9,6 +9,19 @@ interface INettyWorthMarketplace {
     // Structs
     // =========================================================================
 
+    /// @notice Off-chain signed buy offer submitted by the buyer (EIP-712).
+    ///         The buyer pre-approves the marketplace for `price` of `paymentToken`;
+    ///         the token owner (or loan borrower) calls acceptOffer to execute.
+    struct SignedOffer {
+        address buyer;
+        address collection;    // NFT contract address (must be in allowedCollections)
+        uint256 tokenId;
+        address paymentToken;  // ERC20 payment token (must be in allowedPaymentTokens)
+        uint256 price;         // gross offer amount in payment token units
+        uint256 nonce;         // per-signer nonce; invalidated on use or cancel
+        uint256 expiry;        // unix timestamp; must be > block.timestamp at acceptance
+    }
+
     /// @notice Off-chain signed fixed-price listing (EIP-712).
     struct SignedListing {
         address seller;
@@ -65,6 +78,17 @@ interface INettyWorthMarketplace {
     // Events
     // =========================================================================
 
+    /// @notice Emitted when a seller accepts a buyer's off-chain offer.
+    ///         SaleExecuted is also emitted by _executeSale with full fee breakdown.
+    event OfferAccepted(
+        address indexed buyer,
+        address indexed seller,
+        address indexed collection,
+        uint256 tokenId,
+        address paymentToken,
+        uint256 price
+    );
+
     /// @notice Emitted when a fixed-price sale or auction settlement completes.
     event SaleExecuted(
         address indexed seller,
@@ -103,6 +127,15 @@ interface INettyWorthMarketplace {
     event AllowedCollectionUpdated(address indexed collection, bool allowed);
     event AllowedPaymentTokenUpdated(address indexed token, bool allowed);
 
+    /// @notice Emitted when a pool-owned defaulted asset is listed for auction via listDefaultedAsset.
+    event DefaultedAssetListed(
+        uint256 indexed loanId,
+        uint256 indexed tokenId,
+        bytes32 indexed auctionId,
+        uint256 reservePrice,
+        uint256 endTime
+    );
+
     // =========================================================================
     // Errors
     // =========================================================================
@@ -122,10 +155,23 @@ interface INettyWorthMarketplace {
     error Marketplace__NoBids();
     error Marketplace__CollectionNotAllowed(address collection);
     error Marketplace__PaymentTokenNotAllowed(address token);
+    error Marketplace__ReserveBelowOutstanding(uint256 reservePrice, uint256 outstanding);
+    error Marketplace__NotPoolDefaultAuction();
+    error Marketplace__PoolDefaultSingleTokenOnly();
+    /// @notice Thrown when a caller tries to accept an offer on a collateralised token they do not own as borrower.
+    error Marketplace__NotTokenOwner();
 
     // =========================================================================
     // Core functions
     // =========================================================================
+
+    /// @notice Seller accepts a buyer's off-chain signed offer (EIP-712 SignedOffer).
+    /// @dev Caller must be the token owner (or the loan borrower if collateralised).
+    ///      Pulls offer.price in paymentToken from offer.buyer (who must have pre-approved the
+    ///      marketplace). Handles loan auto-repay if the token has an active AssetLendingPool loan;
+    ///      delivers NFT to buyer atomically. Fees, royalties, and loan settlement follow the same
+    ///      path as buyWithSignature.
+    function acceptOffer(SignedOffer calldata offer, bytes calldata sig) external;
 
     /// @notice Execute a fixed-price purchase against the seller's off-chain signed listing.
     /// @dev Pulls `listing.price` in paymentToken from msg.sender (buyer). Handles loan auto-repay
@@ -154,6 +200,43 @@ interface INettyWorthMarketplace {
 
     /// @notice Cancel an on-chain auction record (seller or MARKETPLACE_ROLE; only if unsettled).
     function cancelAuction(bytes32 auctionId) external;
+
+    // =========================================================================
+    // Pool-default auction functions
+    // =========================================================================
+
+    /// @notice List a pool-owned defaulted asset as an on-chain auction without a seller signature.
+    ///         Only callable by MARKETPLACE_ROLE. The lending pool is the implicit seller.
+    ///         Fees and royalties are waived; proceeds go to the pool in full.
+    ///         Restricted to single-token loans in v1 (bundle support is a future extension).
+    /// @param loanId            Loan ID whose defaulted collateral to auction.
+    /// @param tokenId           The single collateral token ID to auction.
+    /// @param reservePrice      Minimum winning bid — must be >= principal + interest.
+    /// @param minIncrement      Each subsequent bid must exceed the current highest by at least this.
+    /// @param startTime         Unix timestamp when bidding opens.
+    /// @param endTime           Initial auction close time.
+    /// @param extensionWindow   Seconds before endTime within which a bid triggers an extension.
+    /// @param extensionDuration Seconds added to endTime on a last-minute bid.
+    function listDefaultedAsset(
+        uint256 loanId,
+        uint256 tokenId,
+        uint256 reservePrice,
+        uint256 minIncrement,
+        uint256 startTime,
+        uint256 endTime,
+        uint256 extensionWindow,
+        uint256 extensionDuration
+    ) external;
+
+    /// @notice Submit a bid on a pool-default auction (pre-materialized by listDefaultedAsset).
+    ///         Only the bidder's signature is required — no seller signature.
+    ///         First bid must meet reservePrice; subsequent bids must beat highestBid + minIncrement.
+    ///         No funds move at this point; funds are pulled at settleAuction.
+    function commitPoolBid(
+        bytes32 auctionId,
+        SignedBid calldata bid,
+        bytes calldata bidSig
+    ) external;
 
     // =========================================================================
     // Admin functions

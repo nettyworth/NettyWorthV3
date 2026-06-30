@@ -50,6 +50,7 @@ contracts/
     INettyWorthMarketplace.sol    # Marketplace interface (structs, events, errors)
     IAssetLendingPool.sol         # Lending pool interface (structs, events, errors)
     IAssetNFT.sol                 # Minimal AssetNFT interface used by the lending pool
+    IAssetLendingPoolConfig.sol   # Config-domain interface: ConfigSnapshot struct, config events, admin setters/getters; runtime structs/errors stay in IAssetLendingPool
     IP2PTradeEscrow.sol           # P2P escrow interface (Asset/Trade structs, enums, events, errors)
   lib/
     Roles.sol                     # Protocol role constants library
@@ -77,6 +78,11 @@ scripts/
   deploy-p2p-trade-escrow.ts      # Deploy P2PTradeEscrow + ERC1967 proxy; standalone (no protocol deps)
   seed-asset-nft.ts               # Dev helper: mint sample AssetNFT cards and seed appraisals
   send-op-tx.ts                   # OP chain transaction example
+  set-marketplace-allowlist.ts    # Toggle allowed collections / payment tokens on the marketplace (DEFAULT_ADMIN_ROLE)
+  set-marketplace-lending-pool.ts # Point the marketplace at the lending pool via setLendingPool (DEFAULT_ADMIN_ROLE)
+  verify-storage-slots.ts         # Verify every hardcoded ERC-7201 slot constant matches the canonical keccak256 derivation
+  verify-tenderly.ts              # Verify all deployed impls + ERC1967 proxies on Tenderly via forge verify-contract
+foundry.toml                      # Foundry config mirroring Hardhat: solc 0.8.28, optimizer 200 runs, viaIR, evm cancun
 docs/
   ops-runbook.md                  # Operator runbook: deployment, role grants, emergency procedures
   marketplace-frontend-integration.md  # Frontend integration guide for the marketplace
@@ -285,11 +291,11 @@ Each code carries independent guards:
 
 ### Machine Binding
 
-Discount codes can be scoped to a specific PackMachine clone via the `machine` field set at `createCode` time. When `machine != address(0)`, `redeemDiscount` reverts with `WrongMachine` if called from any other clone. Global codes (`machine == address(0)`) remain valid on all registered machines.
+Discount codes can be scoped to a specific PackMachine clone via the `machine` field passed to `createCode`. When `machine != address(0)`, `redeemDiscount` reverts with `PromoCodeRegistry__WrongMachine(codeId, expected, actual)` if called from any other clone. Global codes (`machine == address(0)`) remain valid on all registered machines. The `CodeCreated` event includes the `machine` field.
 
 ### Discount Refund
 
-`refundDiscount(codeId, user)` reverses a previously consumed discount code — it decrements `redeemedCount` and clears the `oncePerUser` flag for that user. This is called by PackMachine in the all-cards-failed VRF path, wrapped in `try/catch`, so a refund failure can never block the USDC refund to the user.
+`refundDiscount(codeId, user)` reverses a previously consumed discount code — it decrements `redeemedCount` and clears the `oncePerUser` flag for that user. Only callable by the same PackMachine clone that originally redeemed the code. This is called by PackMachine in the all-cards-failed VRF path, wrapped in `try/catch`, so a refund failure can never block the USDC refund to the user. Emits `CodeRefunded(codeId, user, kind, redeemedCount)`.
 
 ### PromoCodeRegistry Roles
 
@@ -316,7 +322,7 @@ Redemption callers are not role-gated; instead `redeemDiscount` validates `facto
 
 `AssetLendingPool` is a UUPS-upgradeable, platform-operated lending pool that accepts `AssetNFT` tokens as collateral. It is funded by both the platform treasury (owner capital) and external lenders. Loans use fixed terms with interest computed upfront. The contract also supports an atomic marketplace-financing path (buyer pays a deposit, pool finances the remainder). Admin control uses `Ownable2StepUpgradeable` — a deliberate deviation from the `PermissionConsumer` pattern used by the rest of the protocol.
 
-Configuration setters, the ERC-7201 storage layout, and eligibility helpers live in the abstract base `AssetLendingPoolConfig`; business logic lives in the concrete `AssetLendingPool`.
+Configuration setters, the ERC-7201 storage layout, and eligibility helpers live in the abstract base `AssetLendingPoolConfig` (interface: `IAssetLendingPoolConfig`); business logic lives in the concrete `AssetLendingPool`. `IAssetLendingPoolConfig` defines the `ConfigSnapshot` struct (14 fields including `maxUtilizationBps`), all config-domain events (e.g. `MaxUtilizationUpdated`), and the `getConfigSnapshot()` view that is merged into `getPoolInfo()`.
 
 ### How It Works
 
@@ -334,6 +340,25 @@ Configuration setters, the ERC-7201 storage layout, and eligibility helpers live
 | `2` | 30 days | 20% (2000 bps) |
 
 Interest formula: `principal × aprBps × duration / (365 days × BPS)`. Term configs are admin-adjustable via `setTermConfig`.
+
+### Pool Utilization Cap
+
+A pool-wide cap prevents the pool from being fully committed to active loans, reserving a fraction of capital for lender withdrawals.
+
+```text
+maxBorrowable = totalDeposited × maxUtilizationBps / 10000
+```
+
+A new loan reverts with `AssetLendingPool__ExceedsMaxUtilization` if `totalBorrowed + loanAmount > maxBorrowable`. Repaying a loan frees headroom immediately.
+
+| Parameter | Default | Range | Setter |
+| --------- | ------- | ----- | ------ |
+| `maxUtilizationBps` | 8000 (80%) | 1–10000 | `setMaxUtilizationBps` (owner-only) |
+
+- `10000` = no reserve (100% utilization, legacy behavior).
+- Invalid values (`0` or `>10000`) revert with `AssetLendingPool__InvalidBps`.
+- Emits `MaxUtilizationUpdated(oldValue, newValue)` on change.
+- `PoolInfo.maxUtilizationBps` exposes the current setting via `getPoolInfo()`.
 
 ### Default Lifecycle
 
@@ -360,6 +385,7 @@ The pool's only dependency on `PermissionManager` is external: the deployed pool
 - **Bundle loans** — up to 50 NFTs per loan; `tokenIdToActiveLoan` mapping prevents double-collateralization
 - **Eligibility checks** — per-token: minimum appraisal value (default $100), minimum grade, category whitelist, appraisal staleness guard (`maxAppraisalAge`, default 7 days; 0 disables)
 - **Synthetix reward-per-share lender interest** — `accInterestPerShare` accumulator + per-lender `lenderRewardDebt`; `lenderShareBps` (e.g. 80%) splits interest between lenders and protocol
+- **Pool utilization cap** — `maxUtilizationBps` (default 80%) caps the fraction of deposited capital committed to active loans; the reserve remains freely withdrawable by lenders; `PoolInfo.maxUtilizationBps` exposes the live value
 - **Split capital accounting** — owner/treasury deposits tracked separately from lender capital and protocol interest
 - **Configurable origination fee** — `originationFeeBps` deducted from disbursement (or pulled from buyer on top of deposit in the marketplace path), sent to `feeWallet`
 - **EIP-712 verified marketplace financing** — `financeMarketplacePurchase` verifies the seller's `SignedListing` on-chain against the marketplace's EIP-712 domain before executing; `financeNonces` mapping prevents listing-signature replay
@@ -400,7 +426,7 @@ All fees route to the `protocolFeeRecipient` (platform treasury). Views `getColl
 
 ## NettyWorthMarketplace Contract
 
-`NettyWorthMarketplace` is a UUPS-upgradeable marketplace for `AssetNFT` tokens. It supports two trade modes: **fixed-price sales** (off-chain EIP-712 signed listings) and **hybrid English auctions** (seller and bidders sign messages off-chain; minimal on-chain state enforces rules at commitment/settlement). USDC / ERC-20 only — no native ETH. Access control is via `PermissionConsumer` / `PermissionManager`.
+`NettyWorthMarketplace` is a UUPS-upgradeable marketplace for `AssetNFT` tokens. It supports three trade modes: **fixed-price sales** (off-chain EIP-712 signed listings), **hybrid English auctions** (seller and bidders sign messages off-chain; minimal on-chain state enforces rules at commitment/settlement), and **buyer offers** (buyer signs a `SignedOffer`, seller accepts on-chain). USDC / ERC-20 only — no native ETH. Access control is via `PermissionConsumer` / `PermissionManager`.
 
 ### Trade Flows
 
@@ -409,12 +435,27 @@ All fees route to the `protocolFeeRecipient` (platform treasury). Views `getColl
 1. The seller signs a `SignedListing` EIP-712 message off-chain (collection, tokenId, price, payment token, expiry, nonce).
 2. The buyer calls `buyWithSignature(listing, sig)` — the marketplace verifies the signature, marks the nonce used (CEI), then executes the sale atomically.
 
+#### Buyer offers
+
+1. The buyer signs a `SignedOffer` EIP-712 message off-chain (collection, tokenId, price, payment token, expiry, nonce).
+2. The token owner calls `acceptOffer(offer, sig)` — the marketplace verifies the offer, atomically transfers funds to the seller and the NFT to the buyer. Emits `OfferAccepted`.
+
 #### Hybrid English auctions
 
-1. The seller signs a `SignedAuction` off-chain (reserve price, min increment, start/end times, extension window + duration, nonce).
+1. The seller signs a `SignedAuction` off-chain (reserve price, min increment, start/end times, `extensionWindow` + `extensionDuration`, nonce).
 2. Bidders sign `SignedBid` messages off-chain (auctionId, amount, nonce, expiry).
-3. `commitBid(auctionSig, bidSig)` is called on-chain — the first valid bid **materialises** an `AuctionState` (reserve enforced); subsequent bids must exceed `highestBid + minIncrement`. If a bid lands within `extensionWindow` of `endTime`, the auction extends by `extensionDuration`. No funds move at commitment.
+3. `commitBid(SignedAuction auction, bytes auctionSig, SignedBid bid, bytes bidSig)` is called on-chain — the first valid bid **materialises** an `AuctionState` (reserve enforced); subsequent bids must exceed `highestBid + minIncrement`. If a bid lands within `extensionWindow` of `endTime`, the auction extends by `extensionDuration` (anti-snipe; emits `newEndTime` in `BidCommitted`). No funds move at commitment.
 4. After `endTime`, anyone calls `settleAuction(auctionId)` — or `MARKETPLACE_ROLE` can force-close early. The winner's payment is pulled and the NFT is delivered atomically.
+5. `cancelAuction(auctionId)` (MARKETPLACE_ROLE) or `cancelNonce(nonce)` (per-signer) cancels before settlement.
+6. Views: `getAuction(auctionId)`, `isNonceUsed(signer, nonce)`, `hashAuction(auction)`.
+
+#### Pool-default auction flow
+
+When a borrower defaults, the lending pool can list the collateral directly on the marketplace:
+
+1. `MARKETPLACE_ROLE` calls `listDefaultedAsset(loanId, tokenId, reservePrice, minIncrement, startTime, endTime, extensionWindow, extensionDuration)` — the lending pool is the implicit seller; collectible fees and royalties are waived; proceeds go fully to the pool to cover the outstanding debt. Emits `DefaultedAssetListed`. Single-token loans only (`Marketplace__PoolDefaultSingleTokenOnly` if a bundle).
+2. Bidders call `commitPoolBid(bytes32 auctionId, SignedBid bid, bytes bidSig)` instead of `commitBid`.
+3. Settlement via the normal `settleAuction` path; net debt repaid to pool, excess (if any) returned to borrower.
 
 #### Loan-aware settlement
 
@@ -426,6 +467,10 @@ Fees are deducted from gross proceeds before the seller receives anything:
 
 1. **Collectible fee** — queried from `FeeController.getCollectibleFee(gross)` (default 5%), sent to `treasury`.
 2. **ERC-2981 royalty** — queried via `try/catch` so a non-compliant collection cannot revert the sale; royalty is capped so `royalty + collectibleFee ≤ gross − loanDebt`.
+
+The `SaleExecuted` event exposes the full breakdown: `gross`, `collectibleFee`, `royalty`, `loanRepaid`, `sellerProceeds`. Pool-default auctions waive both the collectible fee and royalty (proceeds go entirely to the pool).
+
+**Notable errors:** `Marketplace__ReserveBelowOutstanding` (reserve price less than outstanding loan debt), `Marketplace__NotPoolDefaultAuction` (pool-bid functions called on a regular auction), `Marketplace__PoolDefaultSingleTokenOnly` (bundle loan submitted to the default-auction path), `Marketplace__NotSeller`, `Marketplace__NoBids`.
 
 ### NettyWorthMarketplace Roles
 
@@ -441,13 +486,15 @@ Fees are deducted from gross proceeds before the seller receives anything:
 - **UUPS upgradeable** (EIP-1822) — logic upgrades without changing the proxy address
 - **PermissionConsumer access control** — centralized role checks via PermissionManager; not ERC-2771 (`_msgSender() == msg.sender`)
 - **ERC-7201 namespaced storage** — collision-safe across upgrades
-- **ReentrancyGuard** — protects `buyWithSignature`, `commitBid`, and `settleAuction`
+- **ReentrancyGuard** — protects `buyWithSignature`, `acceptOffer`, `commitBid`, and `settleAuction`
 - **Pausable** — emergency stop via `PAUSER_ROLE`
-- **EIP-712 signatures** — three typehashes: `SignedListing`, `SignedAuction`, `SignedBid`; domain `("NettyWorthMarketplace", "1")`
-- **No-escrow hybrid auctions** — funds pulled from winner at settlement only; last-minute extension prevents sniping
-- **Per-signer nonce replay protection** — `usedNonces` mapping consumed CEI-style; user-cancellable via `cancelNonce`
+- **EIP-712 signatures** — four typehashes: `SignedListing`, `SignedAuction`, `SignedBid`, `SignedOffer`; domain `("NettyWorthMarketplace", "1")`
+- **Three trade modes** — fixed-price (`buyWithSignature`), buyer offers (`acceptOffer`), and hybrid English auctions (`commitBid` → `settleAuction`)
+- **No-escrow hybrid auctions** — funds pulled from winner at settlement only; last-minute anti-snipe extension via `extensionWindow`/`extensionDuration`
+- **Pool-default auction flow** — `listDefaultedAsset` + `commitPoolBid` lets the lending pool sell defaulted collateral; fees and royalties waived; proceeds cover loan debt
+- **Per-signer nonce replay protection** — `usedNonces` mapping consumed CEI-style; user-cancellable via `cancelNonce`; auction-cancellable via `cancelAuction`
 - **Collection + payment-token whitelists** — `allowedCollections` and `allowedPaymentTokens` mappings
-- **Loan-aware settlement** — atomic loan repayment on sale; min price enforced against outstanding debt
+- **Loan-aware settlement** — atomic loan repayment on sale; min price enforced against outstanding debt; `SaleExecuted` event breaks down gross/fee/royalty/loanRepaid/sellerProceeds
 - **Safe royalty handling** — ERC-2981 queried in `try/catch`; royalty capped against net proceeds
 - **USDC / ERC-20 only** — no native ETH accepted
 
@@ -591,6 +638,12 @@ SKIP_NFT_WIRING=                  # Set to true to skip AssetNFT wiring (call se
 
 # --- deploy-p2p-trade-escrow.ts ---
 OWNER=                            # (optional) Owner address; defaults to deployer
+
+# --- Tenderly contract verification (verify-tenderly.ts / pnpm verify:tenderly) ---
+TENDERLY_ACCOUNT=                 # Account slug from the Tenderly dashboard URL (case-sensitive)
+TENDERLY_PROJECT=                 # Project slug
+TENDERLY_ACCESS_KEY=              # From Account Settings → Authorization → Generate Access Token
+TENDERLY_VERIFIER_SUFFIX=         # (optional) Set to "/public" to make verifications public (irreversible)
 ```
 
 ## Commands
@@ -614,6 +667,10 @@ pnpm lint
 # Verify every hardcoded ERC-7201 storage slot matches the canonical keccak256(…) derivation
 # (guards against copy-paste slot typos across upgrades)
 pnpm verify:slots
+
+# Verify all deployed implementations + ERC1967 proxies on Tenderly via forge verify-contract
+# Requires TENDERLY_ACCOUNT, TENDERLY_PROJECT, TENDERLY_ACCESS_KEY in env
+pnpm verify:tenderly --network <network>
 
 # Start a fork
 pnpm fork:mainnet
@@ -860,6 +917,8 @@ Deploys the `P2PTradeEscrow` implementation and ERC1967 proxy. `initialize(owner
 | `batch-set-appraisals.ts` | Bulk-write NFT appraisal data (value, grade, category) to `AssetLendingPool` for collateral valuation; batches of ≤ 50; value in whole token units | Pool owner |
 | `set-eligibility-controls.ts` | Set minimum appraisal value, minimum grade, and allowed-category add/remove lists on `AssetLendingPool` | Pool owner |
 | `set-lender-config.ts` | Set lender revenue-share bps and toggle lender deposits open/closed on `AssetLendingPool` | Pool owner |
+| `set-marketplace-allowlist.ts` | Toggle allowed collections / payment tokens on `NettyWorthMarketplace` via `setAllowedCollection` / `setAllowedPaymentToken`; env: `COLLECTIONS` and/or `PAYMENT_TOKENS` (≥1 required), `ALLOWED` (default `true`), `MARKETPLACE_PROXY` (opt), `SKIP_CONFIRM` (opt) | `DEFAULT_ADMIN_ROLE` |
+| `set-marketplace-lending-pool.ts` | Point the marketplace at the lending pool via `setLendingPool`; env: `MARKETPLACE_PROXY` (opt), `LENDING_POOL` (opt), `SKIP_CONFIRM` (opt) | `DEFAULT_ADMIN_ROLE` |
 
 ```bash
 # Example: update callback gas limit
@@ -867,6 +926,13 @@ CALLBACK_GAS_LIMIT=250000 npx hardhat run scripts/set-callback-gas-limit.ts --ne
 
 # Example: upgrade AssetNFT
 npx hardhat run scripts/upgrade-asset-nft.ts --network <network>
+
+# Example: toggle an allowed collection on the marketplace
+COLLECTIONS=0x<collection> ALLOWED=true \
+  npx hardhat run scripts/set-marketplace-allowlist.ts --network sepolia
+
+# Example: update the marketplace's lending pool reference
+npx hardhat run scripts/set-marketplace-lending-pool.ts --network sepolia
 ```
 
 ---
@@ -1005,6 +1071,34 @@ SHARE_BPS=8000 ENABLED=true \
 ```
 
 On live networks the script verifies the changes and persists `lenderShareBps`, `lenderDepositsEnabled`, and `lenderConfigUpdatedAt` to `deployments/<network>.json`.
+
+---
+
+### Contract verification (Tenderly)
+
+`verify-tenderly.ts` verifies every deployed implementation and its ERC1967 proxy on Tenderly using `forge verify-contract`. It reads `deployments/<network>.json`, reconstructs each contract's constructor / `initialize()` calldata, and submits with `--watch`.
+
+**Prerequisites:** `forge` installed (matches compiler settings in `foundry.toml`: solc 0.8.28, 200 runs, viaIR, evm cancun).
+
+**Required environment variables:**
+
+| Variable | Description |
+| -------- | ----------- |
+| `TENDERLY_ACCOUNT` | Account slug from the Tenderly dashboard URL (case-sensitive) |
+| `TENDERLY_PROJECT` | Project slug |
+| `TENDERLY_ACCESS_KEY` | From Account Settings → Authorization → Generate Access Token |
+| `TENDERLY_VERIFIER_SUFFIX` | *(optional)* Set to `"/public"` to make verifications public (irreversible) |
+
+```bash
+pnpm verify:tenderly --network sepolia
+# or
+pnpm verify:tenderly --network mainnet
+pnpm verify:tenderly --network base
+```
+
+On completion the script prints a passed/failed/skipped tally and exits 1 if any verification failed.
+
+> **Note:** If bytecode mismatches occur, ensure your local `foundry.toml` settings exactly mirror the Hardhat compiler settings used for deployment (solc version, optimizer runs, viaIR, evm version).
 
 ---
 

@@ -171,10 +171,13 @@ if (process.env.ASSET_LENDING_POOL_PROXY) {
   proxyAddress = getAddress(entry.proxy as string) as `0x${string}`;
 }
 
-// ─── Verify caller is owner ───────────────────────────────────────────────────
-
+// ─── Resolve config proxy (batchSetAppraisals lives on AssetLendingPoolConfig) ──
 const pool = await viem.getContractAt("AssetLendingPool", proxyAddress);
-const owner = await pool.read.owner();
+const configProxyAddress = await pool.read.getConfig();
+const config = await viem.getContractAt("AssetLendingPoolConfig", configProxyAddress);
+
+// ─── Verify caller is owner ───────────────────────────────────────────────────
+const owner = await config.read.owner();
 
 if (owner.toLowerCase() !== callerAddress.toLowerCase()) {
   console.error(

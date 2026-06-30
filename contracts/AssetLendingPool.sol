@@ -11,10 +11,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IAssetNFT} from "./interfaces/IAssetNFT.sol";
 import {IAssetLendingPool} from "./interfaces/IAssetLendingPool.sol";
+import {IAssetLendingPoolConfig} from "./interfaces/IAssetLendingPoolConfig.sol";
 import {INettyWorthMarketplace} from "./interfaces/INettyWorthMarketplace.sol";
 import {IPackMachine} from "./interfaces/IPackMachine.sol";
 import {IPackMachineFactory} from "./interfaces/IPackMachineFactory.sol";
-import {AssetLendingPoolConfig} from "./AssetLendingPoolConfig.sol";
 
 /// @title AssetLendingPool
 /// @author NettyWorth
@@ -24,27 +24,90 @@ import {AssetLendingPoolConfig} from "./AssetLendingPoolConfig.sol";
 ///         Defaulted assets follow a 3-phase lifecycle: NettyWorth acquisition window
 ///         (default 24h, configurable), then a public marketplace auction window (default 7 days,
 ///         configurable), then a perpetual fixed-price listing.
-/// @dev UUPS upgradeable. Uses ERC-7201 namespaced storage (slot owned by AssetLendingPoolConfig).
+/// @dev UUPS upgradeable. Uses ERC-7201 namespaced runtime storage.
+///      All admin configuration lives in the separate AssetLendingPoolConfig contract.
 ///      Access control via Ownable2StepUpgradeable (single admin). The pool contract address must
 ///      be granted STATE_MANAGER_ROLE on PermissionManager so it can call
 ///      assetNFT.batchSetAssetState() to transition tokens between Held and Loaned.
-///      Configuration setters and storage layout live in AssetLendingPoolConfig.
 /// @custom:security-contact security@nettyworth.io
 contract AssetLendingPool is
-    AssetLendingPoolConfig,
+    IAssetLendingPool,
+    Initializable,
     UUPSUpgradeable,
+    Ownable2StepUpgradeable,
     ReentrancyGuard,
     PausableUpgradeable
 {
     using SafeERC20 for IERC20;
 
     // =========================================================================
-    // Constants (business-math only; config constants live in AssetLendingPoolConfig)
+    // Constants
     // =========================================================================
 
     uint256 private constant YEAR = 365 days;
     /// @dev Scaling factor for reward-per-share accumulator to preserve precision.
     uint256 private constant PRECISION = 1e18;
+    uint256 private constant BPS = 10_000;
+    uint256 private constant MAX_BATCH = 50;
+
+    // =========================================================================
+    // Storage (ERC-7201 namespaced) — runtime state only; config lives in
+    // the separate AssetLendingPoolConfig contract
+    // =========================================================================
+
+    /// @custom:storage-location erc7201:nettyworth.storage.AssetLendingPoolRuntime
+    struct PoolStorage {
+        // Reference to the config contract
+        IAssetLendingPoolConfig config;
+        // Cached token references (set once at initialize from config; immutable thereafter)
+        IERC20 paymentToken;
+        IAssetNFT assetNFT;
+        // Loans
+        uint256 nextLoanId;
+        mapping(uint256 loanId => Loan) loans;
+        mapping(address borrower => uint256[]) borrowerLoans;
+        mapping(uint256 tokenId => uint256 loanId) tokenIdToActiveLoan;
+        // Pool financial (protocol/owner capital)
+        uint256 totalDeposited;
+        uint256 totalBorrowed;
+        uint256 totalInterestEarned; // protocol-only interest (excludes lender share)
+        uint256 interestWithdrawn;
+        uint256 activeLoanCount;
+        // =====================================================================
+        // External Lender Capital
+        // =====================================================================
+        mapping(address lender => uint256) lenderDeposits;
+        uint256 totalLenderDeposits;
+        uint256 ownerDeposited; // tracks admin's own capital separately from lender capital
+        // Reward-per-share accounting (Synthetix pattern, scaled by PRECISION)
+        uint256 accInterestPerShare;
+        mapping(address lender => uint256) lenderRewardDebt;
+        uint256 totalLenderInterestPaid;
+        // =====================================================================
+        // Default Lifecycle
+        // =====================================================================
+        mapping(uint256 loanId => DefaultRecord) defaults;
+        uint256 totalDefaultedPrincipal;
+        // =====================================================================
+        // Marketplace financing replay protection
+        // =====================================================================
+        mapping(address seller => mapping(uint256 nonce => bool)) financeNonces;
+    }
+
+    // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.AssetLendingPoolRuntime")) - 1)) & ~bytes32(uint256(0xff))
+    bytes32 private constant ASSET_LENDING_POOL_RUNTIME_STORAGE_SLOT =
+        0xe550184268bc9f659edbb9c6b24d954d35d7ee2960ec89c48b5d88c17e160c00;
+
+    function _getStorage() internal pure returns (PoolStorage storage $) {
+        assembly {
+            $.slot := ASSET_LENDING_POOL_RUNTIME_STORAGE_SLOT
+        }
+    }
+
+    /// @dev Convenience accessor to the config contract.
+    function _config() internal view returns (IAssetLendingPoolConfig) {
+        return _getStorage().config;
+    }
 
     // =========================================================================
     // Constructor
@@ -59,40 +122,30 @@ contract AssetLendingPool is
     // Initializer
     // =========================================================================
 
-    /// @notice Initializes the proxy.
+    /// @notice Initializes the pool proxy.
     /// @param initialOwner_ Address to receive ownership.
-    /// @param paymentToken_ ERC20 token used for loans (e.g. USDC).
-    /// @param assetNFT_ AssetNFT proxy address.
-    /// @param ltvBps_ Initial LTV in basis points (e.g. 5000 = 50%).
-    /// @param lenderShareBps_ Percentage of interest allocated to lenders (e.g. 8000 = 80%).
-    /// @param acquisitionWindow_ Phase 1 duration in seconds (e.g. 24 hours).
-    /// @param auctionWindow_ Phase 2 duration in seconds (e.g. 7 days).
-    /// @param packMachineFactory_ PackMachineFactory address for validating target machines.
+    /// @param config_ Address of the deployed AssetLendingPoolConfig proxy.
     function initialize(
         address initialOwner_,
-        address paymentToken_,
-        address assetNFT_,
-        uint256 ltvBps_,
-        uint256 lenderShareBps_,
-        uint256 acquisitionWindow_,
-        uint256 auctionWindow_,
-        address packMachineFactory_
+        address config_
     ) external initializer {
         if (initialOwner_ == address(0)) revert AssetLendingPool__ZeroAddress();
+        if (config_ == address(0)) revert AssetLendingPool__ZeroAddress();
 
         __Ownable_init(initialOwner_);
         __Ownable2Step_init();
         __Pausable_init();
 
-        __AssetLendingPoolConfig_init(
-            paymentToken_,
-            assetNFT_,
-            ltvBps_,
-            lenderShareBps_,
-            acquisitionWindow_,
-            auctionWindow_,
-            packMachineFactory_
+        PoolStorage storage $ = _getStorage();
+        $.config = IAssetLendingPoolConfig(config_);
+        $.nextLoanId = 1;
+
+        // Cache paymentToken and assetNFT locally — they are read on nearly every
+        // function and are immutable after config init.
+        $.paymentToken = IERC20(
+            IAssetLendingPoolConfig(config_).paymentToken()
         );
+        $.assetNFT = IAssetNFT(IAssetLendingPoolConfig(config_).assetNFT());
     }
 
     // =========================================================================
@@ -101,7 +154,7 @@ contract AssetLendingPool is
 
     /// @dev Restricts a function to the authorized marketplace address only.
     modifier onlyMarketplace() {
-        if (msg.sender != _getStorage().marketplace) {
+        if (msg.sender != _config().getMarketplace()) {
             revert AssetLendingPool__NotMarketplace();
         }
         _;
@@ -129,10 +182,7 @@ contract AssetLendingPool is
     }
 
     /// @notice Collateralize multiple AssetNFTs as a bundle and borrow against their summed appraisal value.
-    /// @dev Each NFT must individually pass eligibility checks (value >= $100 min, grade, category, staleness).
-    ///      All NFTs must be in Held state and the borrower must have approved this contract for each.
-    ///      The maximum loan amount is LTV * sum(appraisal values). Max bundle size is 50.
-    ///      Interest is fixed upfront; origination fee (if set) is deducted from disbursement.
+    /// @dev Each NFT must individually pass eligibility checks. Max bundle size is 50.
     /// @param tokenIds AssetNFT token IDs to use as collateral.
     /// @param amount Loan principal requested (must be <= LTV of summed appraisal values).
     /// @param termId Term configuration index (0, 1, or 2 by default).
@@ -149,16 +199,12 @@ contract AssetLendingPool is
     // =========================================================================
 
     /// @notice Repay a loan and reclaim all collateral NFTs.
-    /// @dev Allowed after expiry as long as admin has not called initiateDefault().
-    ///      Only the borrower can repay. All collateral NFTs are returned atomically.
+    /// @dev Only the borrower can repay.
     /// @param loanId Loan ID to repay.
     function repay(
         uint256 loanId
     ) external override nonReentrant whenNotPaused {
-        AssetLendingPoolStorage storage $ = _getStorage();
-        // Pull repayment from the borrower and return collateral to the borrower.
-        // `requireBorrower = msg.sender` enforces that only the borrower may repay
-        // (checked after loan validity so LoanNotFound takes precedence).
+        PoolStorage storage $ = _getStorage();
         _settleLoanRepayment($, loanId, msg.sender, msg.sender, msg.sender);
     }
 
@@ -167,12 +213,7 @@ contract AssetLendingPool is
     // =========================================================================
 
     /// @notice Atomically settle a loan from marketplace sale proceeds and release collateral to the buyer.
-    /// @dev Only callable by the authorized marketplace (set via setMarketplace). Mirrors repay()
-    ///      accounting exactly — totalBorrowed -=, activeLoanCount--, _distributeInterest —
-    ///      with three differences: (1) funds are pulled from `payer` (the marketplace, which already
-    ///      holds the buyer's gross payment); (2) collateral NFTs are delivered to `buyer`, not the
-    ///      borrower; (3) authorized by onlyMarketplace, not onlyBorrower.
-    ///      CEI: all state writes complete before external token transfers.
+    /// @dev Only callable by the authorized marketplace (set via config.setMarketplace).
     /// @param loanId Loan to settle.
     /// @param payer  Address from which principal+interest is pulled (the marketplace contract).
     /// @param buyer  Address that receives the released collateral NFT(s).
@@ -182,10 +223,8 @@ contract AssetLendingPool is
         address buyer
     ) external override nonReentrant whenNotPaused onlyMarketplace {
         if (buyer == address(0)) revert AssetLendingPool__ZeroAddress();
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
 
-        // Shared settlement core: pull principal+interest from the marketplace
-        // (`payer`) and release collateral to the `buyer`. Mirrors repay() exactly.
         (
             uint256 principal,
             uint256 interest,
@@ -217,10 +256,11 @@ contract AssetLendingPool is
         uint256 depositAmount,
         uint8 termId
     ) external override nonReentrant whenNotPaused {
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
+        IAssetLendingPoolConfig cfg = $.config;
 
         // --- Verify seller EIP-712 signature against the marketplace domain ---
-        address marketplace = $.marketplace;
+        address marketplace = cfg.getMarketplace();
         if (marketplace == address(0)) revert AssetLendingPool__ZeroAddress();
 
         bytes32 domainSeparator = keccak256(
@@ -251,7 +291,7 @@ contract AssetLendingPool is
             revert AssetLendingPool__InvalidSignature();
         }
 
-        // --- Validate listing parameters ---
+        // --- Validate listing parameters (use cached pool-local refs for the comparison) ---
         if (block.timestamp > listing.expiry) {
             revert AssetLendingPool__ListingExpired();
         }
@@ -269,23 +309,21 @@ contract AssetLendingPool is
         $.financeNonces[listing.seller][listing.nonce] = true;
 
         // --- Term check ---
-        TermConfig storage term = $.termConfigs[termId];
+        TermConfig memory term = cfg.getTermConfig(termId);
         if (!term.active) revert AssetLendingPool__InvalidTerm();
 
         // --- Eligibility & LTV ---
         uint256 tokenId = listing.tokenId;
-        _checkEligibility($, tokenId);
+        cfg.checkEligibility(tokenId);
 
-        uint256 appraisalValue = $.appraisals[tokenId].value;
-        uint256 maxLoan = (appraisalValue * $.ltvBps) / BPS;
+        uint256 appraisalValue = cfg.getAppraisal(tokenId).value;
+        uint256 maxLoan = (appraisalValue * cfg.ltvBps()) / BPS;
 
-        // Purchase price is the listing price; min deposit ensures loan <= maxLoan.
         uint256 purchasePrice = listing.price;
         if (depositAmount > purchasePrice)
             revert AssetLendingPool__ZeroAmount();
         uint256 loanAmount = purchasePrice - depositAmount;
         if (loanAmount == 0) revert AssetLendingPool__ZeroAmount();
-        // Buyer must cover any gap between listing price and max-financed amount.
         if (loanAmount > maxLoan) revert AssetLendingPool__ExceedsLTV();
 
         _checkUtilization($, loanAmount);
@@ -295,7 +333,6 @@ contract AssetLendingPool is
         }
 
         // --- Execute atomic purchase + loan origination ---
-        // Transfer NFT from seller to pool (seller must have approved the pool).
         $.assetNFT.transferFrom(listing.seller, address(this), tokenId);
 
         uint256[] memory ids = new uint256[](1);
@@ -309,7 +346,7 @@ contract AssetLendingPool is
             true
         );
 
-        // Buyer deposit -> seller, pool loan -> seller: seller receives full listing price.
+        // Buyer deposit -> seller, pool loan -> seller.
         $.paymentToken.safeTransferFrom(
             msg.sender,
             listing.seller,
@@ -318,9 +355,9 @@ contract AssetLendingPool is
         $.paymentToken.safeTransfer(listing.seller, loanAmount);
 
         // Origination fee pulled from buyer on top of deposit.
-        uint256 fee = _calculateOriginationFee($, loanAmount);
+        uint256 fee = cfg.calculateOriginationFee(loanAmount);
         if (fee > 0) {
-            $.paymentToken.safeTransferFrom(msg.sender, $.feeWallet, fee);
+            $.paymentToken.safeTransferFrom(msg.sender, cfg.feeWallet(), fee);
         }
 
         emit MarketplacePurchaseFinanced(
@@ -336,18 +373,16 @@ contract AssetLendingPool is
     // Lender: deposit
     // =========================================================================
 
-    /// @notice Deposit USDC into the pool as an external lender. Capital earns a pro-rata
-    ///         share of interest from loans originated after your deposit.
+    /// @notice Deposit USDC into the pool as an external lender.
     /// @param amount Amount of payment token to deposit.
     function lenderDeposit(
         uint256 amount
     ) external override nonReentrant whenNotPaused {
         if (amount == 0) revert AssetLendingPool__ZeroAmount();
-        AssetLendingPoolStorage storage $ = _getStorage();
-        if (!$.lenderDepositsEnabled)
+        PoolStorage storage $ = _getStorage();
+        if (!$.config.lenderDepositsEnabled())
             revert AssetLendingPool__LenderDepositsDisabled();
 
-        // Settle any pending interest before changing the deposit balance.
         _accrueRewardDebtForDeposit($, msg.sender, amount);
 
         $.lenderDeposits[msg.sender] += amount;
@@ -362,14 +397,12 @@ contract AssetLendingPool is
     // Lender: withdraw
     // =========================================================================
 
-    /// @notice Withdraw idle (unborrowed) capital. Only available liquidity can be withdrawn —
-    ///         capital funding active loans remains locked until repayment.
-    /// @dev Intentionally omits `whenNotPaused` so lenders can always exit, even during a pause.
-    ///      Auto-claims any pending interest before reducing the deposit balance.
+    /// @notice Withdraw idle (unborrowed) capital. Only available liquidity can be withdrawn.
+    /// @dev Intentionally omits `whenNotPaused` so lenders can always exit.
     /// @param amount Amount to withdraw.
     function lenderWithdraw(uint256 amount) external override nonReentrant {
         if (amount == 0) revert AssetLendingPool__ZeroAmount();
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
 
         if (amount > $.lenderDeposits[msg.sender])
             revert AssetLendingPool__InsufficientLenderBalance();
@@ -378,10 +411,8 @@ contract AssetLendingPool is
         if (amount > available)
             revert AssetLendingPool__InsufficientLiquidity();
 
-        // Auto-claim pending interest before adjusting balance.
         _claimLenderInterestInternal($, msg.sender);
 
-        // Adjust reward debt proportionally after the interest claim.
         uint256 newBalance = $.lenderDeposits[msg.sender] - amount;
         $.lenderRewardDebt[msg.sender] =
             (newBalance * $.accInterestPerShare) / PRECISION;
@@ -399,10 +430,9 @@ contract AssetLendingPool is
     // =========================================================================
 
     /// @notice Claim all accrued interest earnings.
-    /// @dev Intentionally omits `whenNotPaused` so lenders can always withdraw earnings,
-    ///      even during a pause. Reverts if there is no interest to claim.
+    /// @dev Intentionally omits `whenNotPaused` so lenders can always withdraw earnings.
     function claimLenderInterest() external override nonReentrant {
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
         uint256 claimed = _claimLenderInterestInternal($, msg.sender);
         if (claimed == 0) revert AssetLendingPool__NoInterestToClaim();
     }
@@ -414,7 +444,7 @@ contract AssetLendingPool is
     /// @notice Fund the pool from treasury.
     function deposit(uint256 amount) external override onlyOwner {
         if (amount == 0) revert AssetLendingPool__ZeroAmount();
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
         $.ownerDeposited += amount;
         $.totalDeposited += amount;
         $.paymentToken.safeTransferFrom(msg.sender, address(this), amount);
@@ -422,10 +452,9 @@ contract AssetLendingPool is
     }
 
     /// @notice Withdraw owner-deposited (unborrowed) capital.
-    /// @dev Owner can only withdraw their own deposited capital, not lender capital.
     function withdraw(uint256 amount) external override onlyOwner {
         if (amount == 0) revert AssetLendingPool__ZeroAmount();
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
         if (amount > $.ownerDeposited)
             revert AssetLendingPool__OwnerWithdrawExceedsOwnerDeposits();
         uint256 available = $.totalDeposited - $.totalBorrowed;
@@ -440,7 +469,7 @@ contract AssetLendingPool is
     /// @notice Withdraw accumulated protocol interest earnings (excludes lender share).
     function withdrawInterest(uint256 amount) external override onlyOwner {
         if (amount == 0) revert AssetLendingPool__ZeroAmount();
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
         uint256 available = $.totalInterestEarned - $.interestWithdrawn;
         if (amount > available)
             revert AssetLendingPool__WithdrawExceedsAvailable();
@@ -454,12 +483,6 @@ contract AssetLendingPool is
     // =========================================================================
 
     /// @notice Initiate the default lifecycle for an expired loan.
-    ///         Opens the NettyWorth acquisition window (Phase 1).
-    ///         Pool absorbs the principal loss immediately; recovery credits it back on resolution.
-    /// @dev onlyOwner. Accounting round-trip: `totalDeposited -= principal` here;
-    ///      `totalDeposited += outstandingValue` in `acquireDefaultedAsset` or
-    ///      `purchaseDefaultedAsset` when the asset is eventually recovered.
-    /// @param loanId Loan ID that has expired without repayment.
     function initiateDefault(uint256 loanId) external override onlyOwner {
         _initiateDefault(loanId);
     }
@@ -473,30 +496,51 @@ contract AssetLendingPool is
     // Admin: default lifecycle — Phase 1 acquisition
     // =========================================================================
 
-    /// @notice NettyWorth acquires the defaulted asset within the acquisition window (Phase 1,
-    ///         default 24h) and recycles it into a PackMachine. Recovers the outstanding loan value.
-    /// @dev onlyOwner. Reverts if called after the acquisition window has elapsed; use
-    ///      `purchaseDefaultedAsset` for Phase 2/3 resolution.
+    /// @notice NettyWorth acquires the defaulted asset within the acquisition window (Phase 1)
+    ///         and recycles it into a PackMachine.
     /// @param loanId Loan ID whose default record is in the Acquisition phase.
-    /// @param targetPackMachine PackMachine to deposit the NFT into (must pass factory validation).
+    /// @param targetPackMachine PackMachine to deposit the NFT into.
     /// @param tier Rarity tier for the NFT inside the PackMachine.
     function acquireDefaultedAsset(
         uint256 loanId,
         address targetPackMachine,
         uint8 tier
     ) external override onlyOwner nonReentrant {
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
+        IAssetLendingPoolConfig cfg = $.config;
 
-        address factory = $.packMachineFactory;
+        address fw = cfg.getFinanceWallet();
+        if (fw == address(0)) revert AssetLendingPool__FinanceWalletNotSet();
+
+        address factory = cfg.packMachineFactory();
         if (
             factory == address(0) ||
             !IPackMachineFactory(factory).isPackMachine(targetPackMachine)
         ) revert AssetLendingPool__InvalidPackMachine();
 
-        // Resolve the default record (Phase 1 window) and re-credit the pool.
-        (uint256[] memory tokenIds, ) = _loadResolvableDefault($, loanId, true);
+        // Enforce Phase 1 window before any state changes.
+        {
+            DefaultRecord storage rec = $.defaults[loanId];
+            if (rec.defaultedAt == 0)
+                revert AssetLendingPool__DefaultNotFound();
+            if (block.timestamp >= rec.defaultedAt + cfg.acquisitionWindow())
+                revert AssetLendingPool__NotInAcquisitionPhase();
+        }
 
-        // Approve and deposit all collateral NFTs into the PackMachine.
+        // ---- State writes (CEI) ----
+        (
+            uint256[] memory tokenIds,
+            uint256 principal,
+            uint256 interest
+        ) = _resolveAndRecredit($, loanId);
+
+        // ---- External interactions ----
+        $.paymentToken.safeTransferFrom(
+            fw,
+            address(this),
+            principal + interest
+        );
+
         uint256 len = tokenIds.length;
         uint8[] memory tiers = new uint8[](len);
         for (uint256 i; i < len; ) {
@@ -516,46 +560,98 @@ contract AssetLendingPool is
     }
 
     // =========================================================================
-    // Public: default lifecycle — Phase 2 & 3 purchase
+    // Marketplace callbacks — pool-default auction lifecycle
     // =========================================================================
 
-    /// @notice Purchase a defaulted asset at the outstanding loan value.
-    ///         Available in Phase 2 (auction, default 7 days after the acquisition window)
-    ///         and Phase 3 (fixed-price listing, perpetual thereafter).
-    /// @param loanId Loan ID whose default record is in Auction or FixedListing phase.
-    function purchaseDefaultedAsset(
+    /// @inheritdoc IAssetLendingPool
+    function prepareDefaultedListing(
         uint256 loanId
-    ) external override nonReentrant whenNotPaused {
-        AssetLendingPoolStorage storage $ = _getStorage();
+    )
+        external
+        override
+        onlyMarketplace
+        nonReentrant
+        returns (uint256[] memory tokenIds)
+    {
+        PoolStorage storage $ = _getStorage();
+        DefaultRecord storage rec = $.defaults[loanId];
 
-        // Resolve the default record (Phase 2/3 window) and re-credit the pool.
-        (uint256[] memory tokenIds, uint256 price) = _loadResolvableDefault(
-            $,
-            loanId,
-            false
-        );
+        if (rec.defaultedAt == 0) revert AssetLendingPool__DefaultNotFound();
+        if (rec.resolved) revert AssetLendingPool__DefaultAlreadyResolved();
+        if (block.timestamp < rec.defaultedAt + $.config.acquisitionWindow())
+            revert AssetLendingPool__NotInPurchasePhase();
+        if (rec.listedOnMarketplace) revert AssetLendingPool__AlreadyListed();
 
-        // Pull single payment from buyer and transfer all collateral NFTs.
-        $.paymentToken.safeTransferFrom(msg.sender, address(this), price);
-        for (uint256 i; i < tokenIds.length; ) {
-            $.assetNFT.transferFrom(address(this), msg.sender, tokenIds[i]);
-            unchecked {
-                ++i;
-            }
+        tokenIds = rec.tokenIds;
+        if (tokenIds.length != 1)
+            revert AssetLendingPool__BatchTooLarge(tokenIds.length, 1);
+
+        rec.listedOnMarketplace = true;
+
+        address mkt = $.config.getMarketplace();
+        $.assetNFT.approve(mkt, tokenIds[0]);
+    }
+
+    /// @inheritdoc IAssetLendingPool
+    function onDefaultedAssetSold(
+        uint256 loanId,
+        uint256 proceeds
+    ) external override onlyMarketplace nonReentrant {
+        PoolStorage storage $ = _getStorage();
+
+        {
+            DefaultRecord storage rec = $.defaults[loanId];
+            if (!rec.listedOnMarketplace)
+                revert AssetLendingPool__DefaultNotListed();
         }
 
-        emit DefaultedAssetPurchased(loanId, tokenIds[0], msg.sender, price);
+        (
+            uint256[] memory tokenIds,
+            uint256 principal,
+            uint256 interest
+        ) = _resolveAndRecredit($, loanId);
+
+        if (proceeds < principal + interest)
+            revert AssetLendingPool__InsufficientProceeds();
+
+        uint256 surplus = proceeds - principal - interest;
+        if (surplus > 0) {
+            $.totalInterestEarned += surplus;
+        }
+
+        emit DefaultedAssetSold(
+            loanId,
+            tokenIds[0],
+            proceeds,
+            principal,
+            interest,
+            surplus
+        );
+    }
+
+    /// @inheritdoc IAssetLendingPool
+    function onDefaultedListingCancelled(
+        uint256 loanId
+    ) external override onlyMarketplace nonReentrant {
+        PoolStorage storage $ = _getStorage();
+        DefaultRecord storage rec = $.defaults[loanId];
+
+        if (rec.defaultedAt == 0) revert AssetLendingPool__DefaultNotFound();
+        if (rec.resolved) revert AssetLendingPool__DefaultAlreadyResolved();
+        if (!rec.listedOnMarketplace)
+            revert AssetLendingPool__DefaultNotListed();
+
+        rec.listedOnMarketplace = false;
     }
 
     // =========================================================================
-    // Admin: rescue NFT (safety escape hatch for edge cases)
+    // Admin: rescue NFT
     // =========================================================================
 
-    /// @notice Transfer a pool-owned NFT to a recipient. Use only for edge cases where
-    ///         the default lifecycle cannot resolve (e.g. the default record was never created).
+    /// @notice Transfer a pool-owned NFT to a recipient.
     function rescueNFT(uint256 tokenId, address recipient) external onlyOwner {
         if (recipient == address(0)) revert AssetLendingPool__ZeroAddress();
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
         if ($.assetNFT.ownerOf(tokenId) != address(this)) {
             revert AssetLendingPool__NFTNotInPool();
         }
@@ -567,14 +663,12 @@ contract AssetLendingPool is
     // Admin: pause
     // =========================================================================
 
-    /// @notice Pause the pool, blocking new borrows, repayments, and marketplace purchases.
-    /// @dev onlyOwner. Lender withdrawals and interest claims remain available while paused.
+    /// @notice Pause the pool.
     function pause() external onlyOwner {
         _pause();
     }
 
-    /// @notice Unpause the pool, restoring full functionality.
-    /// @dev onlyOwner.
+    /// @notice Unpause the pool.
     function unpause() external onlyOwner {
         _unpause();
     }
@@ -602,7 +696,7 @@ contract AssetLendingPool is
     }
 
     function getAvailableLiquidity() external view override returns (uint256) {
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
         return $.totalDeposited - $.totalBorrowed;
     }
 
@@ -612,44 +706,53 @@ contract AssetLendingPool is
         override
         returns (PoolInfo memory info)
     {
-        AssetLendingPoolStorage storage $ = _getStorage();
-        info.paymentToken = address($.paymentToken);
-        info.assetNFT = address($.assetNFT);
-        info.termCount = $.termCount;
+        PoolStorage storage $ = _getStorage();
+        IAssetLendingPoolConfig.ConfigSnapshot memory snap = $
+            .config
+            .getConfigSnapshot();
+
+        // Config fields (from config contract)
+        info.paymentToken = snap.paymentToken;
+        info.assetNFT = snap.assetNFT;
+        info.termCount = snap.termCount;
+        info.minAppraisalValue = snap.minAppraisalValue;
+        info.minGrade = snap.minGrade;
+        info.originationFeeBps = snap.originationFeeBps;
+        info.feeWallet = snap.feeWallet;
+        info.ltvBps = snap.ltvBps;
+        info.maxAppraisalAge = snap.maxAppraisalAge;
+        info.lenderShareBps = snap.lenderShareBps;
+        info.lenderDepositsEnabled = snap.lenderDepositsEnabled;
+        info.acquisitionWindow = snap.acquisitionWindow;
+        info.auctionWindow = snap.auctionWindow;
+        info.maxUtilizationBps = snap.maxUtilizationBps;
+
+        // Runtime fields (from this contract)
         info.nextLoanId = $.nextLoanId;
-        info.minAppraisalValue = $.minAppraisalValue;
-        info.minGrade = $.minGrade;
         info.totalDeposited = $.totalDeposited;
         info.totalBorrowed = $.totalBorrowed;
         info.totalInterestEarned = $.totalInterestEarned;
         info.interestWithdrawn = $.interestWithdrawn;
         info.activeLoanCount = $.activeLoanCount;
-        info.originationFeeBps = $.originationFeeBps;
-        info.feeWallet = $.feeWallet;
-        info.ltvBps = $.ltvBps;
-        info.maxAppraisalAge = $.maxAppraisalAge;
         info.totalLenderDeposits = $.totalLenderDeposits;
         info.ownerDeposited = $.ownerDeposited;
-        info.lenderShareBps = $.lenderShareBps;
-        info.lenderDepositsEnabled = $.lenderDepositsEnabled;
-        info.acquisitionWindow = $.acquisitionWindow;
-        info.auctionWindow = $.auctionWindow;
         info.totalDefaultedPrincipal = $.totalDefaultedPrincipal;
-        info.maxUtilizationBps = $.maxUtilizationBps;
     }
 
-    /// @notice Returns the current default phase for a given loan, computed from timestamps.
+    /// @notice Returns the current default phase for a given loan.
     function getDefaultPhase(
         uint256 loanId
     ) external view override returns (DefaultPhase) {
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
         DefaultRecord storage rec = $.defaults[loanId];
         if (rec.defaultedAt == 0) return DefaultPhase.None;
         if (rec.resolved) return DefaultPhase.Resolved;
+        IAssetLendingPoolConfig cfg = $.config;
         uint256 elapsed = block.timestamp - rec.defaultedAt;
-        if (elapsed < $.acquisitionWindow) return DefaultPhase.Acquisition;
-        if (elapsed < $.acquisitionWindow + $.auctionWindow)
-            return DefaultPhase.Auction;
+        uint256 acqW = cfg.acquisitionWindow();
+        uint256 aucW = cfg.auctionWindow();
+        if (elapsed < acqW) return DefaultPhase.Acquisition;
+        if (elapsed < acqW + aucW) return DefaultPhase.Auction;
         return DefaultPhase.FixedListing;
     }
 
@@ -660,17 +763,87 @@ contract AssetLendingPool is
         return _getStorage().defaults[loanId];
     }
 
-    /// @notice Returns lender deposit balance, claimable interest, and pool share for a given address.
+    /// @notice Returns lender deposit balance, claimable interest, and pool share.
     function getLenderInfo(
         address lender
     ) external view override returns (LenderInfo memory info) {
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
         info.deposited = $.lenderDeposits[lender];
         info.claimableInterest = _pendingLenderInterest($, lender);
         info.poolShareBps =
             $.totalLenderDeposits == 0
                 ? 0
                 : (info.deposited * BPS) / $.totalLenderDeposits;
+    }
+
+    // =========================================================================
+    // Passthrough view functions (so callers using the pool address keep working)
+    // =========================================================================
+
+    /// @notice Returns the appraisal for a token. Passthrough to the config contract.
+    function getAppraisal(
+        uint256 tokenId
+    ) external view override returns (AssetAppraisal memory) {
+        return _config().getAppraisal(tokenId);
+    }
+
+    /// @notice Returns the term configuration for a given term ID. Passthrough to config.
+    function getTermConfig(
+        uint8 termId
+    ) external view override returns (TermConfig memory) {
+        return _config().getTermConfig(termId);
+    }
+
+    /// @notice Returns the maximum loan amount for a token (LTV × appraisal value). Passthrough to config.
+    function getMaxLoanAmount(
+        uint256 tokenId
+    ) external view override returns (uint256) {
+        return _config().getMaxLoanAmount(tokenId);
+    }
+
+    /// @notice Returns whether a token is eligible for use as collateral. Passthrough to config.
+    function isEligible(uint256 tokenId) external view override returns (bool) {
+        return _config().isEligible(tokenId);
+    }
+
+    /// @notice Returns the active loan ID for a token (0 if none).
+    function getActiveLoanId(
+        uint256 tokenId
+    ) external view override returns (uint256) {
+        return _getStorage().tokenIdToActiveLoan[tokenId];
+    }
+
+    /// @notice Returns the debt components for the active loan on a token.
+    function getLoanDebt(
+        uint256 tokenId
+    )
+        external
+        view
+        override
+        returns (uint256 principal, uint256 interest, uint256 total)
+    {
+        PoolStorage storage $ = _getStorage();
+        uint256 loanId = $.tokenIdToActiveLoan[tokenId];
+        if (loanId == 0) return (0, 0, 0);
+        Loan storage loan = $.loans[loanId];
+        principal = loan.principal;
+        interest = loan.interest;
+        total = principal + interest;
+    }
+
+    /// @notice Returns the authorized marketplace address. Passthrough to config.
+    function getMarketplace() external view override returns (address) {
+        return _config().getMarketplace();
+    }
+
+    /// @notice Returns the finance wallet address. Passthrough to config.
+    function getFinanceWallet() external view override returns (address) {
+        return _config().getFinanceWallet();
+    }
+
+    /// @notice Returns the address of the AssetLendingPoolConfig contract.
+    function getConfig() external view returns (address) {
+        return address(_getStorage().config);
     }
 
     // =========================================================================
@@ -683,9 +856,8 @@ contract AssetLendingPool is
     // Internal helpers
     // =========================================================================
 
-    /// @dev Sets the same AssetState on every token in the array via a single batchSetAssetState call.
     function _setAssetStateBatch(
-        AssetLendingPoolStorage storage $,
+        PoolStorage storage $,
         uint256[] memory tokenIds,
         IAssetNFT.AssetState state
     ) private {
@@ -700,9 +872,8 @@ contract AssetLendingPool is
         $.assetNFT.batchSetAssetState(tokenIds, states);
     }
 
-    /// @dev Clears the active-loan mapping for every collateral token in the array.
     function _clearActiveLoans(
-        AssetLendingPoolStorage storage $,
+        PoolStorage storage $,
         uint256[] memory tokenIds
     ) private {
         for (uint256 i; i < tokenIds.length; ) {
@@ -713,14 +884,8 @@ contract AssetLendingPool is
         }
     }
 
-    /// @dev Shared settlement core for `repay` and `settleLoanRepaymentOnSale`.
-    ///      Pulls principal+interest from `payer` and releases all collateral to
-    ///      `recipient`. CEI: all state writes complete before external transfers.
-    ///      Returns the loan's principal, interest, and borrower for event emission.
-    /// @param requireBorrower If non-zero, reverts unless the loan borrower matches
-    ///        (the borrower-only check for `repay`); pass address(0) to skip.
     function _settleLoanRepayment(
-        AssetLendingPoolStorage storage $,
+        PoolStorage storage $,
         uint256 loanId,
         address payer,
         address recipient,
@@ -741,7 +906,6 @@ contract AssetLendingPool is
         $.activeLoanCount--;
         _clearActiveLoans($, tokenIds);
 
-        // Split interest between lenders and protocol.
         _distributeInterest($, interest);
 
         // ---- External interactions ----
@@ -751,7 +915,6 @@ contract AssetLendingPool is
             principal + interest
         );
 
-        // Unlock all NFTs (Loaned -> Held) and transfer each to the recipient.
         _setAssetStateBatch($, tokenIds, IAssetNFT.AssetState.Held);
         for (uint256 i; i < tokenIds.length; ) {
             $.assetNFT.transferFrom(address(this), recipient, tokenIds[i]);
@@ -763,42 +926,31 @@ contract AssetLendingPool is
         emit LoanRepaid(loanId, borrower, principal, interest);
     }
 
-    /// @dev Shared default-record resolution for `acquireDefaultedAsset` (Phase 1)
-    ///      and `purchaseDefaultedAsset` (Phase 2/3). Validates the record exists and
-    ///      is unresolved, enforces the phase window, marks it resolved, and re-credits
-    ///      the recovered principal to the pool. Returns the collateral token IDs and
-    ///      the outstanding value.
-    /// @param acquisitionPhase True to require the acquisition window (Phase 1);
-    ///        false to require past the acquisition window (Phase 2/3).
-    function _loadResolvableDefault(
-        AssetLendingPoolStorage storage $,
-        uint256 loanId,
-        bool acquisitionPhase
-    ) private returns (uint256[] memory tokenIds, uint256 outstandingValue) {
+    function _resolveAndRecredit(
+        PoolStorage storage $,
+        uint256 loanId
+    )
+        private
+        returns (uint256[] memory tokenIds, uint256 principal, uint256 interest)
+    {
         DefaultRecord storage rec = $.defaults[loanId];
         if (rec.defaultedAt == 0) revert AssetLendingPool__DefaultNotFound();
         if (rec.resolved) revert AssetLendingPool__DefaultAlreadyResolved();
 
-        if (acquisitionPhase) {
-            if (block.timestamp >= rec.defaultedAt + $.acquisitionWindow)
-                revert AssetLendingPool__NotInAcquisitionPhase();
-        } else {
-            if (block.timestamp < rec.defaultedAt + $.acquisitionWindow)
-                revert AssetLendingPool__NotInPurchasePhase();
-        }
-
         tokenIds = rec.tokenIds;
-        outstandingValue = rec.outstandingValue;
+        principal = rec.outstandingValue;
+        interest = rec.interestValue;
 
         rec.resolved = true;
 
-        // Re-credit the pool with the recovered principal.
-        $.totalDeposited += outstandingValue;
-        $.totalDefaultedPrincipal -= outstandingValue;
+        $.totalDeposited += principal;
+        $.totalDefaultedPrincipal -= principal;
+
+        _distributeInterest($, interest);
     }
 
     function _requireActiveLoan(
-        AssetLendingPoolStorage storage $,
+        PoolStorage storage $,
         uint256 loanId
     ) private view returns (Loan storage loan) {
         loan = $.loans[loanId];
@@ -808,37 +960,60 @@ contract AssetLendingPool is
     }
 
     function _collectOriginationFee(
-        AssetLendingPoolStorage storage $,
+        PoolStorage storage $,
         uint256 principal
     ) private returns (uint256 fee) {
-        fee = _calculateOriginationFee($, principal);
+        IAssetLendingPoolConfig cfg = $.config;
+        fee = cfg.calculateOriginationFee(principal);
         if (fee > 0) {
-            $.paymentToken.safeTransfer($.feeWallet, fee);
+            $.paymentToken.safeTransfer(cfg.feeWallet(), fee);
         }
     }
 
-    /// @dev Shared borrow core used by both `borrow` (single-asset) and `borrowBundle`.
-    ///      All validations run before any NFT is pulled or state is mutated.
+    /// @dev Checks that the bundle is non-empty, within MAX_BATCH, each token passes config
+    ///      eligibility (one external call for the whole bundle), and none already has an active
+    ///      loan. Returns the summed appraisal value.
+    function _validateBundle(
+        PoolStorage storage $,
+        uint256[] memory tokenIds
+    ) private view returns (uint256 summedAppraisal) {
+        uint256 len = tokenIds.length;
+        if (len == 0) revert AssetLendingPool__EmptyBundle();
+        if (len > MAX_BATCH)
+            revert AssetLendingPool__BatchTooLarge(len, MAX_BATCH);
+
+        // Single external call handles eligibility checks + appraisal sum for the whole bundle.
+        summedAppraisal = $.config.validateBundleAndSumAppraisals(tokenIds);
+
+        // Still check active-loan mapping locally (runtime state not visible to config).
+        for (uint256 i; i < len; ) {
+            if ($.tokenIdToActiveLoan[tokenIds[i]] != 0)
+                revert AssetLendingPool__ActiveLoanExists();
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
     function _borrow(
         uint256[] memory tokenIds,
         uint256 amount,
         uint8 termId
     ) private {
         if (amount == 0) revert AssetLendingPool__ZeroAmount();
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
+        IAssetLendingPoolConfig cfg = $.config;
 
-        TermConfig storage term = $.termConfigs[termId];
+        TermConfig memory term = cfg.getTermConfig(termId);
         if (!term.active) revert AssetLendingPool__InvalidTerm();
 
-        // Validate all tokens and compute summed appraisal — no state changes yet.
         uint256 summedAppraisal = _validateBundle($, tokenIds);
 
-        uint256 maxLoan = (summedAppraisal * $.ltvBps) / BPS;
+        uint256 maxLoan = (summedAppraisal * cfg.ltvBps()) / BPS;
         if (amount > maxLoan) revert AssetLendingPool__ExceedsLTV();
 
         _checkUtilization($, amount);
 
-        // Pull all NFTs from borrower (each transferFrom enforces Held state via AssetNFT).
         for (uint256 i; i < tokenIds.length; ) {
             $.assetNFT.transferFrom(msg.sender, address(this), tokenIds[i]);
             unchecked {
@@ -848,43 +1023,19 @@ contract AssetLendingPool is
 
         _originateLoan($, msg.sender, tokenIds, amount, termId, false);
 
-        // Disburse (minus origination fee)
         uint256 fee = _collectOriginationFee($, amount);
         $.paymentToken.safeTransfer(msg.sender, amount - fee);
     }
 
-    /// @dev Checks that the bundle is non-empty, within MAX_BATCH, each token is individually
-    ///      eligible, and none already has an active loan. Returns the summed appraisal value.
-    ///      Pure validation — no state mutations, no NFT transfers.
-    function _validateBundle(
-        AssetLendingPoolStorage storage $,
-        uint256[] memory tokenIds
-    ) private view returns (uint256 summedAppraisal) {
-        uint256 len = tokenIds.length;
-        if (len == 0) revert AssetLendingPool__EmptyBundle();
-        if (len > MAX_BATCH)
-            revert AssetLendingPool__BatchTooLarge(len, MAX_BATCH);
-        for (uint256 i; i < len; ) {
-            uint256 t = tokenIds[i];
-            _checkEligibility($, t);
-            if ($.tokenIdToActiveLoan[t] != 0)
-                revert AssetLendingPool__ActiveLoanExists();
-            summedAppraisal += $.appraisals[t].value;
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
     function _originateLoan(
-        AssetLendingPoolStorage storage $,
+        PoolStorage storage $,
         address borrower,
         uint256[] memory tokenIds,
         uint256 principal,
         uint8 termId,
         bool isMarketplaceFinanced
     ) private returns (uint256 loanId) {
-        TermConfig storage term = $.termConfigs[termId];
+        TermConfig memory term = $.config.getTermConfig(termId);
         uint256 interest =
             (principal * term.aprBps * term.duration) / (YEAR * BPS);
         uint256 expireTime = block.timestamp + term.duration;
@@ -905,7 +1056,6 @@ contract AssetLendingPool is
         });
         $.borrowerLoans[borrower].push(loanId);
 
-        // Register every collateral token in the active-loan mapping.
         for (uint256 i; i < tokenIds.length; ) {
             $.tokenIdToActiveLoan[tokenIds[i]] = loanId;
             unchecked {
@@ -939,7 +1089,7 @@ contract AssetLendingPool is
     }
 
     function _initiateDefault(uint256 loanId) private {
-        AssetLendingPoolStorage storage $ = _getStorage();
+        PoolStorage storage $ = _getStorage();
         Loan storage loan = _requireActiveLoan($, loanId);
 
         if (block.timestamp <= loan.expireTime)
@@ -951,48 +1101,59 @@ contract AssetLendingPool is
 
         loan.isDefaulted = true;
         $.totalBorrowed -= principal;
-        $.totalDeposited -= principal; // pool absorbs loss; re-credited on resolution
+        $.totalDeposited -= principal;
         $.activeLoanCount--;
         $.totalDefaultedPrincipal += principal;
 
-        // Clear active-loan mapping for every collateral token
         _clearActiveLoans($, tokenIds);
 
-        // Create the default record to track the lifecycle.
         $.defaults[loanId] = DefaultRecord({
             loanId: loanId,
             tokenIds: tokenIds,
             outstandingValue: principal,
             defaultedAt: block.timestamp,
-            resolved: false
+            resolved: false,
+            interestValue: loan.interest,
+            listedOnMarketplace: false
         });
 
-        // Transition all NFTs back to Held so they can be transferred during resolution.
         _setAssetStateBatch($, tokenIds, IAssetNFT.AssetState.Held);
 
         emit LoanDefaulted(loanId, borrower, tokenIds[0]);
         emit DefaultInitiated(loanId, tokenIds[0], principal);
     }
 
-    /// @dev Splits repaid interest between lenders (accInterestPerShare) and protocol (totalInterestEarned).
+    /// @dev Local utilization check — reads totalDeposited/totalBorrowed from runtime
+    ///      and maxUtilizationBps from the config contract.
+    function _checkUtilization(
+        PoolStorage storage $,
+        uint256 amount
+    ) private view {
+        uint256 maxBorrowable =
+            ($.totalDeposited * $.config.maxUtilizationBps()) / BPS;
+        if ($.totalBorrowed + amount > maxBorrowable)
+            revert AssetLendingPool__ExceedsMaxUtilization();
+    }
+
     function _distributeInterest(
-        AssetLendingPoolStorage storage $,
+        PoolStorage storage $,
         uint256 interest
     ) private {
         if (interest == 0) return;
         uint256 lenderPortion;
-        if ($.totalLenderDeposits > 0 && $.lenderShareBps > 0) {
-            lenderPortion = (interest * $.lenderShareBps) / BPS;
-            // Accumulate per-share reward (scaled by PRECISION to avoid rounding to zero).
-            $.accInterestPerShare +=
-                (lenderPortion * PRECISION) / $.totalLenderDeposits;
+        if ($.totalLenderDeposits > 0) {
+            uint256 lenderShareBps = $.config.lenderShareBps();
+            if (lenderShareBps > 0) {
+                lenderPortion = (interest * lenderShareBps) / BPS;
+                $.accInterestPerShare +=
+                    (lenderPortion * PRECISION) / $.totalLenderDeposits;
+            }
         }
         $.totalInterestEarned += interest - lenderPortion;
     }
 
-    /// @dev Returns the pending (unclaimed) lender interest for an address.
     function _pendingLenderInterest(
-        AssetLendingPoolStorage storage $,
+        PoolStorage storage $,
         address lender
     ) private view returns (uint256) {
         uint256 balance = $.lenderDeposits[lender];
@@ -1002,9 +1163,8 @@ contract AssetLendingPool is
             $.lenderRewardDebt[lender];
     }
 
-    /// @dev Claims all pending lender interest and resets the reward debt. Returns amount claimed.
     function _claimLenderInterestInternal(
-        AssetLendingPoolStorage storage $,
+        PoolStorage storage $,
         address lender
     ) private returns (uint256 pending) {
         pending = _pendingLenderInterest($, lender);
@@ -1015,11 +1175,8 @@ contract AssetLendingPool is
         emit LenderInterestClaimed(lender, pending);
     }
 
-    /// @dev Adds the new deposit's share of the current accumulator to reward debt
-    ///      so only future interest accrual counts toward this lender's new capital.
-    ///      Call BEFORE updating the deposit balance.
     function _accrueRewardDebtForDeposit(
-        AssetLendingPoolStorage storage $,
+        PoolStorage storage $,
         address lender,
         uint256 amount
     ) private {

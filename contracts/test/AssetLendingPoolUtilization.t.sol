@@ -5,7 +5,9 @@ import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {AssetLendingPool} from "../AssetLendingPool.sol";
+import {AssetLendingPoolConfig} from "../AssetLendingPoolConfig.sol";
 import {IAssetLendingPool} from "../interfaces/IAssetLendingPool.sol";
+import {IAssetLendingPoolConfig} from "../interfaces/IAssetLendingPoolConfig.sol";
 import {AssetNFT} from "../AssetNFT.sol";
 import {PermissionManager} from "../PermissionManager.sol";
 import {MockERC20} from "../test-helpers/MockERC20.sol";
@@ -22,6 +24,7 @@ contract MockFactoryForUtil {
 ///      via _checkUtilization in both the borrow and marketplace paths.
 contract AssetLendingPoolUtilizationTest is Test {
     AssetLendingPool internal pool;
+    AssetLendingPoolConfig internal config;
     AssetNFT internal assetNFT;
     PermissionManager internal pm;
     MockERC20 internal usdc;
@@ -73,13 +76,13 @@ contract AssetLendingPoolUtilizationTest is Test {
         );
         assetNFT = AssetNFT(address(assetNFTProxy));
 
-        // AssetLendingPool
+        // AssetLendingPoolConfig + AssetLendingPool
         MockFactoryForUtil mockFactory = new MockFactoryForUtil();
-        AssetLendingPool poolImpl = new AssetLendingPool();
-        ERC1967Proxy poolProxy = new ERC1967Proxy(
-            address(poolImpl),
+        AssetLendingPoolConfig configImpl = new AssetLendingPoolConfig();
+        ERC1967Proxy configProxy = new ERC1967Proxy(
+            address(configImpl),
             abi.encodeCall(
-                AssetLendingPool.initialize,
+                AssetLendingPoolConfig.initialize,
                 (
                     admin,
                     address(usdc),
@@ -91,6 +94,13 @@ contract AssetLendingPoolUtilizationTest is Test {
                     address(mockFactory)
                 )
             )
+        );
+        config = AssetLendingPoolConfig(address(configProxy));
+
+        AssetLendingPool poolImpl = new AssetLendingPool();
+        ERC1967Proxy poolProxy = new ERC1967Proxy(
+            address(poolImpl),
+            abi.encodeCall(AssetLendingPool.initialize, (admin, address(config)))
         );
         pool = AssetLendingPool(address(poolProxy));
 
@@ -123,7 +133,7 @@ contract AssetLendingPoolUtilizationTest is Test {
         vm.prank(minter);
         assetNFT.batchMint(recipients, uris);
         vm.prank(admin);
-        pool.setAppraisal(tokenId, appraisalValue, 0, 0);
+        config.setAppraisal(tokenId, appraisalValue, 0, 0);
     }
 
     function _borrow(
@@ -153,7 +163,7 @@ contract AssetLendingPoolUtilizationTest is Test {
 
     function test_SetMaxUtilizationBps_OwnerCanUpdate() public {
         vm.prank(admin);
-        pool.setMaxUtilizationBps(9000);
+        config.setMaxUtilizationBps(9000);
 
         IAssetLendingPool.PoolInfo memory info = pool.getPoolInfo();
         assertEq(info.maxUtilizationBps, 9000);
@@ -161,37 +171,37 @@ contract AssetLendingPoolUtilizationTest is Test {
 
     function test_SetMaxUtilizationBps_EmitsEvent() public {
         vm.expectEmit(false, false, false, true);
-        emit IAssetLendingPool.MaxUtilizationUpdated(8000, 9500);
+        emit IAssetLendingPoolConfig.MaxUtilizationUpdated(8000, 9500);
         vm.prank(admin);
-        pool.setMaxUtilizationBps(9500);
+        config.setMaxUtilizationBps(9500);
     }
 
     function test_SetMaxUtilizationBps_AcceptsBoundaryValues() public {
         vm.prank(admin);
-        pool.setMaxUtilizationBps(1); // minimum
+        config.setMaxUtilizationBps(1); // minimum
         assertEq(pool.getPoolInfo().maxUtilizationBps, 1);
 
         vm.prank(admin);
-        pool.setMaxUtilizationBps(10_000); // maximum (no reserve)
+        config.setMaxUtilizationBps(10_000); // maximum (no reserve)
         assertEq(pool.getPoolInfo().maxUtilizationBps, 10_000);
     }
 
     function test_SetMaxUtilizationBps_RejectsZero() public {
         vm.prank(admin);
         vm.expectRevert(IAssetLendingPool.AssetLendingPool__InvalidBps.selector);
-        pool.setMaxUtilizationBps(0);
+        config.setMaxUtilizationBps(0);
     }
 
     function test_SetMaxUtilizationBps_RejectsAboveBps() public {
         vm.prank(admin);
         vm.expectRevert(IAssetLendingPool.AssetLendingPool__InvalidBps.selector);
-        pool.setMaxUtilizationBps(10_001);
+        config.setMaxUtilizationBps(10_001);
     }
 
     function test_SetMaxUtilizationBps_NonOwnerReverts() public {
         vm.prank(unauthorized);
         vm.expectRevert();
-        pool.setMaxUtilizationBps(9000);
+        config.setMaxUtilizationBps(9000);
     }
 
     // =========================================================================
@@ -256,7 +266,7 @@ contract AssetLendingPoolUtilizationTest is Test {
     function test_Borrow_Cap10000_EqualsLegacyFullLiquidity() public {
         // With cap == 10000 (100%), borrowing exactly totalDeposited - totalBorrowed succeeds.
         vm.prank(admin);
-        pool.setMaxUtilizationBps(10_000);
+        config.setMaxUtilizationBps(10_000);
 
         uint256 tokenId = _mintAndAppraise(borrower, APPRAISAL_VALUE);
         _borrow(borrower, tokenId, POOL_DEPOSIT); // 100% utilization — should succeed
@@ -266,7 +276,7 @@ contract AssetLendingPoolUtilizationTest is Test {
     function test_Borrow_Cap10000_OneWeiOverStillReverts() public {
         // Even with the reserve disabled, can't borrow more than deposited.
         vm.prank(admin);
-        pool.setMaxUtilizationBps(10_000);
+        config.setMaxUtilizationBps(10_000);
 
         uint256 tokenId = _mintAndAppraise(borrower, APPRAISAL_VALUE);
         vm.startPrank(borrower);
@@ -285,7 +295,7 @@ contract AssetLendingPoolUtilizationTest is Test {
     function test_LenderWithdraw_CanAccessReserveCapital() public {
         // Enable lender deposits
         vm.prank(admin);
-        pool.setLenderConfig(8000, true);
+        config.setLenderConfig(8000, true);
 
         // Lender deposits 100 USDC
         usdc.mint(lender, 100e6);
