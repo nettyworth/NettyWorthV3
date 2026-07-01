@@ -270,6 +270,8 @@ describe("PackMachine Integration", async function () {
     chainId: number,
     userAddr: `0x${string}`,
     nonce: bigint,
+    packId: bigint = 0n,
+    codeId: `0x${string}` = `0x${"00".repeat(32)}`,
   ) {
     return {
       domain: {
@@ -283,10 +285,11 @@ describe("PackMachine Integration", async function () {
           { name: "user", type: "address" },
           { name: "packId", type: "uint256" },
           { name: "nonce", type: "uint256" },
+          { name: "codeId", type: "bytes32" },
         ],
       },
       primaryType: "OpenPack" as const,
-      message: { user: userAddr, packId: 0n, nonce },
+      message: { user: userAddr, packId, nonce, codeId },
     };
   }
 

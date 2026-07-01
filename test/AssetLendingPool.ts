@@ -7,6 +7,7 @@ import {
   toHex,
   keccak256,
   getAddress,
+  zeroAddress,
   type Address,
   type WalletClient,
 } from "viem";
@@ -163,6 +164,7 @@ describe("AssetLendingPool", async function () {
       price: bigint;
       nonce: bigint;
       expiry: bigint;
+      buyer: Address;
     },
     marketplaceAddress: Address,
   ): Promise<`0x${string}`> {
@@ -184,6 +186,7 @@ describe("AssetLendingPool", async function () {
           { name: "price", type: "uint256" },
           { name: "nonce", type: "uint256" },
           { name: "expiry", type: "uint256" },
+          { name: "buyer", type: "address" },
         ],
       },
       primaryType: "SignedListing",
@@ -459,6 +462,7 @@ describe("AssetLendingPool", async function () {
         price: listingPrice,
         nonce: 1n,
         expiry,
+        buyer: zeroAddress,
       };
       const sig = await signListing(walletSeller, listing, fakeMarketplace);
 
@@ -524,6 +528,7 @@ describe("AssetLendingPool", async function () {
         price: APPRAISAL_VALUE,
         nonce: 1n,
         expiry,
+        buyer: zeroAddress,
       };
       const sig = await signListing(walletSeller, listing, fakeMarketplace);
 
@@ -560,6 +565,7 @@ describe("AssetLendingPool", async function () {
         price: APPRAISAL_VALUE,
         nonce: 1n,
         expiry,
+        buyer: zeroAddress,
       };
       const sig = await signListing(walletSeller, listing, fakeMarketplace);
 
@@ -597,6 +603,7 @@ describe("AssetLendingPool", async function () {
         price: APPRAISAL_VALUE,
         nonce: 1n,
         expiry,
+        buyer: zeroAddress,
       };
       // Sign with admin wallet (wrong signer)
       const badSig = await signListing(walletAdmin, listing, fakeMarketplace);

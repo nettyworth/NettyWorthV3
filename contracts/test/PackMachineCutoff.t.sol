@@ -38,7 +38,7 @@ contract PackMachineCutoffTest is Test {
     address internal operator;
 
     bytes32 internal constant OPEN_PACK_TYPEHASH = keccak256(
-        "OpenPack(address user,uint256 packId,uint256 nonce)"
+        "OpenPack(address user,uint256 packId,uint256 nonce,bytes32 codeId)"
     );
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -182,7 +182,7 @@ contract PackMachineCutoffTest is Test {
         uint256 nonce
     ) internal view returns (bytes memory) {
         bytes32 structHash = keccak256(
-            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce)
+            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce, bytes32(0))
         );
         bytes32 domainSep = keccak256(
             abi.encode(
@@ -239,8 +239,12 @@ contract PackMachineCutoffTest is Test {
 
         // Set up a mock BuybackPool caller (just use a plain address with access)
         address mockPool = makeAddr("mockPool");
+        vm.prank(pauser);
+        packMachine.pause();
         vm.prank(operator);
         packMachine.setBuybackPool(mockPool);
+        vm.prank(pauser);
+        packMachine.unpause();
 
         // Mint an NFT directly to mockPool and have it call depositFromPool
         uint256 startId = assetNFT.totalSupply() + 1;
@@ -469,8 +473,12 @@ contract PackMachineCutoffTest is Test {
         assertEq(packMachine.getTotalInventory(), 5);
 
         address mockPool = makeAddr("mockPool");
+        vm.prank(pauser);
+        packMachine.pause();
         vm.prank(operator);
         packMachine.setBuybackPool(mockPool);
+        vm.prank(pauser);
+        packMachine.unpause();
 
         uint256 startId = assetNFT.totalSupply() + 1;
         address[] memory recipients = new address[](1);

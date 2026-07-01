@@ -101,9 +101,11 @@ contract BuybackPool is
     // EIP-712 typehash
     // =========================================================================
 
-    /// @dev keccak256("FMVQuote(uint256 tokenId,uint256 fmv,uint256 deadline,uint256 nonce)")
+    /// @dev keccak256("FMVQuote(uint256 tokenId,uint256 fmv,uint256 deadline,uint256 nonce,address seller)")
+    ///      seller is bound so a leaked quote cannot be redeemed by anyone other than the
+    ///      intended recipient (H002 fix).
     bytes32 private constant FMV_QUOTE_TYPEHASH = keccak256(
-        "FMVQuote(uint256 tokenId,uint256 fmv,uint256 deadline,uint256 nonce)"
+        "FMVQuote(uint256 tokenId,uint256 fmv,uint256 deadline,uint256 nonce,address seller)"
     );
 
     // =========================================================================
@@ -131,6 +133,9 @@ contract BuybackPool is
         address indexed sourcePackMachine,
         uint8 tier
     );
+    /// @notice Emitted when a buyback NFT cannot be redeposited because its source
+    ///         PackMachine has been deregistered. Admin must call rescueNFT to recover (L003 fix).
+    event TokenStuck(uint256 indexed tokenId, address indexed sourceMachine);
     event DefaultBuybackBpsUpdated(uint16 oldBps, uint16 newBps);
     event PackMachineBuybackBpsUpdated(
         address indexed machine,
@@ -196,6 +201,8 @@ contract BuybackPool is
     error BuybackPool__FMVQuoteTokenMismatch(uint256 expected, uint256 given);
     /// @notice Attempted to set the default model to Unset, which is not valid.
     error BuybackPool__InvalidModel();
+    /// @notice The FMV quote's seller does not match the caller (H002 fix).
+    error BuybackPool__FMVQuoteSellerMismatch(address expected, address actual);
 
     uint16 private constant BPS_PRECISION = 10000;
 
@@ -292,7 +299,7 @@ contract BuybackPool is
         _executeBuyback(
             tokenId,
             bytes32(0),
-            IBuybackPool.FMVQuote(0, 0, 0, 0),
+            IBuybackPool.FMVQuote(0, 0, 0, 0, address(0)),
             "",
             false
         );
@@ -311,7 +318,7 @@ contract BuybackPool is
         _executeBuyback(
             tokenId,
             codeId,
-            IBuybackPool.FMVQuote(0, 0, 0, 0),
+            IBuybackPool.FMVQuote(0, 0, 0, 0, address(0)),
             "",
             false
         );
@@ -693,14 +700,19 @@ contract BuybackPool is
         if (quote.nonce != expectedNonce)
             revert BuybackPool__FMVQuoteBadNonce(expectedNonce, quote.nonce);
 
-        // EIP-712 signature verification.
+        // Seller binding: the quote must have been issued for this specific caller (H002 fix).
+        if (quote.seller != caller)
+            revert BuybackPool__FMVQuoteSellerMismatch(quote.seller, caller);
+
+        // EIP-712 signature verification (seller is now part of the struct hash).
         bytes32 structHash = keccak256(
             abi.encode(
                 FMV_QUOTE_TYPEHASH,
                 quote.tokenId,
                 quote.fmv,
                 quote.deadline,
-                quote.nonce
+                quote.nonce,
+                quote.seller
             )
         );
         address signer = _hashTypedDataV4(structHash).recover(sig);
@@ -716,9 +728,6 @@ contract BuybackPool is
         // Consume the nonce.
         $.fmvQuoteNonce[tokenId] = expectedNonce + 1;
 
-        // Suppress unused-variable warning; caller kept for future allowlist use.
-        caller;
-
         return quote.fmv;
     }
 
@@ -729,8 +738,10 @@ contract BuybackPool is
         address sourceMachine
     ) private {
         // If the source machine is no longer a valid PackMachine (e.g. deregistered),
-        // hold the NFT here — admin can rescue it later.
+        // hold the NFT here — admin can rescue it later. Emit TokenStuck so off-chain
+        // tooling can flag the NFT for admin rescue (L003 fix).
         if (!IPackMachineFactory($.factory).isPackMachine(sourceMachine)) {
+            emit TokenStuck(tokenId, sourceMachine);
             return;
         }
 

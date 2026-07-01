@@ -40,6 +40,13 @@ interface IAssetLendingPool {
         bool isPaid;
         bool isDefaulted;
         bool isMarketplaceFinanced;
+        // ---- appended fields (append-only for upgrade safety) ----
+        /// @dev lenderShareBps captured at origination so mid-loan admin changes don't
+        ///      retroactively reprice in-flight interest (M003 fix).
+        uint256 lenderShareBpsSnapshot;
+        /// @dev totalLenderDeposits captured at origination so JIT deposit sandwiches
+        ///      cannot dilute honest lenders' share of a specific loan's interest (H001 fix).
+        uint256 lenderDepositsSnapshot;
     }
 
     struct AssetAppraisal {
@@ -246,6 +253,8 @@ interface IAssetLendingPool {
     error AssetLendingPool__FinanceWalletNotSet();
     /// @dev Thrown when purchaseDefaultedAsset is called (deprecated; use marketplace auction path).
     error AssetLendingPool__Deprecated();
+    /// @dev Thrown by financeMarketplacePurchase when seller == address(this) (M009 fix).
+    error AssetLendingPool__InvalidSeller();
 
     // =========================================================================
     // Borrower functions
@@ -422,6 +431,18 @@ interface IAssetLendingPool {
 
     /// @notice Active loan ID for a given token (0 if no active loan).
     function getActiveLoanId(uint256 tokenId) external view returns (uint256);
+
+    /// @notice Returns the borrower address for a given loan (address(0) if not found).
+    ///         Used by the marketplace to enforce seller == borrower on collateralized sales (C004 fix).
+    function getLoanBorrower(uint256 loanId) external view returns (address);
+
+    /// @notice Returns the number of collateral tokens in a loan.
+    ///         Used by the marketplace to reject single-token sales of multi-NFT bundle loans (H003 fix).
+    function getLoanCollateralCount(uint256 loanId) external view returns (uint256);
+
+    /// @notice Returns the AssetNFT contract address used by this pool.
+    ///         Used by the marketplace to guard loan lookups to the correct collection (H005 fix).
+    function getAssetNFT() external view returns (address);
 
     /// @notice Debt components for the active loan collateralized by `tokenId`.
     /// @return principal Loan principal.

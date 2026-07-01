@@ -5,6 +5,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { waitForCode } from "./lib/deployments.js";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sleep } from "./lib/sleep.js";
 
 const TRUSTED_FORWARDER = (process.env.TRUSTED_FORWARDER ??
   "0x0000000000000000000000000000000000000000") as `0x${string}`;
@@ -121,6 +122,7 @@ const proxy = await viem.deployContract("ERC1967ProxyHelper", [
   initData,
 ]);
 console.log(`  Proxy: ${proxy.address}`);
+await sleep(5000);
 
 console.log("[4/4] Verifying deployment...");
 const nft = await viem.getContractAt("AssetNFT", proxy.address);

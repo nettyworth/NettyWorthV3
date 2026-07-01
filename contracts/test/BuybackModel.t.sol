@@ -53,14 +53,14 @@ contract BuybackModelTest is Test {
         0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     bytes32 internal constant OPEN_PACK_TYPEHASH =
-        keccak256("OpenPack(address user,uint256 packId,uint256 nonce)");
+        keccak256("OpenPack(address user,uint256 packId,uint256 nonce,bytes32 codeId)");
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH =
         keccak256(
             "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
         );
     bytes32 internal constant FMV_QUOTE_TYPEHASH =
         keccak256(
-            "FMVQuote(uint256 tokenId,uint256 fmv,uint256 deadline,uint256 nonce)"
+            "FMVQuote(uint256 tokenId,uint256 fmv,uint256 deadline,uint256 nonce,address seller)"
         );
 
     uint128 internal constant PRICE = 10e6; // 10 USDC
@@ -187,8 +187,12 @@ contract BuybackModelTest is Test {
         );
         pool = BuybackPool(address(poolProxy));
 
+        vm.prank(pauser);
+        packMachine.pause();
         vm.prank(operator);
         packMachine.setBuybackPool(address(pool));
+        vm.prank(pauser);
+        packMachine.unpause();
         vm.prank(operator);
         packRegistry.setPackBuybackAllocation(address(packMachine), 0, BUYBACK_ALLOC_BPS);
         vm.prank(operator);
@@ -228,7 +232,7 @@ contract BuybackModelTest is Test {
         uint256 nonce
     ) internal view returns (bytes memory) {
         bytes32 structHash = keccak256(
-            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce)
+            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce, bytes32(0))
         );
         bytes32 domainSeparator = keccak256(
             abi.encode(
@@ -285,13 +289,15 @@ contract BuybackModelTest is Test {
         uint256 tokenId,
         uint256 fmv,
         uint256 deadline,
-        uint256 nonce
+        uint256 nonce,
+        address seller
     ) internal view returns (IBuybackPool.FMVQuote memory quote, bytes memory sig) {
         quote = IBuybackPool.FMVQuote({
             tokenId: tokenId,
             fmv: fmv,
             deadline: deadline,
-            nonce: nonce
+            nonce: nonce,
+            seller: seller
         });
         // Build EIP-712 domain separator matching what BuybackPool uses:
         // name="NettyWorthBuyback", version="1"
@@ -305,7 +311,7 @@ contract BuybackModelTest is Test {
             )
         );
         bytes32 structHash = keccak256(
-            abi.encode(FMV_QUOTE_TYPEHASH, tokenId, fmv, deadline, nonce)
+            abi.encode(FMV_QUOTE_TYPEHASH, tokenId, fmv, deadline, nonce, seller)
         );
         bytes32 digest = keccak256(
             abi.encodePacked("\x19\x01", domainSeparator, structHash)
@@ -432,7 +438,8 @@ contract BuybackModelTest is Test {
             tokenId,
             fmv,
             deadline,
-            nonce
+            nonce,
+            user
         );
 
         uint256 expected = (fmv * 8000) / 10000; // 80% of $100 = $80
@@ -464,7 +471,8 @@ contract BuybackModelTest is Test {
             tokenId,
             fmv,
             deadline,
-            pool.fmvQuoteNonce(tokenId)
+            pool.fmvQuoteNonce(tokenId),
+            user
         );
 
         // FMV payout must differ from amount-spent payout
@@ -518,7 +526,8 @@ contract BuybackModelTest is Test {
             tokenId,
             999e6, // large FMV — should be ignored
             block.timestamp + 1 hours,
-            pool.fmvQuoteNonce(tokenId)
+            pool.fmvQuoteNonce(tokenId),
+            user
         );
 
         uint256 expectedAmountSpent = (uint256(PRICE_PER_CARD) * 8000) / 10000;
@@ -550,7 +559,8 @@ contract BuybackModelTest is Test {
             tokenId: tokenId,
             fmv: 100e6,
             deadline: block.timestamp + 1 hours,
-            nonce: pool.fmvQuoteNonce(tokenId)
+            nonce: pool.fmvQuoteNonce(tokenId),
+            seller: user
         });
         bytes32 domainSeparator = keccak256(
             abi.encode(
@@ -567,7 +577,8 @@ contract BuybackModelTest is Test {
                 quote.tokenId,
                 quote.fmv,
                 quote.deadline,
-                quote.nonce
+                quote.nonce,
+                quote.seller
             )
         );
         bytes32 digest = keccak256(
@@ -604,7 +615,8 @@ contract BuybackModelTest is Test {
             tokenId,
             100e6,
             deadline,
-            pool.fmvQuoteNonce(tokenId)
+            pool.fmvQuoteNonce(tokenId),
+            user
         );
 
         vm.prank(user);
@@ -637,7 +649,8 @@ contract BuybackModelTest is Test {
             tokenId,
             100e6,
             block.timestamp + 1 hours,
-            wrongNonce
+            wrongNonce,
+            user
         );
 
         vm.prank(user);
@@ -671,7 +684,8 @@ contract BuybackModelTest is Test {
             wrongTokenId,
             100e6,
             block.timestamp + 1 hours,
-            0
+            0,
+            user
         );
 
         vm.prank(user);
@@ -706,7 +720,8 @@ contract BuybackModelTest is Test {
             tokenId,
             100e6,
             block.timestamp + 1 hours,
-            nonceBefore
+            nonceBefore,
+            user
         );
 
         vm.prank(user);
@@ -736,7 +751,8 @@ contract BuybackModelTest is Test {
             tokenId,
             100e6,
             block.timestamp + 1 hours,
-            nonce
+            nonce,
+            user
         );
 
         // First use: succeeds, nonce = 0 → 1
@@ -896,7 +912,8 @@ contract BuybackModelTest is Test {
             tokenId,
             100e6,
             block.timestamp + 1 hours,
-            pool.fmvQuoteNonce(tokenId)
+            pool.fmvQuoteNonce(tokenId),
+            user
         );
 
         vm.prank(user);

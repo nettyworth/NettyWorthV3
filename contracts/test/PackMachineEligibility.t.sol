@@ -43,7 +43,7 @@ contract PackMachineEligibilityTest is Test {
         0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     bytes32 internal constant OPEN_PACK_TYPEHASH = keccak256(
-        "OpenPack(address user,uint256 packId,uint256 nonce)"
+        "OpenPack(address user,uint256 packId,uint256 nonce,bytes32 codeId)"
     );
 
     uint128 internal constant PRICE = 10e6; // 10 USDC
@@ -199,7 +199,7 @@ contract PackMachineEligibilityTest is Test {
             )
         );
         bytes32 structHash = keccak256(
-            abi.encode(OPEN_PACK_TYPEHASH, user_, packId, nonce)
+            abi.encode(OPEN_PACK_TYPEHASH, user_, packId, nonce, bytes32(0))
         );
         bytes32 digest = keccak256(
             abi.encodePacked("\x19\x01", domainSeparator, structHash)

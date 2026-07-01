@@ -114,10 +114,6 @@ interface IPackMachine {
     // Views — pack (pass-throughs to PackRegistry)
     // =========================================================================
 
-    function getPackCount() external view returns (uint256);
-
-    function getPack(uint256 packId) external view returns (PackTypes.Pack memory);
-
     function getPackPrice(uint256 packId) external view returns (uint128);
 
     function getPackCardsPerPack(uint256 packId) external view returns (uint8);
@@ -129,10 +125,6 @@ interface IPackMachine {
     function getPackBuybackAllocationBps(
         uint256 packId
     ) external view returns (uint16);
-
-    function isPackActive(uint256 packId) external view returns (bool);
-
-    function isPackFinished(uint256 packId) external view returns (bool);
 
     // =========================================================================
     // Views — machine-wide pool

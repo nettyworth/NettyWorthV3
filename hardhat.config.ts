@@ -33,10 +33,12 @@ export default defineConfig({
     hardhatMainnet: {
       type: "edr-simulated",
       chainType: "l1",
+      allowUnlimitedContractSize: true,
     },
     hardhatOp: {
       type: "edr-simulated",
       chainType: "op",
+      allowUnlimitedContractSize: true,
     },
     forkMainnet: {
       type: "edr-simulated",
@@ -50,6 +52,13 @@ export default defineConfig({
       chainType: "op",
       forking: {
         url: configVariable("BASE_RPC_URL"),
+      },
+    },
+    forkBaseSepolia: {
+      type: "edr-simulated",
+      chainType: "op",
+      forking: {
+        url: configVariable("BASE_SEPOLIA_RPC_URL"),
       },
     },
     forkSepolia: {
@@ -76,6 +85,12 @@ export default defineConfig({
       chainType: "op",
       url: configVariable("BASE_RPC_URL"),
       accounts: [configVariable("BASE_PRIVATE_KEY")],
+    },
+    baseSepolia: {
+      type: "http",
+      chainType: "op",
+      url: configVariable("BASE_SEPOLIA_RPC_URL"),
+      accounts: [configVariable("BASE_SEPOLIA_PRIVATE_KEY")],
     },
   },
   contractSizer: {

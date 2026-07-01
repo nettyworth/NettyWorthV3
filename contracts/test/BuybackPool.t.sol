@@ -41,7 +41,7 @@ contract BuybackPoolTest is Test {
         0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     bytes32 internal constant OPEN_PACK_TYPEHASH = keccak256(
-        "OpenPack(address user,uint256 packId,uint256 nonce)"
+        "OpenPack(address user,uint256 packId,uint256 nonce,bytes32 codeId)"
     );
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -167,9 +167,13 @@ contract BuybackPoolTest is Test {
         );
         pool = BuybackPool(address(poolProxy));
 
-        // Wire up: PackMachine → BuybackPool
+        // Wire up: PackMachine → BuybackPool (setBuybackPool requires paused — L001 fix)
+        vm.prank(pauser);
+        packMachine.pause();
         vm.prank(operator);
         packMachine.setBuybackPool(address(pool));
+        vm.prank(pauser);
+        packMachine.unpause();
         vm.prank(operator);
         packRegistry.setPackBuybackAllocation(address(packMachine), 0, BUYBACK_ALLOC_BPS);
 
@@ -214,7 +218,7 @@ contract BuybackPoolTest is Test {
         uint256 nonce
     ) internal view returns (bytes memory) {
         bytes32 structHash = keccak256(
-            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce)
+            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce, bytes32(0))
         );
         bytes32 domainSeparator = keccak256(
             abi.encode(
@@ -566,8 +570,12 @@ contract BuybackPoolTest is Test {
 
         vm.prank(operator);
         vrfRouter.setAuthorizedPackMachine(clone2Addr, true);
+        vm.prank(pauser);
+        packMachine2.pause();
         vm.prank(operator);
         packMachine2.setBuybackPool(address(pool));
+        vm.prank(pauser);
+        packMachine2.unpause();
         vm.prank(operator);
         packRegistry.setPackBuybackAllocation(clone2Addr, 0, BUYBACK_ALLOC_BPS);
         vm.prank(operator);

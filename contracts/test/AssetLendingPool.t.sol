@@ -84,7 +84,7 @@ contract AssetLendingPoolTest is Test {
     );
     bytes32 internal constant SIGNED_LISTING_TYPEHASH = keccak256(
         "SignedListing(address seller,address collection,uint256 tokenId,address paymentToken,"
-        "uint256 price,uint256 nonce,uint256 expiry)"
+        "uint256 price,uint256 nonce,uint256 expiry,address buyer)"
     );
 
     // Default appraisal values
@@ -237,7 +237,8 @@ contract AssetLendingPoolTest is Test {
                 l.paymentToken,
                 l.price,
                 l.nonce,
-                l.expiry
+                l.expiry,
+                l.buyer
             )
         );
         bytes32 digest = keccak256(
@@ -260,7 +261,8 @@ contract AssetLendingPoolTest is Test {
             paymentToken: address(usdc),
             price: price,
             nonce: nonce,
-            expiry: expiry
+            expiry: expiry,
+            buyer: address(0)
         });
     }
 

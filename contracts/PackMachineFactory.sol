@@ -43,6 +43,12 @@ contract PackMachineFactory is
         /// @dev PackRegistry proxy address. Clones read pack definitions from here via
         ///      IPackMachineFactory.packRegistry(). Must be set before createPackMachine.
         address packRegistry;
+        // ── Appended ──────────────────────────────────────────────────────────
+        /// @dev Global first-open discount. When enabled, a wallet that has never opened
+        ///      a pack on a given PackMachine receives `firstOpenDiscountBps` off its first
+        ///      purchase. Discount flag is reset on a fully-failed (zero-card) VRF open.
+        bool firstOpenDiscountEnabled;
+        uint16 firstOpenDiscountBps;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.PackMachineFactory")) - 1)) & ~bytes32(uint256(0xff))
@@ -90,6 +96,7 @@ contract PackMachineFactory is
         address indexed oldRegistry,
         address indexed newRegistry
     );
+    event FirstOpenDiscountUpdated(bool enabled, uint16 bps);
 
     // =========================================================================
     // Errors
@@ -104,6 +111,7 @@ contract PackMachineFactory is
     error PackMachineFactory__OnlyPackMachine(address caller);
     error PackMachineFactory__InvalidCardsPerPack();
     error PackMachineFactory__PackRegistryNotSet();
+    error PackMachineFactory__InvalidDiscountBps();
 
     // =========================================================================
     // Modifiers
@@ -334,6 +342,20 @@ contract PackMachineFactory is
         $.packRegistry = registry;
     }
 
+    /// @notice Configure the global first-open pack discount.
+    /// @param enabled Whether the discount is active.
+    /// @param bps     Discount in basis points (max 10 000 = 100%).
+    function setFirstOpenDiscount(
+        bool enabled,
+        uint16 bps
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
+        if (bps > 10_000) revert PackMachineFactory__InvalidDiscountBps();
+        PackMachineFactoryStorage storage $ = _getStorage();
+        $.firstOpenDiscountEnabled = enabled;
+        $.firstOpenDiscountBps = bps;
+        emit FirstOpenDiscountUpdated(enabled, bps);
+    }
+
     // =========================================================================
     // Views
     // =========================================================================
@@ -372,6 +394,14 @@ contract PackMachineFactory is
 
     function getAllPackMachines() external view returns (address[] memory) {
         return _getStorage().allPackMachines;
+    }
+
+    function firstOpenDiscountEnabled() external view returns (bool) {
+        return _getStorage().firstOpenDiscountEnabled;
+    }
+
+    function firstOpenDiscountBps() external view returns (uint16) {
+        return _getStorage().firstOpenDiscountBps;
     }
 
     function isTrustedForwarder(

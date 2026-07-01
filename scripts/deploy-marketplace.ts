@@ -275,12 +275,16 @@ await sleep(STEP_DELAY_MS);
 console.log("[4/6] Configuring AssetNFT shipment references...");
 const nft = await viem.getContractAt("AssetNFT", assetNFTProxy);
 if (process.env.SKIP_NFT_WIRING !== "true") {
+  await sleep(STEP_DELAY_MS);
   let hash = await nft.write.setPaymentToken([paymentToken]);
   await publicClient.waitForTransactionReceipt({ hash });
+  await sleep(STEP_DELAY_MS);
   hash = await nft.write.setTreasury([treasury]);
   await publicClient.waitForTransactionReceipt({ hash });
+  await sleep(STEP_DELAY_MS);
   hash = await nft.write.setFeeController([feeControllerProxy]);
   await publicClient.waitForTransactionReceipt({ hash });
+  await sleep(STEP_DELAY_MS);
   hash = await nft.write.setLendingPool([lendingPoolProxy]);
   await publicClient.waitForTransactionReceipt({ hash });
   console.log(

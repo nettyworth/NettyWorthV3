@@ -42,7 +42,7 @@ contract PackMachineTest is Test {
         0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     bytes32 internal constant OPEN_PACK_TYPEHASH = keccak256(
-        "OpenPack(address user,uint256 packId,uint256 nonce)"
+        "OpenPack(address user,uint256 packId,uint256 nonce,bytes32 codeId)"
     );
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -224,7 +224,7 @@ contract PackMachineTest is Test {
         uint256 nonce
     ) internal view returns (bytes memory) {
         bytes32 structHash = keccak256(
-            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce)
+            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce, bytes32(0))
         );
         bytes32 domainSeparator = keccak256(
             abi.encode(
@@ -274,7 +274,7 @@ contract PackMachineTest is Test {
         uint256 nonce
     ) internal view returns (bytes memory) {
         bytes32 structHash = keccak256(
-            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce)
+            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce, bytes32(0))
         );
         bytes32 domainSeparator = keccak256(
             abi.encode(
@@ -648,7 +648,7 @@ contract PackMachineTest is Test {
         usdc.approve(futureClone, PRICE);
 
         bytes32 structHash = keccak256(
-            abi.encode(OPEN_PACK_TYPEHASH, user, uint256(0), uint256(0))
+            abi.encode(OPEN_PACK_TYPEHASH, user, uint256(0), uint256(0), bytes32(0))
         );
         bytes32 domainSep = keccak256(
             abi.encode(
@@ -731,7 +731,7 @@ contract PackMachineTest is Test {
         // Sign with unauthorized key
         (, uint256 badPk) = makeAddrAndKey("badSigner");
         bytes32 structHash = keccak256(
-            abi.encode(OPEN_PACK_TYPEHASH, user, uint256(0), uint256(0))
+            abi.encode(OPEN_PACK_TYPEHASH, user, uint256(0), uint256(0), bytes32(0))
         );
         bytes32 domainSep = keccak256(
             abi.encode(
@@ -834,7 +834,7 @@ contract PackMachineTest is Test {
 
         (, uint256 badPk) = makeAddrAndKey("badSigner");
         bytes32 structHash = keccak256(
-            abi.encode(OPEN_PACK_TYPEHASH, user, uint256(0), uint256(0))
+            abi.encode(OPEN_PACK_TYPEHASH, user, uint256(0), uint256(0), bytes32(0))
         );
         bytes32 domainSep = keccak256(
             abi.encode(

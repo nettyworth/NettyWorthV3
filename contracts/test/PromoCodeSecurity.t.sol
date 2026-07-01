@@ -72,7 +72,7 @@ contract PromoCodeSecurityTest is Test {
         0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     bytes32 internal constant OPEN_PACK_TYPEHASH = keccak256(
-        "OpenPack(address user,uint256 packId,uint256 nonce)"
+        "OpenPack(address user,uint256 packId,uint256 nonce,bytes32 codeId)"
     );
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -191,8 +191,13 @@ contract PromoCodeSecurityTest is Test {
         );
         pool = BuybackPool(address(poolProxy));
 
+        // setBuybackPool requires paused (L001 fix)
+        vm.prank(pauser);
+        packMachine.pause();
         vm.prank(operator);
         packMachine.setBuybackPool(address(pool));
+        vm.prank(pauser);
+        packMachine.unpause();
         vm.prank(operator);
         packRegistry.setPackBuybackAllocation(address(packMachine), 0, BUYBACK_ALLOC_BPS);
         vm.prank(operator);
@@ -281,14 +286,16 @@ contract PromoCodeSecurityTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev Build an operator-signed OpenPack digest for a given (machine, user, nonce).
+    /// @dev Build an operator-signed OpenPack digest for a given (machine, user, nonce, codeId).
+    ///      codeId must match the code passed to openPack() — it is bound in the digest (L004 fix).
     function _signOpenPackFor(
         address machine,
         address user_,
         uint256 nonce,
-        uint256 signerPk
+        uint256 signerPk,
+        bytes32 codeId
     ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce));
+        bytes32 structHash = keccak256(abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce, codeId));
         bytes32 domainSeparator = keccak256(
             abi.encode(
                 EIP712_DOMAIN_TYPEHASH,
@@ -311,7 +318,7 @@ contract PromoCodeSecurityTest is Test {
         uint256 requestId
     ) internal returns (uint256[] memory wonTokens) {
         uint256 nonce = packMachine.openNonce(who);
-        bytes memory sig = _signOpenPackFor(address(packMachine), who, nonce, operatorPk);
+        bytes memory sig = _signOpenPackFor(address(packMachine), who, nonce, operatorPk, codeId);
 
         usdc.mint(who, PRICE);
         vm.startPrank(who);
@@ -438,7 +445,7 @@ contract PromoCodeSecurityTest is Test {
         usdc.mint(attacker, PRICE);
         // Attacker signs the OpenPack message with their OWN key — not PACK_OPERATOR_ROLE.
         bytes memory forgedSig = _signOpenPackFor(
-            address(packMachine), attacker, packMachine.openNonce(attacker), attackerPk
+            address(packMachine), attacker, packMachine.openNonce(attacker), attackerPk, DISCOUNT_CODE
         );
 
         vm.startPrank(attacker);
@@ -471,7 +478,7 @@ contract PromoCodeSecurityTest is Test {
 
         uint256 victimNonce = packMachine.openNonce(victim);
         bytes memory sig = _signOpenPackFor(
-            address(packMachine), victim, victimNonce, operatorPk
+            address(packMachine), victim, victimNonce, operatorPk, DISCOUNT_CODE
         );
 
         // 5a. Attacker relays the victim's signed transaction.
@@ -564,7 +571,7 @@ contract PromoCodeSecurityTest is Test {
         uint32 countBefore = registry.getCode(RESTRICTED_CODE).redeemedCount;
 
         uint256 nonce = packMachine.openNonce(attacker);
-        bytes memory sig = _signOpenPackFor(address(packMachine), attacker, nonce, operatorPk);
+        bytes memory sig = _signOpenPackFor(address(packMachine), attacker, nonce, operatorPk, RESTRICTED_CODE);
 
         usdc.mint(attacker, PRICE);
         vm.startPrank(attacker);
@@ -598,7 +605,7 @@ contract PromoCodeSecurityTest is Test {
         registry.addToAllowlist(RESTRICTED_CODE, users);
 
         uint256 nonce = packMachine.openNonce(victim);
-        bytes memory sig = _signOpenPackFor(address(packMachine), victim, nonce, operatorPk);
+        bytes memory sig = _signOpenPackFor(address(packMachine), victim, nonce, operatorPk, RESTRICTED_CODE);
 
         usdc.mint(victim, PRICE);
         vm.startPrank(victim);

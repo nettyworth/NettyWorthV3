@@ -60,9 +60,11 @@ contract NettyWorthMarketplace is
     // EIP-712 typehashes
     // =========================================================================
 
+    /// @dev buyer is included so private/targeted listings cannot be front-run (H004 fix).
+    ///      address(0) buyer means open listing — anyone can fill.
     bytes32 private constant SIGNED_LISTING_TYPEHASH = keccak256(
         "SignedListing(address seller,address collection,uint256 tokenId,address paymentToken,"
-        "uint256 price,uint256 nonce,uint256 expiry)"
+        "uint256 price,uint256 nonce,uint256 expiry,address buyer)"
     );
 
     bytes32 private constant SIGNED_AUCTION_TYPEHASH = keccak256(
@@ -195,6 +197,27 @@ contract NettyWorthMarketplace is
         SignedListing calldata listing,
         bytes calldata sig
     ) external override nonReentrant whenNotPaused {
+        _buyWithSignatureInternal(listing, sig, msg.sender);
+    }
+
+    /// @inheritdoc INettyWorthMarketplace
+    function buyWithSignatureFor(
+        SignedListing calldata listing,
+        bytes calldata sig,
+        address recipient
+    ) external override nonReentrant whenNotPaused {
+        if (recipient == address(0)) revert Marketplace__ZeroRecipient();
+        _buyWithSignatureInternal(listing, sig, recipient);
+    }
+
+    /// @dev Shared logic for buyWithSignature and buyWithSignatureFor.
+    ///      msg.sender always pays; `recipient` receives the NFT.
+    ///      For private listings (listing.buyer != 0), recipient must equal listing.buyer (H004 fix).
+    function _buyWithSignatureInternal(
+        SignedListing calldata listing,
+        bytes calldata sig,
+        address recipient
+    ) internal {
         MarketplaceStorage storage $ = _getMarketplaceStorage();
 
         // --- Validate signature ---
@@ -207,7 +230,8 @@ contract NettyWorthMarketplace is
                 listing.paymentToken,
                 listing.price,
                 listing.nonce,
-                listing.expiry
+                listing.expiry,
+                listing.buyer
             )
         );
         address signer = _hashTypedDataV4(structHash).recover(sig);
@@ -228,6 +252,10 @@ contract NettyWorthMarketplace is
             revert Marketplace__PaymentTokenNotAllowed(listing.paymentToken);
         }
 
+        // The seller targets who ultimately receives the NFT; any payer may fund it.
+        if (listing.buyer != address(0) && listing.buyer != recipient)
+            revert Marketplace__NotIntendedBuyer(listing.buyer, recipient);
+
         _executeSale(
             $,
             listing.seller,
@@ -235,7 +263,8 @@ contract NettyWorthMarketplace is
             listing.tokenId,
             listing.paymentToken,
             listing.price,
-            msg.sender // buyer
+            msg.sender, // payer — funds source
+            recipient // NFT destination
         );
     }
 
@@ -299,7 +328,8 @@ contract NettyWorthMarketplace is
             offer.tokenId,
             offer.paymentToken,
             offer.price,
-            offer.buyer
+            offer.buyer, // payer — the buyer signed the offer and pays
+            offer.buyer // recipient — same address receives the NFT
         );
 
         emit OfferAccepted(
@@ -458,7 +488,8 @@ contract NettyWorthMarketplace is
             tokenId,
             state.paymentToken,
             winningBid,
-            winner
+            winner, // payer — winner pays from their account
+            winner // recipient — winner receives the NFT
         );
 
         // Pool-default callback: if this was a pool-default auction, resolve the default record.
@@ -665,6 +696,9 @@ contract NettyWorthMarketplace is
         );
         if (!isAdmin && msg.sender != state.seller)
             revert Marketplace__NotSeller();
+        // Non-admin sellers may not cancel once a bid is committed (M007 fix).
+        if (!isAdmin && state.highestBidder != address(0))
+            revert Marketplace__CannotCancelWithActiveBid(state.highestBidder);
 
         uint256 tokenId = state.tokenId;
         state.settled = true; // mark as done so it can't be re-settled
@@ -792,7 +826,8 @@ contract NettyWorthMarketplace is
         uint256 tokenId,
         address paymentToken,
         uint256 gross,
-        address buyer
+        address payer,
+        address recipient
     ) internal {
         // 1. Pool-default detection: if this tokenId was listed by listDefaultedAsset, waive
         //    collectible fee and royalty so the pool receives full gross proceeds (= winning bid).
@@ -818,8 +853,13 @@ contract NettyWorthMarketplace is
         }
 
         // 4. Loan debt (active loan check — always zero for pool-default since tokenIdToActiveLoan
-        //    was cleared by _initiateDefault, but checked uniformly for correctness)
-        (, , uint256 loanDebt) = $.lendingPool.getLoanDebt(tokenId);
+        //    was cleared by _initiateDefault, but checked uniformly for correctness).
+        //    H005 fix: only look up loan debt when the collection is the pool's AssetNFT, so a
+        //    second allowlisted collection with a colliding tokenId cannot trigger a false-positive
+        //    loan branch that delivers AssetNFT collateral to an unintended buyer.
+        (, , uint256 loanDebt) = (collection == $.lendingPool.getAssetNFT())
+            ? $.lendingPool.getLoanDebt(tokenId)
+            : (uint256(0), uint256(0), uint256(0));
         uint256 activeLoanId =
             loanDebt > 0 ? $.lendingPool.getActiveLoanId(tokenId) : 0;
 
@@ -840,8 +880,14 @@ contract NettyWorthMarketplace is
 
         uint256 sellerProceeds = gross - collectibleFee - royalty - loanDebt;
 
-        // 5. Pull gross from buyer
-        IERC20(paymentToken).safeTransferFrom(buyer, address(this), gross);
+        // 5. Pull gross from payer; verify actual received to guard against fee-on-transfer
+        //    tokens that deliver less than the requested amount (M005 fix).
+        uint256 balBefore = IERC20(paymentToken).balanceOf(address(this));
+        IERC20(paymentToken).safeTransferFrom(payer, address(this), gross);
+        uint256 actualReceived =
+            IERC20(paymentToken).balanceOf(address(this)) - balBefore;
+        if (actualReceived < gross)
+            revert Marketplace__InsufficientReceived(gross, actualReceived);
 
         // 6. Collectible fee → treasury
         if (collectibleFee > 0) {
@@ -853,21 +899,34 @@ contract NettyWorthMarketplace is
             IERC20(paymentToken).safeTransfer(royaltyReceiver, royalty);
         }
 
-        // 8. NFT delivery
+        // 8. NFT delivery to recipient
         if (loanDebt > 0) {
-            // 8a. Active loan branch: approve pool then settle atomically.
-            //     Pool pulls loanDebt from this contract, clears the loan, and delivers NFT to buyer.
+            // 8a. Active loan branch: enforce seller == borrower so nobody can force-sell a
+            //     borrower's collateral via a listing the borrower didn't sign (C004 fix).
+            address borrower = $.lendingPool.getLoanBorrower(activeLoanId);
+            if (borrower != address(0) && seller != borrower)
+                revert Marketplace__SellerNotBorrower(seller, borrower);
+
+            // Reject single-token sales of multi-NFT bundle loans — would transfer the whole
+            // bundle to the recipient, not just the listed token (H003 fix).
+            if ($.lendingPool.getLoanCollateralCount(activeLoanId) > 1)
+                revert Marketplace__CannotPartiallySettleBundleLoan(
+                    activeLoanId
+                );
+
+            // Approve pool then settle atomically.
+            // Pool pulls loanDebt from this contract, clears the loan, and delivers NFT to recipient.
             IERC20(paymentToken).forceApprove(address($.lendingPool), loanDebt);
             $.lendingPool.settleLoanRepaymentOnSale(
                 activeLoanId,
                 address(this),
-                buyer
+                recipient
             );
         } else {
             // 8b. No active loan (normal seller or pool-default): transfer from seller directly.
             //     For pool-default, seller == lendingPool and the pool pre-approved this contract
             //     via prepareDefaultedListing.
-            IAssetNFT(collection).transferFrom(seller, buyer, tokenId);
+            IAssetNFT(collection).transferFrom(seller, recipient, tokenId);
         }
 
         // 9. Seller proceeds → seller (for pool-default: sellerProceeds == gross → pool)
@@ -877,7 +936,7 @@ contract NettyWorthMarketplace is
 
         emit SaleExecuted(
             seller,
-            buyer,
+            recipient, // the address that receives the NFT is the canonical "buyer" in the event
             collection,
             tokenId,
             paymentToken,

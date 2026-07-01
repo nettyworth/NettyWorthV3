@@ -58,8 +58,10 @@ contract PackMachine is
 
     /// @dev EIP-712 type hash for the open-pack authorization signature.
     ///      packId is included so a signature for one pack cannot be replayed on another.
+    ///      codeId is included so a leaked signature cannot burn a user's oncePerUser code
+    ///      on an unintended promo code (L004 fix). Use bytes32(0) for codeless opens.
     bytes32 private constant OPEN_PACK_TYPEHASH = keccak256(
-        "OpenPack(address user,uint256 packId,uint256 nonce)"
+        "OpenPack(address user,uint256 packId,uint256 nonce,bytes32 codeId)"
     );
 
     uint256 private constant NUM_TIERS = 5;
@@ -126,6 +128,15 @@ contract PackMachine is
         ///      Written only when a discount code is applied; omitted (default bytes32(0))
         ///      for opens without a code. Cleared alongside pendingOpens in fulfillRandomness.
         mapping(uint256 requestId => bytes32 codeId) pendingCodeIds;
+        // ── Appended ──────────────────────────────────────────────────────────
+        /// @dev Tracks whether a wallet has already consumed the global first-open discount
+        ///      on this machine. Reset on a fully-failed (zero-card) VRF open so the wallet
+        ///      is not penalized for a bad randomness outcome.
+        mapping(address wallet => bool) hasClaimedFirstOpenDiscount;
+        /// @dev Records whether the first-open discount was consumed for a pending VRF request,
+        ///      so it can be restored in fulfillRandomness on a full-refund (all-cards-failed).
+        ///      Written only when the discount is applied; cleared alongside pendingOpens.
+        mapping(uint256 requestId => bool) pendingFirstOpen;
     }
 
     struct PendingOpen {
@@ -309,14 +320,12 @@ contract PackMachine is
         PackMachineStorage storage $ = _getStorage();
         PackTypes.Pack memory pack = _registry().getPack(address(this), packId);
         _assertOpenable($, pack, packId);
-        _verifySignature($, user, packId, signature);
-        (uint256 escrowed, uint256 buyback) = _handlePayment(
-            $,
-            pack,
-            _msgSender(),
-            user,
-            codeId
-        );
+        _verifySignature($, user, packId, codeId, signature);
+        (
+            uint256 escrowed,
+            uint256 buyback,
+            bool firstOpenApplied
+        ) = _handlePayment($, pack, _msgSender(), user, codeId);
         _requestVRF(
             $,
             pack,
@@ -325,7 +334,8 @@ contract PackMachine is
             IPackMachineFactory($.factory),
             escrowed,
             buyback,
-            codeId
+            codeId,
+            firstOpenApplied
         );
     }
 
@@ -393,17 +403,17 @@ contract PackMachine is
         // Fetch pack config once into memory (validates packId via registry).
         PackTypes.Pack memory pack = _registry().getPack(address(this), packId);
         _assertOpenable($, pack, packId);
-        _verifySignature($, user, packId, playSignature);
+        _verifySignature($, user, packId, codeId, playSignature);
 
         IPackMachineFactory iFactory = IPackMachineFactory($.factory);
 
-        // Resolve discount and buyback allocation (redeems promo code when codeId is non-zero).
-        (uint256 escrowedAmount, uint256 buybackAmount) = _resolveAmounts(
-            $,
-            pack,
-            user,
-            codeId
-        );
+        // Resolve discount and buyback allocation (redeems promo code when codeId is non-zero,
+        // or applies the global first-open discount when no code is supplied).
+        (
+            uint256 escrowedAmount,
+            uint256 buybackAmount,
+            bool firstOpenApplied
+        ) = _resolveAmounts($, pack, user, codeId);
 
         // Pull the discounted amount from the user via Permit2 into this contract (escrow).
         // Funds remain here until fulfillRandomness distributes them per-card or refunds failures.
@@ -432,7 +442,8 @@ contract PackMachine is
             iFactory,
             escrowedAmount,
             buybackAmount,
-            codeId
+            codeId,
+            firstOpenApplied
         );
     }
 
@@ -458,8 +469,10 @@ contract PackMachine is
 
         PendingOpen memory pending = $.pendingOpens[requestId];
         bytes32 pendingCodeId = $.pendingCodeIds[requestId];
+        bool pendingFirstOpenDiscount = $.pendingFirstOpen[requestId];
         delete $.pendingOpens[requestId];
         delete $.pendingCodeIds[requestId];
+        delete $.pendingFirstOpen[requestId];
 
         // Fetch pack config from registry at fulfill-time.
         PackTypes.Pack memory pack = _registry().getPack(
@@ -541,12 +554,16 @@ contract PackMachine is
                 // Wrapped in try/catch: a registration failure must never revert card
                 // delivery — the user already owns the NFT at this point.
                 if (poolActive) {
+                    // Divide escrowedAmount by cardsCount for the actual discounted per-card
+                    // basis rather than the full list price (C001 fix: prevents discount+boost
+                    // arbitrage). cardsCount > 0 is guaranteed — VRF was requested for it.
+                    uint128 basisPerCard = uint128(
+                        pending.escrowedAmount / pending.cardsCount
+                    );
                     try
                         IBuybackPool(pool).registerToken(
                             tokenId,
-                            uint128(
-                                uint256(pack.pricePerPack) / pack.cardsPerPack
-                            ),
+                            basisPerCard,
                             uint8(selectedTier),
                             address(this)
                         )
@@ -609,6 +626,11 @@ contract PackMachine is
                         )
                     {} catch {} // solhint-disable-line no-empty-blocks
                 }
+            }
+            // Reverse the first-open discount consumption so the wallet retains its
+            // once-per-machine discount after a fully-failed (zero-card) open.
+            if (pendingFirstOpenDiscount) {
+                $.hasClaimedFirstOpenDiscount[pending.user] = false;
             }
         }
 
@@ -718,15 +740,8 @@ contract PackMachine is
             $.inCustody[tokenId] = true;
 
             // Restore per-pack pools using the dormant mask, clamped to current packCount.
-            uint256 mask = $.eligibility[tokenId];
-            if (packCount < 256) {
-                // Clear any bits referencing packs that didn't exist when this token was won.
-                mask &= (
-                    packCount == 256
-                        ? type(uint256).max
-                        : (uint256(1) << packCount) - 1
-                );
-            }
+            // Clear any bits referencing packs that didn't exist when this token was won.
+            uint256 mask = $.eligibility[tokenId] & _validPackMask(packCount);
             if (mask == 0) {
                 // No eligible packs remain — default to pack 0 for backward-compat.
                 mask = 1;
@@ -798,7 +813,8 @@ contract PackMachine is
     /// @notice Set the BuybackPool contract address (machine-wide).
     function setBuybackPool(
         address pool
-    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
+    ) external whenPaused onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
+        if (pool == address(0)) revert PackMachine__ZeroAddress();
         PackMachineStorage storage $ = _getStorage();
         emit BuybackPoolUpdated($.buybackPool, pool);
         $.buybackPool = pool;
@@ -859,16 +875,6 @@ contract PackMachine is
     // Views — pack (pass-throughs to PackRegistry)
     // =========================================================================
 
-    function getPackCount() external view returns (uint256) {
-        return _registry().getPackCount(address(this));
-    }
-
-    function getPack(
-        uint256 packId
-    ) external view returns (PackTypes.Pack memory) {
-        return _registry().getPack(address(this), packId);
-    }
-
     function getPackPrice(uint256 packId) external view returns (uint128) {
         return _registry().getPackPrice(address(this), packId);
     }
@@ -887,14 +893,6 @@ contract PackMachine is
         uint256 packId
     ) external view returns (uint16) {
         return _registry().getPackBuybackAllocationBps(address(this), packId);
-    }
-
-    function isPackActive(uint256 packId) external view returns (bool) {
-        return _registry().isPackActive(address(this), packId);
-    }
-
-    function isPackFinished(uint256 packId) external view returns (bool) {
-        return _registry().isPackFinished(address(this), packId);
     }
 
     // =========================================================================
@@ -921,6 +919,35 @@ contract PackMachine is
 
     function openNonce(address user) external view returns (uint256) {
         return _getStorage().openNonces[user];
+    }
+
+    /// @notice Returns whether `wallet` has already claimed the global first-open discount
+    ///         on this machine (and it has not been reset by a full-failure refund).
+    function hasClaimedFirstOpenDiscount(
+        address wallet
+    ) external view returns (bool) {
+        return _getStorage().hasClaimedFirstOpenDiscount[wallet];
+    }
+
+    /// @notice Returns the price a wallet would pay to open `packId` right now, accounting
+    ///         for the global first-open discount if it applies to them.
+    ///         Use this off-chain to compute the Permit2 `amount` before signing.
+    function previewFirstOpenPrice(
+        address user,
+        uint256 packId
+    ) external view returns (uint256 escrowedAmount) {
+        PackMachineStorage storage $ = _getStorage();
+        PackTypes.Pack memory pack = _registry().getPack(address(this), packId);
+        uint256 price = pack.pricePerPack;
+        IPackMachineFactory iFactory = IPackMachineFactory($.factory);
+        uint16 discountBps = 0;
+        if (
+            iFactory.firstOpenDiscountEnabled() &&
+            !$.hasClaimedFirstOpenDiscount[user]
+        ) {
+            discountBps = iFactory.firstOpenDiscountBps();
+        }
+        escrowedAmount = price - (price * discountBps) / WEIGHT_PRECISION;
     }
 
     function getBuybackPool() external view returns (address) {
@@ -1021,11 +1048,16 @@ contract PackMachine is
         PackMachineStorage storage $,
         address user,
         uint256 packId,
+        bytes32 codeId,
         bytes calldata signature
     ) private {
         uint256 nonce = $.openNonces[user]++;
+        // codeId is bound into the digest so a leaked play-signature cannot be used to burn
+        // a user's oncePerUser discount on an unintended promo code (L004 fix).
         bytes32 digest = _hashTypedDataV4(
-            keccak256(abi.encode(OPEN_PACK_TYPEHASH, user, packId, nonce))
+            keccak256(
+                abi.encode(OPEN_PACK_TYPEHASH, user, packId, nonce, codeId)
+            )
         );
         // The signature must come from a PACK_OPERATOR_ROLE holder on the PermissionManager.
         address signer = digest.recover(signature);
@@ -1053,16 +1085,28 @@ contract PackMachine is
     /// @dev Compute the post-discount escrow amount and the buyback allocation within it.
     ///      Calls `redeemDiscount` when codeId is non-zero (state-changing — must be called
     ///      exactly once per open flow, before any token transfer).
+    ///      Also applies the global first-open discount when no promo code is supplied,
+    ///      the discount is enabled, and the wallet has not yet claimed it.
+    ///      Returns `firstOpenApplied = true` when the first-open discount was consumed so
+    ///      callers can record it in the pending-open slot for potential refund on full failure.
     function _resolveAmounts(
         PackMachineStorage storage $,
         PackTypes.Pack memory pack,
         address user,
         bytes32 codeId
-    ) private returns (uint256 escrowedAmount, uint256 buybackAmount) {
+    )
+        private
+        returns (
+            uint256 escrowedAmount,
+            uint256 buybackAmount,
+            bool firstOpenApplied
+        )
+    {
         IPackMachineFactory iFactory = IPackMachineFactory($.factory);
         uint256 price = pack.pricePerPack;
 
         // Resolve discount first; revert (not silent) if promo registry is unset with a non-zero code.
+        // Promo codes take priority — first-open discount is exclusive (not stacked) with them.
         uint16 discountBps = 0;
         if (codeId != bytes32(0)) {
             address promoReg = iFactory.promoCodeRegistry();
@@ -1072,6 +1116,14 @@ contract PackMachine is
                 codeId,
                 user
             );
+        } else if (
+            iFactory.firstOpenDiscountEnabled() &&
+            !$.hasClaimedFirstOpenDiscount[user]
+        ) {
+            // Apply the global first-open discount (automatic, no code required).
+            discountBps = iFactory.firstOpenDiscountBps();
+            $.hasClaimedFirstOpenDiscount[user] = true;
+            firstOpenApplied = true;
         }
         escrowedAmount = price - (price * discountBps) / WEIGHT_PRECISION;
 
@@ -1086,8 +1138,9 @@ contract PackMachine is
     }
 
     /// @dev Pull payment from `payer` into this contract (escrow), applying an optional promo
-    ///      discount code. Returns the total escrowed amount and the buyback allocation within
-    ///      it. Funds are held here until fulfillRandomness settles them per-card; any cards
+    ///      discount code or the global first-open discount. Returns the total escrowed amount,
+    ///      the buyback allocation within it, and whether the first-open discount was consumed.
+    ///      Funds are held here until fulfillRandomness settles them per-card; any cards
     ///      that fail (empty pool or transfer revert) are refunded proportionally to the user.
     function _handlePayment(
         PackMachineStorage storage $,
@@ -1095,8 +1148,15 @@ contract PackMachine is
         address payer,
         address user,
         bytes32 codeId
-    ) private returns (uint256 escrowedAmount, uint256 buybackAmount) {
-        (escrowedAmount, buybackAmount) = _resolveAmounts(
+    )
+        private
+        returns (
+            uint256 escrowedAmount,
+            uint256 buybackAmount,
+            bool firstOpenApplied
+        )
+    {
+        (escrowedAmount, buybackAmount, firstOpenApplied) = _resolveAmounts(
             $,
             pack,
             user,
@@ -1120,7 +1180,8 @@ contract PackMachine is
         IPackMachineFactory factory_,
         uint256 escrowedAmount,
         uint256 buybackAmount,
-        bytes32 codeId
+        bytes32 codeId,
+        bool firstOpenApplied
     ) private {
         uint8 cards = pack.cardsPerPack;
         // Decrement both machine-wide and per-pack reservation counters.
@@ -1138,6 +1199,8 @@ contract PackMachine is
         });
         // Store the promo code separately (sparse mapping — only written when non-zero).
         if (codeId != bytes32(0)) $.pendingCodeIds[requestId] = codeId;
+        // Record first-open discount usage so it can be refunded on a full-failure open.
+        if (firstOpenApplied) $.pendingFirstOpen[requestId] = true;
         $.totalEscrowed += escrowedAmount;
     }
 
@@ -1182,9 +1245,7 @@ contract PackMachine is
             uint256 p = _lsb(m);
             // Guard against double-add.
             if ($.packPoolIndex[tokenId][p] == 0) {
-                $.packTierPools[p][tier].push(tokenId);
-                $.packPoolIndex[tokenId][p] = $.packTierPools[p][tier].length; // index+1
-                $.availablePerPack[p]++;
+                _addToPackPool($, tokenId, p, tier);
             }
             m &= m - 1; // clear lowest set bit
         }
@@ -1203,6 +1264,19 @@ contract PackMachine is
             _removeFromPackPool($, tokenId, p, tier);
             m &= m - 1;
         }
+    }
+
+    /// @dev O(1) add of tokenId to packTierPools[packId][tier] and bump availablePerPack.
+    ///      Caller must ensure the token is not already present in this pack pool.
+    function _addToPackPool(
+        PackMachineStorage storage $,
+        uint256 tokenId,
+        uint256 packId,
+        uint256 tier
+    ) private {
+        $.packTierPools[packId][tier].push(tokenId);
+        $.packPoolIndex[tokenId][packId] = $.packTierPools[packId][tier].length; // index+1
+        $.availablePerPack[packId]++;
     }
 
     /// @dev O(1) swap-and-pop removal of tokenId from packTierPools[packId][tier].
@@ -1225,18 +1299,33 @@ contract PackMachine is
         $.packPoolIndex[tokenId][packId] = 0;
     }
 
+    /// @dev Adjust availablePerPack for each pack bit in mask.
+    ///      increment=true adds 1 (CardFailed restore path); false subtracts 1 (win path),
+    ///      guarded against underflow.
+    function _adjustAvailableForMask(
+        PackMachineStorage storage $,
+        uint256 mask,
+        bool increment
+    ) private {
+        uint256 m = mask;
+        while (m != 0) {
+            uint256 p = _lsb(m);
+            if (increment) {
+                $.availablePerPack[p]++;
+            } else if ($.availablePerPack[p] > 0) {
+                $.availablePerPack[p]--;
+            }
+            m &= m - 1;
+        }
+    }
+
     /// @dev Decrement availablePerPack for each pack bit in mask (used when a winning token
     ///      is removed from packs it was eligible for but did NOT originate the open).
     function _decrementAvailableForMask(
         PackMachineStorage storage $,
         uint256 mask
     ) private {
-        uint256 m = mask;
-        while (m != 0) {
-            uint256 p = _lsb(m);
-            if ($.availablePerPack[p] > 0) $.availablePerPack[p]--;
-            m &= m - 1;
-        }
+        _adjustAvailableForMask($, mask, false);
     }
 
     /// @dev Increment availablePerPack for each pack bit in mask (CardFailed restore path).
@@ -1244,12 +1333,13 @@ contract PackMachine is
         PackMachineStorage storage $,
         uint256 mask
     ) private {
-        uint256 m = mask;
-        while (m != 0) {
-            uint256 p = _lsb(m);
-            $.availablePerPack[p]++;
-            m &= m - 1;
-        }
+        _adjustAvailableForMask($, mask, true);
+    }
+
+    /// @dev All-ones mask covering bits [0, packCount). Returns full uint256 when packCount >= 256.
+    function _validPackMask(uint256 packCount) private pure returns (uint256) {
+        if (packCount >= 256) return type(uint256).max;
+        return (uint256(1) << packCount) - 1;
     }
 
     /// @dev Validate every set bit in mask references an existing packId (< packCount).
@@ -1258,13 +1348,9 @@ contract PackMachine is
         uint256 packCount,
         uint256 tokenId
     ) private pure {
-        // Build an all-ones mask for valid bits: (1 << packCount) - 1.
-        // If packCount == 256 all bits are valid; otherwise reject any bit >= packCount.
-        if (packCount < 256) {
-            uint256 validMask = (uint256(1) << packCount) - 1;
-            if (mask & ~validMask != 0)
-                revert PackMachine__InvalidPackRef(tokenId);
-        }
+        // Reject any bit >= packCount (no-op when packCount >= 256: all bits are valid).
+        if (packCount < 256 && mask & ~_validPackMask(packCount) != 0)
+            revert PackMachine__InvalidPackRef(tokenId);
     }
 
     /// @dev Return the index (0-based) of the lowest set bit in x. x must be != 0.
@@ -1363,11 +1449,7 @@ contract PackMachine is
                 if (oldMask & bit != 0) continue; // already eligible — no-op
                 $.eligibility[tokenId] = oldMask | bit;
                 // Add to pack pool (also increments availablePerPack).
-                $.packTierPools[packId][tier].push(tokenId);
-                $.packPoolIndex[tokenId][packId] = $
-                    .packTierPools[packId][tier]
-                    .length;
-                $.availablePerPack[packId]++;
+                _addToPackPool($, tokenId, packId, tier);
             } else {
                 if (oldMask & bit == 0) continue; // already absent — no-op
                 $.eligibility[tokenId] = oldMask & ~bit;

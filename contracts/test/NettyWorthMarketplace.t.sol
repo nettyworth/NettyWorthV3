@@ -91,7 +91,7 @@ contract NettyWorthMarketplaceTest is Test {
     );
     bytes32 internal constant SIGNED_LISTING_TYPEHASH = keccak256(
         "SignedListing(address seller,address collection,uint256 tokenId,address paymentToken,"
-        "uint256 price,uint256 nonce,uint256 expiry)"
+        "uint256 price,uint256 nonce,uint256 expiry,address buyer)"
     );
     bytes32 internal constant SIGNED_AUCTION_TYPEHASH = keccak256(
         "SignedAuction(address seller,address collection,uint256 tokenId,address paymentToken,"
@@ -174,7 +174,10 @@ contract NettyWorthMarketplaceTest is Test {
             AssetLendingPool impl = new AssetLendingPool();
             ERC1967Proxy p = new ERC1967Proxy(
                 address(impl),
-                abi.encodeCall(AssetLendingPool.initialize, (admin, address(config)))
+                abi.encodeCall(
+                    AssetLendingPool.initialize,
+                    (admin, address(config))
+                )
             );
             pool = AssetLendingPool(address(p));
         }
@@ -279,7 +282,8 @@ contract NettyWorthMarketplaceTest is Test {
                 l.paymentToken,
                 l.price,
                 l.nonce,
-                l.expiry
+                l.expiry,
+                l.buyer
             )
         );
         bytes32 digest = keccak256(
@@ -351,7 +355,8 @@ contract NettyWorthMarketplaceTest is Test {
                 paymentToken: address(usdc),
                 price: price,
                 nonce: nonce,
-                expiry: block.timestamp + 1 hours
+                expiry: block.timestamp + 1 hours,
+                buyer: address(0)
             });
     }
 
@@ -437,7 +442,8 @@ contract NettyWorthMarketplaceTest is Test {
                 paymentToken: address(usdc),
                 price: SALE_PRICE,
                 nonce: 42,
-                expiry: block.timestamp + 1 hours
+                expiry: block.timestamp + 1 hours,
+                buyer: address(0)
             });
         bytes memory sig2 = _signListing(l2, sellerPk);
 
@@ -468,7 +474,8 @@ contract NettyWorthMarketplaceTest is Test {
                 paymentToken: address(usdc),
                 price: SALE_PRICE,
                 nonce: 1,
-                expiry: block.timestamp - 1 // already expired
+                expiry: block.timestamp - 1, // already expired
+                buyer: address(0)
             });
         bytes memory sig = _signListing(l, sellerPk);
 
@@ -515,7 +522,8 @@ contract NettyWorthMarketplaceTest is Test {
                 paymentToken: address(usdc),
                 price: SALE_PRICE,
                 nonce: 1,
-                expiry: block.timestamp + 1 hours
+                expiry: block.timestamp + 1 hours,
+                buyer: address(0)
             });
         bytes memory sig = _signListing(l, sellerPk);
         vm.prank(buyer);
@@ -555,7 +563,8 @@ contract NettyWorthMarketplaceTest is Test {
                 paymentToken: address(usdc),
                 price: tooLow,
                 nonce: 1,
-                expiry: block.timestamp + 1 hours
+                expiry: block.timestamp + 1 hours,
+                buyer: address(0)
             });
         bytes memory sig = _signListing(l, sellerPk);
 
@@ -596,7 +605,8 @@ contract NettyWorthMarketplaceTest is Test {
                 paymentToken: address(usdc),
                 price: gross,
                 nonce: 1,
-                expiry: block.timestamp + 1 hours
+                expiry: block.timestamp + 1 hours,
+                buyer: address(0)
             });
         bytes memory sig = _signListing(l, sellerPk);
 
@@ -1007,7 +1017,10 @@ contract NettyWorthMarketplaceTest is Test {
     // =========================================================================
 
     /// @dev Helper: originate a loan against tokenId 1 for `seller`.
-    function _originateLoan() internal returns (uint256 loanId, uint256 outstanding) {
+    function _originateLoan()
+        internal
+        returns (uint256 loanId, uint256 outstanding)
+    {
         uint256 tokenId = 1;
         uint256 loanAmount = 400e6;
 
@@ -1051,7 +1064,7 @@ contract NettyWorthMarketplaceTest is Test {
             loanId,
             tokenId,
             reservePrice,
-            10e6,           // minIncrement
+            10e6, // minIncrement
             auctionStart,
             auctionEnd,
             5 minutes,
@@ -1077,13 +1090,14 @@ contract NettyWorthMarketplaceTest is Test {
 
         // Bidder commits a pool bid at reserve price
         uint256 bidAmount = reservePrice + 50e6;
-        INettyWorthMarketplace.SignedBid memory b = INettyWorthMarketplace.SignedBid({
-            auctionId: auctionId,
-            bidder: bidder,
-            amount: bidAmount,
-            nonce: 100,
-            expiry: auctionEnd + 1 days
-        });
+        INettyWorthMarketplace.SignedBid memory b = INettyWorthMarketplace
+            .SignedBid({
+                auctionId: auctionId,
+                bidder: bidder,
+                amount: bidAmount,
+                nonce: 100,
+                expiry: auctionEnd + 1 days
+            });
         bytes memory bSig = _signBid(b, bidderPk);
 
         vm.prank(bidder);
@@ -1175,15 +1189,16 @@ contract NettyWorthMarketplaceTest is Test {
         uint256 price,
         uint256 nonce
     ) internal view returns (INettyWorthMarketplace.SignedOffer memory) {
-        return INettyWorthMarketplace.SignedOffer({
-            buyer: offerBuyer,
-            collection: address(assetNFT),
-            tokenId: tokenId,
-            paymentToken: address(usdc),
-            price: price,
-            nonce: nonce,
-            expiry: block.timestamp + 1 hours
-        });
+        return
+            INettyWorthMarketplace.SignedOffer({
+                buyer: offerBuyer,
+                collection: address(assetNFT),
+                tokenId: tokenId,
+                paymentToken: address(usdc),
+                price: price,
+                nonce: nonce,
+                expiry: block.timestamp + 1 hours
+            });
     }
 
     // =========================================================================
@@ -1195,7 +1210,7 @@ contract NettyWorthMarketplaceTest is Test {
         uint256 gross = SALE_PRICE;
 
         uint256 collectibleFee = (gross * 500) / 10_000; // 5%
-        uint256 royalty = (gross * 500) / 10_000;        // 5%
+        uint256 royalty = (gross * 500) / 10_000; // 5%
         uint256 sellerProceeds = gross - collectibleFee - royalty;
 
         // Seller approves marketplace to transfer the NFT
@@ -1203,17 +1218,27 @@ contract NettyWorthMarketplaceTest is Test {
         assetNFT.approve(address(market), tokenId);
 
         // Buyer funds + approves already set up in setUp
-        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, tokenId, gross, 1);
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(
+            buyer,
+            tokenId,
+            gross,
+            1
+        );
         bytes memory sig = _signOffer(o, buyerPk);
 
-        uint256 buyerBefore   = usdc.balanceOf(buyer);
-        uint256 treasBefore   = usdc.balanceOf(treasury);
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+        uint256 treasBefore = usdc.balanceOf(treasury);
         uint256 royaltyBefore = usdc.balanceOf(royaltyReceiver);
-        uint256 sellerBefore  = usdc.balanceOf(seller);
+        uint256 sellerBefore = usdc.balanceOf(seller);
 
         vm.expectEmit(true, true, true, true);
         emit INettyWorthMarketplace.OfferAccepted(
-            buyer, seller, address(assetNFT), tokenId, address(usdc), gross
+            buyer,
+            seller,
+            address(assetNFT),
+            tokenId,
+            address(usdc),
+            gross
         );
 
         vm.prank(seller);
@@ -1249,10 +1274,15 @@ contract NettyWorthMarketplaceTest is Test {
         // Gross must cover: collectibleFee (5%) + royalty (5%) + loanDebt
         uint256 gross = (loanDebt * 10_000) / 8000 + 2e6;
 
-        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, tokenId, gross, 10);
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(
+            buyer,
+            tokenId,
+            gross,
+            10
+        );
         bytes memory sig = _signOffer(o, buyerPk);
 
-        uint256 poolBefore   = usdc.balanceOf(address(pool));
+        uint256 poolBefore = usdc.balanceOf(address(pool));
         uint256 sellerBefore = usdc.balanceOf(seller);
 
         // Seller (borrower) accepts
@@ -1292,12 +1322,19 @@ contract NettyWorthMarketplaceTest is Test {
         usdc.approve(address(market), type(uint256).max);
 
         // Offer is signed by yet another buyer address
-        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, tokenId, gross, 20);
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(
+            buyer,
+            tokenId,
+            gross,
+            20
+        );
         bytes memory sig = _signOffer(o, buyerPk);
 
         // thirdParty (not the borrower) calls acceptOffer — must revert
         vm.prank(thirdParty);
-        vm.expectRevert(INettyWorthMarketplace.Marketplace__NotTokenOwner.selector);
+        vm.expectRevert(
+            INettyWorthMarketplace.Marketplace__NotTokenOwner.selector
+        );
         market.acceptOffer(o, sig);
         (thirdPk); // silence unused variable warning
     }
@@ -1310,13 +1347,20 @@ contract NettyWorthMarketplaceTest is Test {
         vm.prank(seller);
         assetNFT.approve(address(market), 1);
 
-        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, 1, SALE_PRICE, 1);
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(
+            buyer,
+            1,
+            SALE_PRICE,
+            1
+        );
         // Sign with a different key
         (, uint256 wrongPk) = makeAddrAndKey("wrongKey");
         bytes memory sig = _signOffer(o, wrongPk);
 
         vm.prank(seller);
-        vm.expectRevert(INettyWorthMarketplace.Marketplace__InvalidSignature.selector);
+        vm.expectRevert(
+            INettyWorthMarketplace.Marketplace__InvalidSignature.selector
+        );
         market.acceptOffer(o, sig);
     }
 
@@ -1331,7 +1375,12 @@ contract NettyWorthMarketplaceTest is Test {
         vm.prank(seller);
         assetNFT.approve(address(market), tokenId);
 
-        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, tokenId, SALE_PRICE, 5);
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(
+            buyer,
+            tokenId,
+            SALE_PRICE,
+            5
+        );
         bytes memory sig = _signOffer(o, buyerPk);
 
         // First accept succeeds
@@ -1350,15 +1399,16 @@ contract NettyWorthMarketplaceTest is Test {
         vm.prank(seller);
         assetNFT.approve(address(market), tokenId2);
 
-        INettyWorthMarketplace.SignedOffer memory o2 = INettyWorthMarketplace.SignedOffer({
-            buyer: buyer,
-            collection: address(assetNFT),
-            tokenId: tokenId2,
-            paymentToken: address(usdc),
-            price: SALE_PRICE,
-            nonce: 5, // same nonce
-            expiry: block.timestamp + 1 hours
-        });
+        INettyWorthMarketplace.SignedOffer memory o2 = INettyWorthMarketplace
+            .SignedOffer({
+                buyer: buyer,
+                collection: address(assetNFT),
+                tokenId: tokenId2,
+                paymentToken: address(usdc),
+                price: SALE_PRICE,
+                nonce: 5, // same nonce
+                expiry: block.timestamp + 1 hours
+            });
         bytes memory sig2 = _signOffer(o2, buyerPk);
 
         vm.prank(seller);
@@ -1380,15 +1430,16 @@ contract NettyWorthMarketplaceTest is Test {
         vm.prank(seller);
         assetNFT.approve(address(market), 1);
 
-        INettyWorthMarketplace.SignedOffer memory o = INettyWorthMarketplace.SignedOffer({
-            buyer: buyer,
-            collection: address(assetNFT),
-            tokenId: 1,
-            paymentToken: address(usdc),
-            price: SALE_PRICE,
-            nonce: 1,
-            expiry: block.timestamp - 1 // already expired
-        });
+        INettyWorthMarketplace.SignedOffer memory o = INettyWorthMarketplace
+            .SignedOffer({
+                buyer: buyer,
+                collection: address(assetNFT),
+                tokenId: 1,
+                paymentToken: address(usdc),
+                price: SALE_PRICE,
+                nonce: 1,
+                expiry: block.timestamp - 1 // already expired
+            });
         bytes memory sig = _signOffer(o, buyerPk);
 
         vm.prank(seller);
@@ -1402,21 +1453,24 @@ contract NettyWorthMarketplaceTest is Test {
 
     function test_acceptOffer_revertCollectionNotAllowed() public {
         address badCollection = makeAddr("badNFT");
-        INettyWorthMarketplace.SignedOffer memory o = INettyWorthMarketplace.SignedOffer({
-            buyer: buyer,
-            collection: badCollection,
-            tokenId: 1,
-            paymentToken: address(usdc),
-            price: SALE_PRICE,
-            nonce: 1,
-            expiry: block.timestamp + 1 hours
-        });
+        INettyWorthMarketplace.SignedOffer memory o = INettyWorthMarketplace
+            .SignedOffer({
+                buyer: buyer,
+                collection: badCollection,
+                tokenId: 1,
+                paymentToken: address(usdc),
+                price: SALE_PRICE,
+                nonce: 1,
+                expiry: block.timestamp + 1 hours
+            });
         bytes memory sig = _signOffer(o, buyerPk);
 
         vm.prank(seller);
         vm.expectRevert(
             abi.encodeWithSelector(
-                INettyWorthMarketplace.Marketplace__CollectionNotAllowed.selector,
+                INettyWorthMarketplace
+                    .Marketplace__CollectionNotAllowed
+                    .selector,
                 badCollection
             )
         );
@@ -1437,7 +1491,12 @@ contract NettyWorthMarketplaceTest is Test {
 
         (, , uint256 loanDebt) = pool.getLoanDebt(tokenId);
         // Offer price equal to loanDebt — 5% fee pushes required above gross
-        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, tokenId, loanDebt, 30);
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(
+            buyer,
+            tokenId,
+            loanDebt,
+            30
+        );
         bytes memory sig = _signOffer(o, buyerPk);
 
         vm.prank(seller);
@@ -1459,7 +1518,12 @@ contract NettyWorthMarketplaceTest is Test {
 
         assertTrue(market.isNonceUsed(buyer, 77));
 
-        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, 1, SALE_PRICE, 77);
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(
+            buyer,
+            1,
+            SALE_PRICE,
+            77
+        );
         bytes memory sig = _signOffer(o, buyerPk);
 
         vm.prank(seller);
@@ -1484,7 +1548,12 @@ contract NettyWorthMarketplaceTest is Test {
         vm.prank(admin);
         market.pause();
 
-        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(buyer, 1, SALE_PRICE, 1);
+        INettyWorthMarketplace.SignedOffer memory o = _defaultOffer(
+            buyer,
+            1,
+            SALE_PRICE,
+            1
+        );
         bytes memory sig = _signOffer(o, buyerPk);
 
         vm.prank(seller);
@@ -1492,4 +1561,274 @@ contract NettyWorthMarketplaceTest is Test {
         market.acceptOffer(o, sig);
     }
 
+    // =========================================================================
+    // buyWithSignatureFor — open listing: payer != recipient (platform pattern)
+    // =========================================================================
+
+    function test_buyWithSignatureFor_openListing_deliverToRecipient() public {
+        uint256 tokenId = 1;
+        address endUser = makeAddr("endUser");
+
+        vm.prank(seller);
+        assetNFT.approve(address(market), tokenId);
+
+        uint256 gross = SALE_PRICE;
+        uint256 collectibleFee = (gross * 500) / 10_000; // 5%
+        uint256 royalty = (gross * 500) / 10_000; // 5%
+        uint256 sellerProceeds = gross - collectibleFee - royalty;
+
+        INettyWorthMarketplace.SignedListing memory l = _defaultListing(
+            tokenId,
+            gross,
+            1
+        );
+        bytes memory sig = _signListing(l, sellerPk);
+
+        uint256 payerBefore = usdc.balanceOf(buyer);
+        uint256 sellerBefore = usdc.balanceOf(seller);
+        uint256 treasBefore = usdc.balanceOf(treasury);
+        uint256 royaltyBefore = usdc.balanceOf(royaltyReceiver);
+
+        // buyer (platform) pays; endUser receives the NFT
+        vm.prank(buyer);
+        market.buyWithSignatureFor(l, sig, endUser);
+
+        // NFT delivered to endUser, not to the payer
+        assertEq(assetNFT.ownerOf(tokenId), endUser);
+        // endUser spent no USDC
+        assertEq(usdc.balanceOf(endUser), 0);
+        // payer (buyer) paid gross
+        assertEq(usdc.balanceOf(buyer), payerBefore - gross);
+        // fee distribution unchanged
+        assertEq(usdc.balanceOf(treasury), treasBefore + collectibleFee);
+        assertEq(usdc.balanceOf(royaltyReceiver), royaltyBefore + royalty);
+        assertEq(usdc.balanceOf(seller), sellerBefore + sellerProceeds);
+    }
+
+    // =========================================================================
+    // buyWithSignatureFor — private listing: recipient == listing.buyer succeeds
+    // even when msg.sender (payer) is different
+    // =========================================================================
+
+    function test_buyWithSignatureFor_privateListing_recipientMatchesBuyer_succeeds()
+        public
+    {
+        uint256 tokenId = 1;
+        address endUser = makeAddr("endUser");
+
+        vm.prank(seller);
+        assetNFT.approve(address(market), tokenId);
+
+        // Seller targets endUser as the intended recipient (private listing)
+        INettyWorthMarketplace.SignedListing memory l = INettyWorthMarketplace
+            .SignedListing({
+                seller: seller,
+                collection: address(assetNFT),
+                tokenId: tokenId,
+                paymentToken: address(usdc),
+                price: SALE_PRICE,
+                nonce: 1,
+                expiry: block.timestamp + 1 hours,
+                buyer: endUser
+            });
+        bytes memory sig = _signListing(l, sellerPk);
+
+        // Platform (buyer) funds the purchase; endUser is the recipient
+        // msg.sender != listing.buyer, but recipient == listing.buyer → must succeed
+        vm.prank(buyer);
+        market.buyWithSignatureFor(l, sig, endUser);
+
+        assertEq(assetNFT.ownerOf(tokenId), endUser);
+    }
+
+    // =========================================================================
+    // buyWithSignatureFor — private listing: wrong recipient reverts
+    // =========================================================================
+
+    function test_buyWithSignatureFor_privateListing_wrongRecipient_reverts()
+        public
+    {
+        uint256 tokenId = 1;
+        address endUser = makeAddr("endUser");
+        address wrongRecipient = makeAddr("wrongRecipient");
+
+        vm.prank(seller);
+        assetNFT.approve(address(market), tokenId);
+
+        INettyWorthMarketplace.SignedListing memory l = INettyWorthMarketplace
+            .SignedListing({
+                seller: seller,
+                collection: address(assetNFT),
+                tokenId: tokenId,
+                paymentToken: address(usdc),
+                price: SALE_PRICE,
+                nonce: 1,
+                expiry: block.timestamp + 1 hours,
+                buyer: endUser
+            });
+        bytes memory sig = _signListing(l, sellerPk);
+
+        vm.prank(buyer);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                INettyWorthMarketplace.Marketplace__NotIntendedBuyer.selector,
+                endUser,
+                wrongRecipient
+            )
+        );
+        market.buyWithSignatureFor(l, sig, wrongRecipient);
+    }
+
+    // =========================================================================
+    // buyWithSignatureFor — zero recipient reverts
+    // =========================================================================
+
+    function test_buyWithSignatureFor_zeroRecipient_reverts() public {
+        uint256 tokenId = 1;
+
+        vm.prank(seller);
+        assetNFT.approve(address(market), tokenId);
+
+        INettyWorthMarketplace.SignedListing memory l = _defaultListing(
+            tokenId,
+            SALE_PRICE,
+            1
+        );
+        bytes memory sig = _signListing(l, sellerPk);
+
+        vm.prank(buyer);
+        vm.expectRevert(
+            INettyWorthMarketplace.Marketplace__ZeroRecipient.selector
+        );
+        market.buyWithSignatureFor(l, sig, address(0));
+    }
+
+    // =========================================================================
+    // buyWithSignatureFor — loan auto-repay branch: NFT delivered to recipient
+    // =========================================================================
+
+    function test_buyWithSignatureFor_loanAutoRepay_deliverToRecipient()
+        public
+    {
+        uint256 tokenId = 1;
+        uint256 loanAmount = 400e6;
+        address endUser = makeAddr("endUser");
+
+        vm.startPrank(seller);
+        assetNFT.approve(address(pool), tokenId);
+        pool.borrow(tokenId, loanAmount, 0);
+        vm.stopPrank();
+
+        IAssetLendingPool.Loan memory loan = pool.getLoan(
+            pool.getActiveLoanId(tokenId)
+        );
+        uint256 loanDebt = loan.principal + loan.interest;
+        uint256 gross = (loanDebt * 10_000) / 8000 + 1e6; // comfortable margin above fees+debt
+
+        INettyWorthMarketplace.SignedListing memory l = INettyWorthMarketplace
+            .SignedListing({
+                seller: seller,
+                collection: address(assetNFT),
+                tokenId: tokenId,
+                paymentToken: address(usdc),
+                price: gross,
+                nonce: 1,
+                expiry: block.timestamp + 1 hours,
+                buyer: address(0)
+            });
+        bytes memory sig = _signListing(l, sellerPk);
+
+        uint256 payerBefore = usdc.balanceOf(buyer);
+        uint256 poolBefore = usdc.balanceOf(address(pool));
+
+        // Platform (buyer) pays; endUser receives the NFT
+        vm.prank(buyer);
+        market.buyWithSignatureFor(l, sig, endUser);
+
+        // NFT goes to endUser (not payer)
+        assertEq(assetNFT.ownerOf(tokenId), endUser);
+        assertEq(
+            uint8(assetNFT.getAssetState(tokenId)),
+            uint8(IAssetNFT.AssetState.Held)
+        );
+        // Loan cleared
+        assertEq(pool.getActiveLoanId(tokenId), 0);
+        // Payer (buyer) paid gross
+        assertEq(usdc.balanceOf(buyer), payerBefore - gross);
+        // endUser received no USDC
+        assertEq(usdc.balanceOf(endUser), 0);
+        // Pool received at least loanDebt
+        assertGe(usdc.balanceOf(address(pool)), poolBefore + loanDebt);
+    }
+
+    // =========================================================================
+    // buyWithSignature (legacy) — private listing backward compat:
+    // listing.buyer == msg.sender still succeeds
+    // =========================================================================
+
+    function test_buyWithSignature_privateListing_callerIsIntendedBuyer_succeeds()
+        public
+    {
+        uint256 tokenId = 1;
+
+        vm.prank(seller);
+        assetNFT.approve(address(market), tokenId);
+
+        // Private listing targeted at buyer
+        INettyWorthMarketplace.SignedListing memory l = INettyWorthMarketplace
+            .SignedListing({
+                seller: seller,
+                collection: address(assetNFT),
+                tokenId: tokenId,
+                paymentToken: address(usdc),
+                price: SALE_PRICE,
+                nonce: 1,
+                expiry: block.timestamp + 1 hours,
+                buyer: buyer
+            });
+        bytes memory sig = _signListing(l, sellerPk);
+
+        vm.prank(buyer);
+        market.buyWithSignature(l, sig);
+
+        // NFT goes to msg.sender == listing.buyer == buyer
+        assertEq(assetNFT.ownerOf(tokenId), buyer);
+    }
+
+    // =========================================================================
+    // buyWithSignature (legacy) — private listing backward compat:
+    // wrong caller reverts NotIntendedBuyer
+    // =========================================================================
+
+    function test_buyWithSignature_privateListing_wrongCaller_reverts() public {
+        uint256 tokenId = 1;
+
+        vm.prank(seller);
+        assetNFT.approve(address(market), tokenId);
+
+        // Private listing: only buyer may fill
+        INettyWorthMarketplace.SignedListing memory l = INettyWorthMarketplace
+            .SignedListing({
+                seller: seller,
+                collection: address(assetNFT),
+                tokenId: tokenId,
+                paymentToken: address(usdc),
+                price: SALE_PRICE,
+                nonce: 1,
+                expiry: block.timestamp + 1 hours,
+                buyer: buyer
+            });
+        bytes memory sig = _signListing(l, sellerPk);
+
+        // bidder tries to fill — not the intended recipient
+        vm.prank(bidder);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                INettyWorthMarketplace.Marketplace__NotIntendedBuyer.selector,
+                buyer,
+                bidder
+            )
+        );
+        market.buyWithSignature(l, sig);
+    }
 }

@@ -61,6 +61,7 @@ const CHAIN_IDS: Record<string, number> = {
   sepolia: 11155111,
   mainnet: 1,
   base: 8453,
+  baseSepolia: 84532,
 };
 
 // ─── ABI-encoding helpers ─────────────────────────────────────────────────────

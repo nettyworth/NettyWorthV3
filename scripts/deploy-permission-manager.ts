@@ -58,6 +58,10 @@ const proxy = await viem.deployContract("ERC1967ProxyHelper", [
 ]);
 console.log(`  Proxy: ${proxy.address}`);
 
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+await sleep(5000);
+
 // Verify
 const pm = await viem.getContractAt("PermissionManager", proxy.address);
 const adminRole = await pm.read.DEFAULT_ADMIN_ROLE();

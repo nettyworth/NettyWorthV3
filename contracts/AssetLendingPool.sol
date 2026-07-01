@@ -92,6 +92,12 @@ contract AssetLendingPool is
         // Marketplace financing replay protection
         // =====================================================================
         mapping(address seller => mapping(uint256 nonce => bool)) financeNonces;
+        // =====================================================================
+        // borrowerLoans O(1) removal support (M002 fix)
+        // =====================================================================
+        /// @dev Tracks the index of each loanId within borrowerLoans[borrower] for O(1)
+        ///      swap-and-pop removal when a loan is closed (repaid or defaulted).
+        mapping(uint256 loanId => uint256 index) borrowerLoanIndex;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.AssetLendingPoolRuntime")) - 1)) & ~bytes32(uint256(0xff))
@@ -246,7 +252,7 @@ contract AssetLendingPool is
     // Listing typehash — must match NettyWorthMarketplace.SIGNED_LISTING_TYPEHASH exactly.
     bytes32 private constant _SIGNED_LISTING_TYPEHASH = keccak256(
         "SignedListing(address seller,address collection,uint256 tokenId,"
-        "address paymentToken,uint256 price,uint256 nonce,uint256 expiry)"
+        "address paymentToken,uint256 price,uint256 nonce,uint256 expiry,address buyer)"
     );
 
     /// @inheritdoc IAssetLendingPool
@@ -256,6 +262,9 @@ contract AssetLendingPool is
         uint256 depositAmount,
         uint8 termId
     ) external override nonReentrant whenNotPaused {
+        // Guard against self-financing: the pool cannot be both seller and lender (M009 fix).
+        if (listing.seller == address(this)) revert AssetLendingPool__InvalidSeller();
+
         PoolStorage storage $ = _getStorage();
         IAssetLendingPoolConfig cfg = $.config;
 
@@ -281,7 +290,8 @@ contract AssetLendingPool is
                 listing.paymentToken,
                 listing.price,
                 listing.nonce,
-                listing.expiry
+                listing.expiry,
+                listing.buyer  // must match new typehash that includes buyer field (H004 fix)
             )
         );
         bytes32 digest = keccak256(
@@ -831,6 +841,25 @@ contract AssetLendingPool is
         total = principal + interest;
     }
 
+    /// @notice Returns the borrower of a loan (address(0) if not found). (C004 fix)
+    function getLoanBorrower(
+        uint256 loanId
+    ) external view override returns (address) {
+        return _getStorage().loans[loanId].borrower;
+    }
+
+    /// @notice Returns the number of collateral tokens in a loan. (H003 fix)
+    function getLoanCollateralCount(
+        uint256 loanId
+    ) external view override returns (uint256) {
+        return _getStorage().loans[loanId].tokenIds.length;
+    }
+
+    /// @notice Returns the AssetNFT contract address used by this pool. (H005 fix)
+    function getAssetNFT() external view override returns (address) {
+        return address(_getStorage().assetNFT);
+    }
+
     /// @notice Returns the authorized marketplace address. Passthrough to config.
     function getMarketplace() external view override returns (address) {
         return _config().getMarketplace();
@@ -884,6 +913,24 @@ contract AssetLendingPool is
         }
     }
 
+    /// @dev O(1) swap-and-pop removal of `loanId` from `borrowerLoans[borrower]` (M002 fix).
+    function _removeBorrowerLoan(
+        PoolStorage storage $,
+        address borrower,
+        uint256 loanId
+    ) private {
+        uint256[] storage arr = $.borrowerLoans[borrower];
+        uint256 idx = $.borrowerLoanIndex[loanId];
+        uint256 last = arr.length - 1;
+        if (idx != last) {
+            uint256 lastId = arr[last];
+            arr[idx] = lastId;
+            $.borrowerLoanIndex[lastId] = idx;
+        }
+        arr.pop();
+        delete $.borrowerLoanIndex[loanId];
+    }
+
     function _settleLoanRepayment(
         PoolStorage storage $,
         uint256 loanId,
@@ -899,14 +946,17 @@ contract AssetLendingPool is
         principal = loan.principal;
         interest = loan.interest;
         uint256[] memory tokenIds = loan.tokenIds;
+        uint256 lenderShareBpsSnap = loan.lenderShareBpsSnapshot;
+        uint256 lenderDepositsSnap = loan.lenderDepositsSnapshot;
 
         // ---- State writes (CEI) ----
         loan.isPaid = true;
         $.totalBorrowed -= principal;
         $.activeLoanCount--;
         _clearActiveLoans($, tokenIds);
+        _removeBorrowerLoan($, borrower, loanId);
 
-        _distributeInterest($, interest);
+        _distributeInterest($, interest, lenderShareBpsSnap, lenderDepositsSnap);
 
         // ---- External interactions ----
         $.paymentToken.safeTransferFrom(
@@ -946,7 +996,15 @@ contract AssetLendingPool is
         $.totalDeposited += principal;
         $.totalDefaultedPrincipal -= principal;
 
-        _distributeInterest($, interest);
+        // Use the snapshots from the original loan so interest distribution cannot be
+        // manipulated by admin config changes or JIT deposits after origination (H001/M003 fix).
+        Loan storage loan = $.loans[loanId];
+        _distributeInterest(
+            $,
+            interest,
+            loan.lenderShareBpsSnapshot,
+            loan.lenderDepositsSnapshot
+        );
     }
 
     function _requireActiveLoan(
@@ -1040,6 +1098,11 @@ contract AssetLendingPool is
             (principal * term.aprBps * term.duration) / (YEAR * BPS);
         uint256 expireTime = block.timestamp + term.duration;
 
+        // Snapshot config values at origination so they cannot be retroactively changed
+        // by the admin between origination and repayment (H001 / M003 fix).
+        uint256 lenderShareBpsSnap = $.config.lenderShareBps();
+        uint256 lenderDepositsSnap = $.totalLenderDeposits;
+
         loanId = $.nextLoanId++;
         $.loans[loanId] = Loan({
             loanId: loanId,
@@ -1052,9 +1115,13 @@ contract AssetLendingPool is
             termId: termId,
             isPaid: false,
             isDefaulted: false,
-            isMarketplaceFinanced: isMarketplaceFinanced
+            isMarketplaceFinanced: isMarketplaceFinanced,
+            lenderShareBpsSnapshot: lenderShareBpsSnap,
+            lenderDepositsSnapshot: lenderDepositsSnap
         });
         $.borrowerLoans[borrower].push(loanId);
+        // Record index for O(1) removal on close (M002 fix).
+        $.borrowerLoanIndex[loanId] = $.borrowerLoans[borrower].length - 1;
 
         for (uint256 i; i < tokenIds.length; ) {
             $.tokenIdToActiveLoan[tokenIds[i]] = loanId;
@@ -1106,6 +1173,7 @@ contract AssetLendingPool is
         $.totalDefaultedPrincipal += principal;
 
         _clearActiveLoans($, tokenIds);
+        _removeBorrowerLoan($, borrower, loanId);
 
         $.defaults[loanId] = DefaultRecord({
             loanId: loanId,
@@ -1135,18 +1203,28 @@ contract AssetLendingPool is
             revert AssetLendingPool__ExceedsMaxUtilization();
     }
 
+    /// @dev Distribute `interest` between lenders (via accInterestPerShare) and protocol.
+    ///      `lenderShareBps` and `totalLenderDeposits` are the values snapshotted at loan
+    ///      origination — passing live values would allow JIT deposit sandwiches (H001) and
+    ///      admin config changes to retroactively reprice in-flight interest (M003).
+    ///      For pre-upgrade loans where lenderDepositsSnapshot == 0, fall back to live values
+    ///      so old loans continue to work correctly after the upgrade.
     function _distributeInterest(
         PoolStorage storage $,
-        uint256 interest
+        uint256 interest,
+        uint256 lenderShareBps,
+        uint256 totalLenderDeposits
     ) private {
         if (interest == 0) return;
+        // Fall back to live values for pre-upgrade loans (snapshot fields default to 0).
+        if (totalLenderDeposits == 0) totalLenderDeposits = $.totalLenderDeposits;
+        if (lenderShareBps == 0) lenderShareBps = $.config.lenderShareBps();
         uint256 lenderPortion;
-        if ($.totalLenderDeposits > 0) {
-            uint256 lenderShareBps = $.config.lenderShareBps();
+        if (totalLenderDeposits > 0) {
             if (lenderShareBps > 0) {
                 lenderPortion = (interest * lenderShareBps) / BPS;
                 $.accInterestPerShare +=
-                    (lenderPortion * PRECISION) / $.totalLenderDeposits;
+                    (lenderPortion * PRECISION) / totalLenderDeposits;
             }
         }
         $.totalInterestEarned += interest - lenderPortion;
