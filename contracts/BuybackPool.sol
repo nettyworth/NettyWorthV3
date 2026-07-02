@@ -248,18 +248,6 @@ contract BuybackPool is
         $.modelEnabled[IBuybackPool.BuybackModel.FMV] = true;
     }
 
-    /// @notice Upgrade initializer for existing proxies that were deployed before the model feature.
-    /// @dev    Called once after the UUPS upgrade to seed the new storage fields.
-    ///         Idempotent: sets AmountSpent + both toggles true, which preserves prior behavior.
-    function initializeV2() external reinitializer(2) {
-        __EIP712_init("NettyWorthBuyback", "1");
-
-        BuybackPoolStorage storage $ = _getStorage();
-        $.defaultBuybackModel = IBuybackPool.BuybackModel.AmountSpent;
-        $.modelEnabled[IBuybackPool.BuybackModel.AmountSpent] = true;
-        $.modelEnabled[IBuybackPool.BuybackModel.FMV] = true;
-    }
-
     // =========================================================================
     // Core: register & buyback
     // =========================================================================

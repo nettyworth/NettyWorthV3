@@ -212,6 +212,22 @@ describe("PackMachine Integration", async function () {
       account: walletOperator.account,
     });
 
+    // Deploy mock lending pool and wire to AssetNFT so getAppraisalValue works.
+    const mockLendingPool = await viem.deployContract("MockAssetLendingPool");
+    await assetNFT.write.setLendingPool([mockLendingPool.address], {
+      account: walletAdmin.account,
+    });
+
+    // Set wide-open FMV bounds [0, MAX] for all tiers of pack 0 so deposits of
+    // unappraised tokens (FMV=0) work in existing tests.
+    const MAX_UINT128 = (1n << 128n) - 1n;
+    const minFmv = [0n, 0n, 0n, 0n, 0n, 0n] as const;
+    const maxFmv = [MAX_UINT128, MAX_UINT128, MAX_UINT128, MAX_UINT128, MAX_UINT128, MAX_UINT128] as const;
+    await packRegistry.write.setPackTierFmvBounds(
+      [packMachineAddress, 0n, minFmv, maxFmv],
+      { account: walletOperator.account },
+    );
+
     return {
       permissionManager,
       usdc,
@@ -221,6 +237,7 @@ describe("PackMachine Integration", async function () {
       factory,
       packMachine,
       packRegistry,
+      mockLendingPool,
     };
   }
 
@@ -305,7 +322,7 @@ describe("PackMachine Integration", async function () {
       // Deposit NFTs
       await depositNFTs(packMachine, assetNFT, CARDS_PER_PACK);
       assert.equal(
-        await packMachine.read.effectivePrizePoolSize(),
+        (await packMachine.read.getMachineInfo()).effectivePrizePoolSize,
         BigInt(CARDS_PER_PACK),
       );
 
@@ -342,7 +359,7 @@ describe("PackMachine Integration", async function () {
       );
 
       // effectivePrizePoolSize decremented at request time
-      assert.equal(await packMachine.read.effectivePrizePoolSize(), 0n);
+      assert.equal((await packMachine.read.getMachineInfo()).effectivePrizePoolSize, 0n);
 
       // USDC is escrowed in the machine at open time — not yet forwarded.
       assert.equal(await usdc.read.balanceOf([packMachine.address]), PRICE_PER_PACK);
@@ -427,7 +444,7 @@ describe("PackMachine Integration", async function () {
       // USDC is escrowed in the machine at open time — settled to finance wallet at fulfillment.
       assert.equal(await usdc.read.balanceOf([packMachine.address]), PRICE_PER_PACK);
       assert.equal(await usdc.read.balanceOf([adminAddress]), 0n);
-      assert.equal(await packMachine.read.effectivePrizePoolSize(), 0n);
+      assert.equal((await packMachine.read.getMachineInfo()).effectivePrizePoolSize, 0n);
 
       // Fulfill and verify cards received
       await testClient.impersonateAccount({ address: coordinator.address });
@@ -458,32 +475,33 @@ describe("PackMachine Integration", async function () {
   describe("Tier weights", async function () {
     it("should initialize with default weights summing to 10000", async function () {
       const { packMachine } = await deployFullStack();
-      const weights = await packMachine.read.getPackTierWeights([0n]);
+      const weights = (await packMachine.read.getPack([0n])).tierWeights;
       const sum = (weights as readonly number[]).reduce((a, b) => a + b, 0);
       assert.equal(sum, 10000);
-      assert.equal(weights[0], 7500); // Base 75%
-      assert.equal(weights[1], 1950); // Common 19.5%
+      assert.equal(weights[0], 7040); // Base 70.40%
+      assert.equal(weights[1], 2500); // Common 25%
       assert.equal(weights[2], 400); // Uncommon 4%
-      assert.equal(weights[3], 100); // Rare 1%
-      assert.equal(weights[4], 50); // Ultra 0.5%
+      assert.equal(weights[3], 50); // Rare 0.50%
+      assert.equal(weights[4], 9); // Ultra Rare 0.09%
+      assert.equal(weights[5], 1); // Grail 0.01%
     });
 
     it("operator can update tier weights", async function () {
       const { packMachine, packRegistry } = await deployFullStack();
-      const newWeights = [5000, 2000, 1500, 1000, 500] as const;
+      const newWeights = [5000, 2000, 1500, 1000, 400, 100] as const;
       await packRegistry.write.setPackTierWeights(
         [packMachine.address, 0n, newWeights],
         { account: walletOperator.account },
       );
       // Read back via clone pass-through
-      const stored = await packMachine.read.getPackTierWeights([0n]);
+      const stored = (await packMachine.read.getPack([0n])).tierWeights;
       assert.equal(stored[0], 5000);
-      assert.equal(stored[4], 500);
+      assert.equal(stored[5], 100);
     });
 
     it("rejects weights that do not sum to 10000", async function () {
       const { packMachine, packRegistry } = await deployFullStack();
-      const badWeights = [5000, 2000, 1500, 1000, 100] as const; // sums to 9600
+      const badWeights = [5000, 2000, 1500, 1000, 400, 0] as const; // sums to 9900
       await assert.rejects(
         packRegistry.write.setPackTierWeights(
           [packMachine.address, 0n, badWeights],
@@ -494,7 +512,7 @@ describe("PackMachine Integration", async function () {
 
     it("non-operator cannot update tier weights", async function () {
       const { packMachine, packRegistry } = await deployFullStack();
-      const weights = [5000, 2000, 1500, 1000, 500] as const;
+      const weights = [5000, 2000, 1500, 1000, 400, 100] as const;
       await assert.rejects(
         packRegistry.write.setPackTierWeights(
           [packMachine.address, 0n, weights],
@@ -537,8 +555,9 @@ describe("PackMachine Integration", async function () {
       assert.equal(await packMachine.read.getTierPoolSize([1]), 2n); // Common
       assert.equal(await packMachine.read.getTierPoolSize([2]), 0n); // Uncommon
       assert.equal(await packMachine.read.getTierPoolSize([3]), 1n); // Rare
-      assert.equal(await packMachine.read.getTierPoolSize([4]), 0n); // Ultra
-      assert.equal(await packMachine.read.effectivePrizePoolSize(), 5n);
+      assert.equal(await packMachine.read.getTierPoolSize([4]), 0n); // Ultra Rare
+      assert.equal(await packMachine.read.getTierPoolSize([5]), 0n); // Grail
+      assert.equal((await packMachine.read.getMachineInfo()).effectivePrizePoolSize, 5n);
     });
 
     it("rejects mismatched array lengths", async function () {
@@ -561,7 +580,7 @@ describe("PackMachine Integration", async function () {
         account: walletOperator.account,
       });
       await assert.rejects(
-        packMachine.write.deposit([[BigInt(startId)], [5], [1n], operatorAddress], {
+        packMachine.write.deposit([[BigInt(startId)], [6], [1n], operatorAddress], {
           account: walletOperator.account,
         }),
       );
@@ -614,6 +633,7 @@ describe("PackMachine Integration", async function () {
         assetNFT,
         factory,
         vrfRouter,
+        packRegistry,
         packMachine: _,
       } = await deployFullStack();
 
@@ -644,6 +664,16 @@ describe("PackMachine Integration", async function () {
           account: walletOperator.account,
         },
       );
+      // Set wide-open FMV bounds for future machine so deposits succeed.
+      {
+        const MAX_UINT128 = (1n << 128n) - 1n;
+        const zeroFmv = [0n, 0n, 0n, 0n, 0n, 0n] as const;
+        const maxFmvArr = [MAX_UINT128, MAX_UINT128, MAX_UINT128, MAX_UINT128, MAX_UINT128, MAX_UINT128] as const;
+        await packRegistry.write.setPackTierFmvBounds(
+          [futureMachineAddr, 0n, zeroFmv, maxFmvArr],
+          { account: walletOperator.account },
+        );
+      }
 
       const mintRecipients = Array(CARDS_PER_PACK).fill(
         operatorAddress,

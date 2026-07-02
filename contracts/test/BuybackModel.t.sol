@@ -15,6 +15,7 @@ import {MockERC20} from "../test-helpers/MockERC20.sol";
 import {AssetNFT} from "../AssetNFT.sol";
 import {MockVRFCoordinatorV2Plus} from "../test-helpers/MockVRFCoordinatorV2Plus.sol";
 import {MockPermit2} from "../test-helpers/MockPermit2.sol";
+import {MockAssetLendingPool} from "../test-helpers/MockAssetLendingPool.sol";
 
 /// @title BuybackModelTest
 /// @notice Tests for the two-model buyback system:
@@ -195,8 +196,18 @@ contract BuybackModelTest is Test {
         packMachine.unpause();
         vm.prank(operator);
         packRegistry.setPackBuybackAllocation(address(packMachine), 0, BUYBACK_ALLOC_BPS);
+
+        // Wire mock lending pool so getAppraisalValue works
+        MockAssetLendingPool mockLendingPool = new MockAssetLendingPool();
+        vm.prank(admin);
+        assetNFT.setLendingPool(address(mockLendingPool));
+
+        // Wide-open FMV bounds so deposits don't require per-token appraisals
+        uint128[6] memory minFmv;
+        uint128[6] memory maxFmv;
+        for (uint256 t; t < 6; ++t) maxFmv[t] = type(uint128).max;
         vm.prank(operator);
-        packMachine.setRetentionThreshold(0);
+        packRegistry.setPackTierFmvBounds(address(packMachine), 0, minFmv, maxFmv);
 
         vm.prank(operator);
         pool.registerPackMachine(address(packMachine), true);
@@ -258,7 +269,7 @@ contract BuybackModelTest is Test {
         vm.prank(user);
         usdc.approve(address(packMachine), PRICE);
 
-        bytes memory sig = _signOpenPack(user, packMachine.openNonce(user));
+        bytes memory sig = _signOpenPack(user, packMachine.getUserInfo(user).openNonce);
         vm.prank(user);
         packMachine.openPack(user, 0, sig);
 

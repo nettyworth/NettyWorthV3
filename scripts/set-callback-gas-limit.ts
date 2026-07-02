@@ -4,21 +4,23 @@ import { createInterface } from "node:readline/promises";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sleep } from "./lib/sleep.js";
 
 // ─── DEFAULT_ADMIN_ROLE = bytes32(0) ──────────────────────────────────────────
 const DEFAULT_ADMIN_ROLE =
   "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
 
 // ─── ERC-7201 storage slot for PackVRFRouterStorage (base + 3) ───────────────
-// Base slot: 0x9e3c7d59c2c1e1a6a0a24454f70b7c4ed3a3a9a9f6e3b3a1c8e7d6c5b4a3a200
-// Slot layout (each +1 = next 32-byte word from base):
+// Base: keccak256(abi.encode(uint256(keccak256("nettyworth.storage.PackVRFRouter")) - 1)) & ~bytes32(uint256(0xff))
+//     = 0x1a86f08caea8a771089b03dcbcd6d44d4b9a0be22a0569919ff7e908d7550700
+// Slot layout (+0 = first 32-byte word from base):
 //   +0  vrfCoordinator (address, 20 bytes, low-order)
 //   +1  subscriptionId (uint256)
 //   +2  keyHash (bytes32)
 //   +3  callbackGasLimit (uint32, 4 bytes, lowest) | requestConfirmations (uint16, next 2 bytes)
 // callbackGasLimit lives in the low 4 bytes of slot +3.
 const GAS_LIMIT_STORAGE_SLOT =
-  "0x9e3c7d59c2c1e1a6a0a24454f70b7c4ed3a3a9a9f6e3b3a1c8e7d6c5b4a3a203" as const;
+  "0x1a86f08caea8a771089b03dcbcd6d44d4b9a0be22a0569919ff7e908d7550703" as const;
 
 // ─── Parse CALLBACK_GAS_LIMIT (default 250000) ────────────────────────────────
 const rawGasLimit = process.env.CALLBACK_GAS_LIMIT ?? "200000";
@@ -173,6 +175,7 @@ const txHash = await router.write.setCallbackGasLimit([newGasLimit], {
 });
 const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 console.log(`  tx: ${txHash} (block ${receipt.blockNumber})`);
+await sleep(5000);
 
 // ─── Verify via storage slot ──────────────────────────────────────────────────
 console.log("[2/2] Verifying...");

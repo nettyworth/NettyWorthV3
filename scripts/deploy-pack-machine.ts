@@ -16,7 +16,7 @@ const sleep = (ms: number) =>
 const TRUSTED_FORWARDER = (process.env.TRUSTED_FORWARDER ??
   "0x0000000000000000000000000000000000000000") as `0x${string}`;
 const VRF_CALLBACK_GAS_LIMIT = Number(
-  process.env.VRF_CALLBACK_GAS_LIMIT ?? "250000",
+  process.env.VRF_CALLBACK_GAS_LIMIT ?? "500000",
 );
 const VRF_REQUEST_CONFIRMATIONS = Number(
   process.env.VRF_REQUEST_CONFIRMATIONS ?? "3",

@@ -78,153 +78,153 @@ function encodeAddress(addr: string): string {
 // implCtorArgs / proxyInitData are derived from the same args the deploy scripts used.
 
 const CONTRACT_META: Record<string, ContractMeta> = {
-  PermissionManager: {
-    sourcePath: "PermissionManager.sol",
-    contractName: "PermissionManager",
-    implCtorArgs: () => null, // no-arg constructor
-    proxyInitData: (e) =>
-      encodeFunctionData({
-        abi: [
-          {
-            type: "function",
-            name: "initialize",
-            inputs: [{ type: "address" }],
-          },
-        ],
-        functionName: "initialize",
-        args: [e.admin as `0x${string}`],
-      }),
-  },
+  // PermissionManager: {
+  //   sourcePath: "PermissionManager.sol",
+  //   contractName: "PermissionManager",
+  //   implCtorArgs: () => null, // no-arg constructor
+  //   proxyInitData: (e) =>
+  //     encodeFunctionData({
+  //       abi: [
+  //         {
+  //           type: "function",
+  //           name: "initialize",
+  //           inputs: [{ type: "address" }],
+  //         },
+  //       ],
+  //       functionName: "initialize",
+  //       args: [e.admin as `0x${string}`],
+  //     }),
+  // },
 
-  AssetNFT: {
-    sourcePath: "AssetNFT.sol",
-    contractName: "AssetNFT",
-    implCtorArgs: (e) =>
-      encodeAddress(
-        e.trustedForwarder ?? "0x0000000000000000000000000000000000000000",
-      ),
-    proxyInitData: (e) =>
-      encodeFunctionData({
-        abi: [
-          {
-            type: "function",
-            name: "initialize",
-            inputs: [
-              { type: "address" }, // permissionManager
-              { type: "string" }, // name
-              { type: "string" }, // symbol
-              { type: "string" }, // contractURI
-              { type: "address" }, // royaltyReceiver (defaults to admin on deploy)
-              { type: "uint96" }, // royaltyFee (0 on deploy)
-            ],
-          },
-        ],
-        functionName: "initialize",
-        args: [
-          e.permissionManager as `0x${string}`,
-          e.name ?? "NettyWorth Assets",
-          e.symbol ?? "NWA",
-          e.contractURI ?? "",
-          // royaltyReceiver defaults to deployer; not stored in JSON → use admin
-          (e.royaltyReceiver ??
-            e.admin ??
-            "0x0000000000000000000000000000000000000000") as `0x${string}`,
-          BigInt(e.royaltyFee ?? "0"),
-        ],
-      }),
-  },
+  // AssetNFT: {
+  //   sourcePath: "AssetNFT.sol",
+  //   contractName: "AssetNFT",
+  //   implCtorArgs: (e) =>
+  //     encodeAddress(
+  //       e.trustedForwarder ?? "0x0000000000000000000000000000000000000000",
+  //     ),
+  //   proxyInitData: (e) =>
+  //     encodeFunctionData({
+  //       abi: [
+  //         {
+  //           type: "function",
+  //           name: "initialize",
+  //           inputs: [
+  //             { type: "address" }, // permissionManager
+  //             { type: "string" }, // name
+  //             { type: "string" }, // symbol
+  //             { type: "string" }, // contractURI
+  //             { type: "address" }, // royaltyReceiver (defaults to admin on deploy)
+  //             { type: "uint96" }, // royaltyFee (0 on deploy)
+  //           ],
+  //         },
+  //       ],
+  //       functionName: "initialize",
+  //       args: [
+  //         e.permissionManager as `0x${string}`,
+  //         e.name ?? "NettyWorth Assets",
+  //         e.symbol ?? "NWA",
+  //         e.contractURI ?? "",
+  //         // royaltyReceiver defaults to deployer; not stored in JSON → use admin
+  //         (e.royaltyReceiver ??
+  //           e.admin ??
+  //           "0x0000000000000000000000000000000000000000") as `0x${string}`,
+  //         BigInt(e.royaltyFee ?? "0"),
+  //       ],
+  //     }),
+  // },
 
-  PackVRFRouter: {
-    sourcePath: "PackVRFRouter.sol",
-    contractName: "PackVRFRouter",
-    implCtorArgs: () => null, // no-arg constructor
-    proxyInitData: (e) =>
-      encodeFunctionData({
-        abi: [
-          {
-            type: "function",
-            name: "initialize",
-            inputs: [
-              { type: "address" }, // permissionManager
-              { type: "address" }, // vrfCoordinator
-              { type: "uint256" }, // subscriptionId
-              { type: "bytes32" }, // keyHash
-              { type: "uint32" }, // callbackGasLimit
-              { type: "uint16" }, // requestConfirmations
-            ],
-          },
-        ],
-        functionName: "initialize",
-        args: [
-          e.permissionManager as `0x${string}`,
-          e.vrfCoordinator as `0x${string}`,
-          BigInt(e.subscriptionId),
-          e.keyHash as `0x${string}`,
-          Number(e.callbackGasLimit),
-          Number(e.requestConfirmations),
-        ],
-      }),
-  },
+  // PackVRFRouter: {
+  //   sourcePath: "PackVRFRouter.sol",
+  //   contractName: "PackVRFRouter",
+  //   implCtorArgs: () => null, // no-arg constructor
+  //   proxyInitData: (e) =>
+  //     encodeFunctionData({
+  //       abi: [
+  //         {
+  //           type: "function",
+  //           name: "initialize",
+  //           inputs: [
+  //             { type: "address" }, // permissionManager
+  //             { type: "address" }, // vrfCoordinator
+  //             { type: "uint256" }, // subscriptionId
+  //             { type: "bytes32" }, // keyHash
+  //             { type: "uint32" }, // callbackGasLimit
+  //             { type: "uint16" }, // requestConfirmations
+  //           ],
+  //         },
+  //       ],
+  //       functionName: "initialize",
+  //       args: [
+  //         e.permissionManager as `0x${string}`,
+  //         e.vrfCoordinator as `0x${string}`,
+  //         BigInt(e.subscriptionId),
+  //         e.keyHash as `0x${string}`,
+  //         Number(e.callbackGasLimit),
+  //         Number(e.requestConfirmations),
+  //       ],
+  //     }),
+  // },
 
-  // PackMachineImplementation has no proxy — it is the EIP-1167 clone template.
-  PackMachineImplementation: {
-    sourcePath: "PackMachine.sol",
-    contractName: "PackMachine",
-    implCtorArgs: (e) =>
-      encodeAddress(
-        e.trustedForwarder ?? "0x0000000000000000000000000000000000000000",
-      ),
-    proxyInitData: () => null, // no proxy
-  },
+  // // PackMachineImplementation has no proxy — it is the EIP-1167 clone template.
+  // PackMachineImplementation: {
+  //   sourcePath: "PackMachine.sol",
+  //   contractName: "PackMachine",
+  //   implCtorArgs: (e) =>
+  //     encodeAddress(
+  //       e.trustedForwarder ?? "0x0000000000000000000000000000000000000000",
+  //     ),
+  //   proxyInitData: () => null, // no proxy
+  // },
 
-  PackMachineFactory: {
-    sourcePath: "PackMachineFactory.sol",
-    contractName: "PackMachineFactory",
-    implCtorArgs: (e) =>
-      encodeAddress(
-        e.trustedForwarder ?? "0x0000000000000000000000000000000000000000",
-      ),
-    proxyInitData: (e) =>
-      encodeFunctionData({
-        abi: [
-          {
-            type: "function",
-            name: "initialize",
-            inputs: [
-              { type: "address" }, // permissionManager
-              { type: "address" }, // assetNFT
-              { type: "address" }, // paymentToken
-              { type: "address" }, // financeWallet
-            ],
-          },
-        ],
-        functionName: "initialize",
-        args: [
-          e.permissionManager as `0x${string}`,
-          e.assetNFT as `0x${string}`,
-          e.paymentToken as `0x${string}`,
-          e.financeWallet as `0x${string}`,
-        ],
-      }),
-  },
+  // PackMachineFactory: {
+  //   sourcePath: "PackMachineFactory.sol",
+  //   contractName: "PackMachineFactory",
+  //   implCtorArgs: (e) =>
+  //     encodeAddress(
+  //       e.trustedForwarder ?? "0x0000000000000000000000000000000000000000",
+  //     ),
+  //   proxyInitData: (e) =>
+  //     encodeFunctionData({
+  //       abi: [
+  //         {
+  //           type: "function",
+  //           name: "initialize",
+  //           inputs: [
+  //             { type: "address" }, // permissionManager
+  //             { type: "address" }, // assetNFT
+  //             { type: "address" }, // paymentToken
+  //             { type: "address" }, // financeWallet
+  //           ],
+  //         },
+  //       ],
+  //       functionName: "initialize",
+  //       args: [
+  //         e.permissionManager as `0x${string}`,
+  //         e.assetNFT as `0x${string}`,
+  //         e.paymentToken as `0x${string}`,
+  //         e.financeWallet as `0x${string}`,
+  //       ],
+  //     }),
+  // },
 
-  PackRegistry: {
-    sourcePath: "PackRegistry.sol",
-    contractName: "PackRegistry",
-    implCtorArgs: () => null,
-    proxyInitData: (e) =>
-      encodeFunctionData({
-        abi: [
-          {
-            type: "function",
-            name: "initialize",
-            inputs: [{ type: "address" }],
-          },
-        ],
-        functionName: "initialize",
-        args: [e.permissionManager as `0x${string}`],
-      }),
-  },
+  // PackRegistry: {
+  //   sourcePath: "PackRegistry.sol",
+  //   contractName: "PackRegistry",
+  //   implCtorArgs: () => null,
+  //   proxyInitData: (e) =>
+  //     encodeFunctionData({
+  //       abi: [
+  //         {
+  //           type: "function",
+  //           name: "initialize",
+  //           inputs: [{ type: "address" }],
+  //         },
+  //       ],
+  //       functionName: "initialize",
+  //       args: [e.permissionManager as `0x${string}`],
+  //     }),
+  // },
 
   BuybackPool: {
     sourcePath: "BuybackPool.sol",
@@ -256,134 +256,134 @@ const CONTRACT_META: Record<string, ContractMeta> = {
       }),
   },
 
-  AssetLendingPool: {
-    sourcePath: "AssetLendingPool.sol",
-    contractName: "AssetLendingPool",
-    implCtorArgs: () => null,
-    proxyInitData: (e) =>
-      encodeFunctionData({
-        abi: [
-          {
-            type: "function",
-            name: "initialize",
-            inputs: [
-              { type: "address" }, // initialOwner
-              { type: "address" }, // paymentToken
-              { type: "address" }, // assetNFT
-              { type: "uint256" }, // ltvBps
-              { type: "uint256" }, // lenderShareBps
-              { type: "uint256" }, // acquisitionWindow
-              { type: "uint256" }, // auctionWindow
-              { type: "address" }, // packMachineFactory
-            ],
-          },
-        ],
-        functionName: "initialize",
-        args: [
-          e.owner as `0x${string}`,
-          e.paymentToken as `0x${string}`,
-          e.assetNFT as `0x${string}`,
-          BigInt(e.ltvBps),
-          BigInt(e.lenderShareBps),
-          BigInt(e.acquisitionWindow),
-          BigInt(e.auctionWindow),
-          (e.packMachineFactory ??
-            "0x0000000000000000000000000000000000000001") as `0x${string}`,
-        ],
-      }),
-  },
+  // AssetLendingPool: {
+  //   sourcePath: "AssetLendingPool.sol",
+  //   contractName: "AssetLendingPool",
+  //   implCtorArgs: () => null,
+  //   proxyInitData: (e) =>
+  //     encodeFunctionData({
+  //       abi: [
+  //         {
+  //           type: "function",
+  //           name: "initialize",
+  //           inputs: [
+  //             { type: "address" }, // initialOwner
+  //             { type: "address" }, // paymentToken
+  //             { type: "address" }, // assetNFT
+  //             { type: "uint256" }, // ltvBps
+  //             { type: "uint256" }, // lenderShareBps
+  //             { type: "uint256" }, // acquisitionWindow
+  //             { type: "uint256" }, // auctionWindow
+  //             { type: "address" }, // packMachineFactory
+  //           ],
+  //         },
+  //       ],
+  //       functionName: "initialize",
+  //       args: [
+  //         e.owner as `0x${string}`,
+  //         e.paymentToken as `0x${string}`,
+  //         e.assetNFT as `0x${string}`,
+  //         BigInt(e.ltvBps),
+  //         BigInt(e.lenderShareBps),
+  //         BigInt(e.acquisitionWindow),
+  //         BigInt(e.auctionWindow),
+  //         (e.packMachineFactory ??
+  //           "0x0000000000000000000000000000000000000001") as `0x${string}`,
+  //       ],
+  //     }),
+  // },
 
-  FeeController: {
-    sourcePath: "FeeController.sol",
-    contractName: "FeeController",
-    implCtorArgs: () => null,
-    proxyInitData: (e) =>
-      encodeFunctionData({
-        abi: [
-          {
-            type: "function",
-            name: "initialize",
-            inputs: [
-              { type: "address" }, // permissionManager
-              { type: "address" }, // treasury
-            ],
-          },
-        ],
-        functionName: "initialize",
-        args: [
-          e.permissionManager as `0x${string}`,
-          e.treasury as `0x${string}`,
-        ],
-      }),
-  },
+  // FeeController: {
+  //   sourcePath: "FeeController.sol",
+  //   contractName: "FeeController",
+  //   implCtorArgs: () => null,
+  //   proxyInitData: (e) =>
+  //     encodeFunctionData({
+  //       abi: [
+  //         {
+  //           type: "function",
+  //           name: "initialize",
+  //           inputs: [
+  //             { type: "address" }, // permissionManager
+  //             { type: "address" }, // treasury
+  //           ],
+  //         },
+  //       ],
+  //       functionName: "initialize",
+  //       args: [
+  //         e.permissionManager as `0x${string}`,
+  //         e.treasury as `0x${string}`,
+  //       ],
+  //     }),
+  // },
 
-  NettyWorthMarketplace: {
-    sourcePath: "NettyWorthMarketplace.sol",
-    contractName: "NettyWorthMarketplace",
-    implCtorArgs: () => null,
-    proxyInitData: (e) =>
-      encodeFunctionData({
-        abi: [
-          {
-            type: "function",
-            name: "initialize",
-            inputs: [
-              { type: "address" }, // permissionManager
-              { type: "address" }, // feeController
-              { type: "address" }, // lendingPool
-              { type: "address" }, // assetNFT
-              { type: "address" }, // paymentToken
-              { type: "address" }, // treasury
-            ],
-          },
-        ],
-        functionName: "initialize",
-        args: [
-          e.permissionManager as `0x${string}`,
-          e.feeController as `0x${string}`,
-          e.lendingPool as `0x${string}`,
-          e.assetNFT as `0x${string}`,
-          e.paymentToken as `0x${string}`,
-          e.treasury as `0x${string}`,
-        ],
-      }),
-  },
+  // NettyWorthMarketplace: {
+  //   sourcePath: "NettyWorthMarketplace.sol",
+  //   contractName: "NettyWorthMarketplace",
+  //   implCtorArgs: () => null,
+  //   proxyInitData: (e) =>
+  //     encodeFunctionData({
+  //       abi: [
+  //         {
+  //           type: "function",
+  //           name: "initialize",
+  //           inputs: [
+  //             { type: "address" }, // permissionManager
+  //             { type: "address" }, // feeController
+  //             { type: "address" }, // lendingPool
+  //             { type: "address" }, // assetNFT
+  //             { type: "address" }, // paymentToken
+  //             { type: "address" }, // treasury
+  //           ],
+  //         },
+  //       ],
+  //       functionName: "initialize",
+  //       args: [
+  //         e.permissionManager as `0x${string}`,
+  //         e.feeController as `0x${string}`,
+  //         e.lendingPool as `0x${string}`,
+  //         e.assetNFT as `0x${string}`,
+  //         e.paymentToken as `0x${string}`,
+  //         e.treasury as `0x${string}`,
+  //       ],
+  //     }),
+  // },
 
-  P2PTradeEscrow: {
-    sourcePath: "P2PTradeEscrow.sol",
-    contractName: "P2PTradeEscrow",
-    implCtorArgs: () => null,
-    proxyInitData: (e) =>
-      encodeFunctionData({
-        abi: [
-          {
-            type: "function",
-            name: "initialize",
-            inputs: [{ type: "address" }],
-          },
-        ],
-        functionName: "initialize",
-        args: [e.owner as `0x${string}`],
-      }),
-  },
+  // P2PTradeEscrow: {
+  //   sourcePath: "P2PTradeEscrow.sol",
+  //   contractName: "P2PTradeEscrow",
+  //   implCtorArgs: () => null,
+  //   proxyInitData: (e) =>
+  //     encodeFunctionData({
+  //       abi: [
+  //         {
+  //           type: "function",
+  //           name: "initialize",
+  //           inputs: [{ type: "address" }],
+  //         },
+  //       ],
+  //       functionName: "initialize",
+  //       args: [e.owner as `0x${string}`],
+  //     }),
+  // },
 
-  PromoCodeRegistry: {
-    sourcePath: "PromoCodeRegistry.sol",
-    contractName: "PromoCodeRegistry",
-    implCtorArgs: () => null,
-    proxyInitData: (e) =>
-      encodeFunctionData({
-        abi: [
-          {
-            type: "function",
-            name: "initialize",
-            inputs: [{ type: "address" }],
-          },
-        ],
-        functionName: "initialize",
-        args: [e.permissionManager as `0x${string}`],
-      }),
-  },
+  // PromoCodeRegistry: {
+  //   sourcePath: "PromoCodeRegistry.sol",
+  //   contractName: "PromoCodeRegistry",
+  //   implCtorArgs: () => null,
+  //   proxyInitData: (e) =>
+  //     encodeFunctionData({
+  //       abi: [
+  //         {
+  //           type: "function",
+  //           name: "initialize",
+  //           inputs: [{ type: "address" }],
+  //         },
+  //       ],
+  //       functionName: "initialize",
+  //       args: [e.permissionManager as `0x${string}`],
+  //     }),
+  // },
 };
 
 // ─── forge verify-contract wrapper ───────────────────────────────────────────

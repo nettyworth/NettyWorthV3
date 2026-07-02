@@ -80,9 +80,9 @@ if (!SKIP_DEPOSIT) {
   if (tierParts.length === 1) {
     // Single tier applied to all tokens
     const t = Number(tierParts[0]);
-    if (!Number.isInteger(t) || t < 0 || t > 4) {
+    if (!Number.isInteger(t) || t < 0 || t > 5) {
       console.error(
-        "TIERS must be an integer 0–4 (Base/Common/Uncommon/Rare/Ultra).",
+        "TIERS must be an integer 0–5 (Base/Common/Uncommon/Rare/Ultra Rare/Grail).",
       );
       process.exit(1);
     }
@@ -97,8 +97,8 @@ if (!SKIP_DEPOSIT) {
     }
     tiers = tierParts.map((t, i) => {
       const n = Number(t);
-      if (!Number.isInteger(n) || n < 0 || n > 4) {
-        console.error(`TIERS[${i}] = "${t}" is invalid; must be 0–4.`);
+      if (!Number.isInteger(n) || n < 0 || n > 5) {
+        console.error(`TIERS[${i}] = "${t}" is invalid; must be 0–5.`);
         process.exit(1);
       }
       return n;
@@ -137,7 +137,7 @@ async function confirm(
       },
       {} as Record<number, number>,
     );
-    const tierNames = ["Base", "Common", "Uncommon", "Rare", "Ultra"];
+    const tierNames = ["Base", "Common", "Uncommon", "Rare", "Ultra Rare", "Grail"];
     for (const [t, count] of Object.entries(tierCounts)) {
       console.log(`  Tier ${t} (${tierNames[Number(t)]}): ${count} tokens`);
     }
@@ -361,17 +361,16 @@ if (!SKIP_DEPOSIT && assetNFTProxy !== undefined) {
 }
 
 // ─── Summary: read back clone state ──────────────────────────────────────────
-const effectivePoolSize = await clone.read.effectivePrizePoolSize();
-const totalInventory = await clone.read.getTotalInventory();
-const actualBuybackPool = await clone.read.getBuybackPool();
-const actualBuybackBps = await clone.read.getPackBuybackAllocationBps([0n]);
+const machineInfo = await clone.read.getMachineInfo();
+const effectivePoolSize = machineInfo.effectivePrizePoolSize;
+const actualBuybackPool = machineInfo.buybackPool;
+const actualBuybackBps = (await clone.read.getPack([0n])).buybackAllocationBps;
 
 console.log("\n=== PackMachine Setup Complete ===");
 console.log(
   `Network:             ${connection.networkName} (chainId: ${chainId})`,
 );
 console.log(`Clone:               ${cloneAddress}`);
-console.log(`Total Inventory:     ${totalInventory}`);
 console.log(`Effective Pool Size: ${effectivePoolSize}`);
 console.log(
   `Buyback Pool:        ${actualBuybackPool === "0x0000000000000000000000000000000000000000" ? "(not set)" : actualBuybackPool}`,

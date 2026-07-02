@@ -13,6 +13,7 @@ import {MockERC20} from "../test-helpers/MockERC20.sol";
 import {AssetNFT} from "../AssetNFT.sol";
 import {MockVRFCoordinatorV2Plus} from "../test-helpers/MockVRFCoordinatorV2Plus.sol";
 import {MockPermit2} from "../test-helpers/MockPermit2.sol";
+import {MockAssetLendingPool} from "../test-helpers/MockAssetLendingPool.sol";
 
 /// @notice Security regression tests — each test demonstrates a known vulnerability.
 ///         After applying the corresponding fix, the test outcome should invert as documented.
@@ -151,9 +152,17 @@ contract PackMachineSecurityTest is Test {
         vm.prank(operator);
         vrfRouter.setAuthorizedPackMachine(cloneAddr, true);
 
-        // Disable cut-off so security tests are not affected by the feature.
+        // Wire mock lending pool so getAppraisalValue works
+        MockAssetLendingPool mockLendingPool = new MockAssetLendingPool();
+        vm.prank(admin);
+        assetNFT.setLendingPool(address(mockLendingPool));
+
+        // Wide-open FMV bounds so deposits don't require per-token appraisals
+        uint128[6] memory minFmv;
+        uint128[6] memory maxFmv;
+        for (uint256 t; t < 6; ++t) maxFmv[t] = type(uint128).max;
         vm.prank(operator);
-        packMachine.setRetentionThreshold(0);
+        packRegistry.setPackTierFmvBounds(address(packMachine), 0, minFmv, maxFmv);
     }
 
     // =========================================================================
@@ -261,7 +270,7 @@ contract PackMachineSecurityTest is Test {
         vm.prank(operator);
         packMachine.resetEffectivePrizePoolSize();
 
-        assertEq(packMachine.effectivePrizePoolSize(), 0);
+        assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 0);
     }
 
     // =========================================================================

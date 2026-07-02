@@ -15,6 +15,11 @@ library Roles {
     bytes32 internal constant PACK_OPERATOR_ROLE = keccak256(
         "PACK_OPERATOR_ROLE"
     );
-    bytes32 internal constant BUYBACK_POOL_ROLE = keccak256("BUYBACK_POOL_ROLE");
+    bytes32 internal constant BUYBACK_POOL_ROLE = keccak256(
+        "BUYBACK_POOL_ROLE"
+    );
     bytes32 internal constant MARKETPLACE_ROLE = keccak256("MARKETPLACE_ROLE");
+    bytes32 internal constant COINFLOW_SETTLER_ROLE = keccak256(
+        "COINFLOW_SETTLER_ROLE"
+    );
 }

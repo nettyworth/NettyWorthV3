@@ -167,7 +167,10 @@ if (process.env.ASSET_LENDING_POOL_PROXY) {
 // ─── Resolve config proxy (setEligibilityControls lives on AssetLendingPoolConfig) ──
 const pool = await viem.getContractAt("AssetLendingPool", proxyAddress);
 const configProxyAddress = await pool.read.getConfig();
-const config = await viem.getContractAt("AssetLendingPoolConfig", configProxyAddress);
+const config = await viem.getContractAt(
+  "AssetLendingPoolConfig",
+  configProxyAddress,
+);
 
 // ─── Verify caller is owner ───────────────────────────────────────────────────
 const owner = await config.read.owner();

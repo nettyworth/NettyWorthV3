@@ -35,4 +35,8 @@ interface IAssetNFT {
         uint256 tokenId,
         uint256 salePrice
     ) external view returns (address receiver, uint256 royaltyAmount);
+
+    /// @notice Returns the appraisal value for a token from the lending pool.
+    ///         Returns 0 if the lending pool is not configured or the token has no appraisal.
+    function getAppraisalValue(uint256 tokenId) external view returns (uint256);
 }

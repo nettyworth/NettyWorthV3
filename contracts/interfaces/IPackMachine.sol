@@ -5,6 +5,21 @@ import {PackTypes} from "../lib/PackTypes.sol";
 
 interface IPackMachine {
     // =========================================================================
+    // View return types
+    // =========================================================================
+
+    struct MachineInfo {
+        address factory;
+        address buybackPool;
+        uint256 effectivePrizePoolSize;
+    }
+
+    struct UserInfo {
+        uint256 openNonce;
+        bool claimedFirstOpenDiscount;
+    }
+
+    // =========================================================================
     // Initializer
     // =========================================================================
 
@@ -107,46 +122,27 @@ interface IPackMachine {
     /// @notice Authorize or revoke a pool contract's ability to call depositFromPool.
     function setAuthorizedDepositor(address depositor, bool authorized) external;
 
-    /// @notice Set the machine-wide retention threshold in bps. 0 = disabled.
-    function setRetentionThreshold(uint16 bps) external;
-
     // =========================================================================
     // Views — pack (pass-throughs to PackRegistry)
     // =========================================================================
 
-    function getPackPrice(uint256 packId) external view returns (uint128);
-
-    function getPackCardsPerPack(uint256 packId) external view returns (uint8);
-
-    function getPackTierWeights(
+    function getPack(
         uint256 packId
-    ) external view returns (uint32[5] memory);
-
-    function getPackBuybackAllocationBps(
-        uint256 packId
-    ) external view returns (uint16);
+    ) external view returns (PackTypes.Pack memory);
 
     // =========================================================================
     // Views — machine-wide pool
     // =========================================================================
 
-    function effectivePrizePoolSize() external view returns (uint256);
+    /// @notice Returns all machine-wide config and pool state in one call.
+    function getMachineInfo() external view returns (MachineInfo memory);
+
+    /// @notice Returns per-user nonce and first-open discount status in one call.
+    function getUserInfo(address user) external view returns (UserInfo memory);
 
     function getTierPoolSize(uint8 tier) external view returns (uint256);
 
     function getTierPool(uint8 tier) external view returns (uint256[] memory);
-
-    function getBuybackPool() external view returns (address);
-
-    function getRetentionThresholdBps() external view returns (uint16);
-
-    function getTotalInventory() external view returns (uint256);
-
-    function isCutOff() external view returns (bool);
-
-    function factory() external view returns (address);
-
-    function openNonce(address user) external view returns (uint256);
 
     // =========================================================================
     // Eligibility setters (per-pack card membership)
@@ -180,13 +176,6 @@ interface IPackMachine {
         uint256 packId,
         uint8 tier
     ) external view returns (uint256);
-
-    function getPackTierPool(
-        uint256 packId,
-        uint8 tier
-    ) external view returns (uint256[] memory);
-
-    function getPackPoolSize(uint256 packId) external view returns (uint256);
 
     function getPackAvailable(uint256 packId) external view returns (uint256);
 

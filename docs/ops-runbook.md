@@ -263,6 +263,25 @@ CALLBACK_GAS_LIMIT=300000 \
 
 Increase if VRF fulfillment transactions are running out of gas. Default is `250000`.
 
+### Set Key Hash (VRF Gas Lane)
+
+**Script:** `scripts/set-key-hash.ts`  
+**Auth:** `DEFAULT_ADMIN_ROLE` on PackVRFRouter
+
+```bash
+VRF_KEY_HASH=0x00b81b5a830cb0a4009fbd8904de511e28631e62ce5ad231373d3cdad373ccab \
+  npx hardhat run scripts/set-key-hash.ts --network mainnet
+```
+
+Updates the Chainlink VRF key hash used when requesting randomness. The key hash identifies the gas lane (speed/cost tier) for the VRF subscription. Use when switching to a different gas lane or after redeploying the VRF router on a new network.
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `VRF_KEY_HASH` | Yes | 0x-prefixed 32-byte hex string (66 characters) identifying the Chainlink gas lane |
+| `PACK_VRF_ROUTER_PROXY` | No | Override the proxy address; defaults to `deployments/<network>.json` |
+
+The script reads the current key hash from on-chain storage, short-circuits if it is already equal, prompts for confirmation on live networks, and persists the updated value to `deployments/<network>.json`.
+
 ---
 
 ## 7. Buyback Pool Operations

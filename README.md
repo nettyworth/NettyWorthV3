@@ -71,6 +71,7 @@ scripts/
   set-eligibility-controls.ts     # Set min appraisal value, min grade, and category lists on AssetLendingPool
   set-lender-config.ts            # Set lender revenue share (bps) and toggle lender deposits on AssetLendingPool
   set-callback-gas-limit.ts       # Update PackVRFRouter Chainlink callback gas limit
+  set-key-hash.ts                 # Update PackVRFRouter Chainlink VRF key hash (gas lane)
   upgrade-pack-vrf-router.ts      # UUPS upgrade for PackVRFRouter proxy
   deploy-asset-lending-pool.ts    # Deploy AssetLendingPool + ERC1967 proxy; grant STATE_MANAGER_ROLE
   deploy-fee-controller.ts        # Deploy FeeController + ERC1967 proxy
@@ -911,6 +912,7 @@ Deploys the `P2PTradeEscrow` implementation and ERC1967 proxy. `initialize(owner
 | `upgrade-asset-nft.ts` | Deploy new AssetNFT impl and call `upgradeToAndCall` on the proxy | `UPGRADER_ROLE` |
 | `upgrade-pack-vrf-router.ts` | Deploy new PackVRFRouter impl and upgrade proxy | `UPGRADER_ROLE` |
 | `set-callback-gas-limit.ts` | Update the Chainlink VRF callback gas limit on PackVRFRouter | `DEFAULT_ADMIN_ROLE` |
+| `set-key-hash.ts` | Update the Chainlink VRF key hash (gas lane) on PackVRFRouter; env: `VRF_KEY_HASH` (required, 0x-prefixed 32-byte hex), `PACK_VRF_ROUTER_PROXY` (opt) | `DEFAULT_ADMIN_ROLE` |
 | `grant-role.ts` | Grant any protocol role to any wallet via PermissionManager | `DEFAULT_ADMIN_ROLE` |
 | `burn-asset-nft.ts` | Permanently burn AssetNFT tokens by token ID | `BURNER_ROLE` |
 | `seed-asset-nft.ts` | Dev/test helper — mint sample AssetNFT cards and set appraisals | `MINTER_ROLE` |
@@ -923,6 +925,9 @@ Deploys the `P2PTradeEscrow` implementation and ERC1967 proxy. `initialize(owner
 ```bash
 # Example: update callback gas limit
 CALLBACK_GAS_LIMIT=250000 npx hardhat run scripts/set-callback-gas-limit.ts --network <network>
+
+# Example: update VRF key hash (gas lane)
+VRF_KEY_HASH=0x00b81b5a... npx hardhat run scripts/set-key-hash.ts --network <network>
 
 # Example: upgrade AssetNFT
 npx hardhat run scripts/upgrade-asset-nft.ts --network <network>

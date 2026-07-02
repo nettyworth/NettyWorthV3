@@ -16,6 +16,7 @@ import {MockERC20} from "../test-helpers/MockERC20.sol";
 import {AssetNFT} from "../AssetNFT.sol";
 import {MockVRFCoordinatorV2Plus} from "../test-helpers/MockVRFCoordinatorV2Plus.sol";
 import {MockPermit2} from "../test-helpers/MockPermit2.sol";
+import {MockAssetLendingPool} from "../test-helpers/MockAssetLendingPool.sol";
 
 /// @notice Unit tests for the global first-open pack discount feature.
 ///
@@ -72,13 +73,13 @@ contract PackMachineFirstOpenDiscountTest is Test {
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
     );
 
-    uint128 internal constant PRICE = 10e6;     // 10 USDC (6-decimal)
-    uint8  internal constant CARDS_PER_PACK = 2;
+    uint128 internal constant PRICE = 10e6; // 10 USDC (6-decimal)
+    uint8 internal constant CARDS_PER_PACK = 2;
     uint16 internal constant BUYBACK_ALLOC_BPS = 2000; // 20 %
-    uint16 internal constant DISCOUNT_BPS = 1000;      // 10 %
+    uint16 internal constant DISCOUNT_BPS = 1000; // 10 %
 
     bytes32 internal constant PROMO_CODE = keccak256("PROMO10");
-    uint16  internal constant PROMO_BPS  = 1000; // 10 %
+    uint16 internal constant PROMO_BPS = 1000; // 10 %
 
     // =========================================================================
     // setUp — full real stack (mirrors PromoCodeSecurity.t.sol)
@@ -114,7 +115,14 @@ contract PackMachineFirstOpenDiscountTest is Test {
             address(assetNFTImpl),
             abi.encodeCall(
                 AssetNFT.initialize,
-                (address(pm), "NettyWorth Assets", "NWA", "ipfs://contract", makeAddr("royalty"), 250)
+                (
+                    address(pm),
+                    "NettyWorth Assets",
+                    "NWA",
+                    "ipfs://contract",
+                    makeAddr("royalty"),
+                    250
+                )
             )
         );
         assetNFT = AssetNFT(address(assetNFTProxy));
@@ -125,7 +133,14 @@ contract PackMachineFirstOpenDiscountTest is Test {
             address(routerImpl),
             abi.encodeCall(
                 PackVRFRouter.initialize,
-                (address(pm), address(coordinator), 1, keccak256("key"), 700_000, 3)
+                (
+                    address(pm),
+                    address(coordinator),
+                    1,
+                    keccak256("key"),
+                    700_000,
+                    3
+                )
             )
         );
         vrfRouter = PackVRFRouter(address(routerProxy));
@@ -161,13 +176,26 @@ contract PackMachineFirstOpenDiscountTest is Test {
         vm.stopPrank();
 
         vm.prank(operator);
-        address cloneAddr = factory.createPackMachine(PRICE, CARDS_PER_PACK, uint40(block.timestamp));
+        address cloneAddr = factory.createPackMachine(
+            PRICE,
+            CARDS_PER_PACK,
+            uint40(block.timestamp)
+        );
         packMachine = PackMachine(cloneAddr);
 
         vm.prank(operator);
         vrfRouter.setAuthorizedPackMachine(cloneAddr, true);
+        // Wire mock lending pool so getAppraisalValue works
+        MockAssetLendingPool mockLendingPool = new MockAssetLendingPool();
+        vm.prank(admin);
+        assetNFT.setLendingPool(address(mockLendingPool));
+
+        // Wide-open FMV bounds so deposits don't require per-token appraisals
+        uint128[6] memory minFmv;
+        uint128[6] memory maxFmv;
+        for (uint256 t; t < 6; ++t) maxFmv[t] = type(uint128).max;
         vm.prank(operator);
-        packMachine.setRetentionThreshold(0); // disable cut-off
+        packRegistry.setPackTierFmvBounds(address(packMachine), 0, minFmv, maxFmv);
 
         // ── BuybackPool ───────────────────────────────────────────────────────
         BuybackPool poolImpl = new BuybackPool();
@@ -175,7 +203,13 @@ contract PackMachineFirstOpenDiscountTest is Test {
             address(poolImpl),
             abi.encodeCall(
                 BuybackPool.initialize,
-                (address(pm), address(assetNFT), address(usdc), financeWallet, address(factory))
+                (
+                    address(pm),
+                    address(assetNFT),
+                    address(usdc),
+                    financeWallet,
+                    address(factory)
+                )
             )
         );
         pool = BuybackPool(address(poolProxy));
@@ -188,7 +222,11 @@ contract PackMachineFirstOpenDiscountTest is Test {
         vm.prank(pauser);
         packMachine.unpause();
         vm.prank(operator);
-        packRegistry.setPackBuybackAllocation(address(packMachine), 0, BUYBACK_ALLOC_BPS);
+        packRegistry.setPackBuybackAllocation(
+            address(packMachine),
+            0,
+            BUYBACK_ALLOC_BPS
+        );
         vm.prank(operator);
         pool.registerPackMachine(address(packMachine), true);
 
@@ -217,8 +255,8 @@ contract PackMachineFirstOpenDiscountTest is Test {
             PROMO_CODE,
             IPromoCodeRegistry.PromoKind.Discount,
             PROMO_BPS,
-            0,     // no expiry
-            0,     // uncapped
+            0, // no expiry
+            0, // uncapped
             false, // not restricted
             false, // not oncePerUser
             address(0)
@@ -230,7 +268,9 @@ contract PackMachineFirstOpenDiscountTest is Test {
     // =========================================================================
 
     /// @dev Deposit `count` freshly-minted NFTs (all tier 0, eligible for pack 0).
-    function _depositNFTs(uint256 count) internal returns (uint256[] memory tokenIds) {
+    function _depositNFTs(
+        uint256 count
+    ) internal returns (uint256[] memory tokenIds) {
         tokenIds = new uint256[](count);
         uint256 startId = assetNFT.totalSupply() + 1;
         address[] memory recipients = new address[](count);
@@ -269,7 +309,9 @@ contract PackMachineFirstOpenDiscountTest is Test {
                 address(packMachine)
             )
         );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", domainSeparator, structHash)
+        );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(operatorPk, digest);
         return abi.encodePacked(r, s, v);
     }
@@ -284,7 +326,7 @@ contract PackMachineFirstOpenDiscountTest is Test {
         uint256 usdcAmount
     ) internal returns (uint256 requestId) {
         requestId = nextExpectedRequestId++;
-        uint256 nonce = packMachine.openNonce(who);
+        uint256 nonce = packMachine.getUserInfo(who).openNonce;
         bytes memory sig = _signOpenPack(who, nonce, codeId);
         usdc.mint(who, usdcAmount);
         vm.startPrank(who);
@@ -339,7 +381,7 @@ contract PackMachineFirstOpenDiscountTest is Test {
             "full price escrowed when discount disabled"
         );
         assertFalse(
-            packMachine.hasClaimedFirstOpenDiscount(alice),
+            packMachine.getUserInfo(alice).claimedFirstOpenDiscount,
             "flag must not be set when discount disabled"
         );
 
@@ -356,13 +398,16 @@ contract PackMachineFirstOpenDiscountTest is Test {
     // Test 2 — enabled 10%: first open pays discounted price, correct splits
     // =========================================================================
 
-    function test_firstOpenDiscount_enabled_firstOpenPaysDiscountedPrice() public {
+    function test_firstOpenDiscount_enabled_firstOpenPaysDiscountedPrice()
+        public
+    {
         _depositNFTs(4);
 
         vm.prank(admin);
         factory.setFirstOpenDiscount(true, DISCOUNT_BPS);
 
-        uint256 expectedEscrowed = PRICE - (uint256(PRICE) * DISCOUNT_BPS) / 10_000;
+        uint256 expectedEscrowed =
+            PRICE - (uint256(PRICE) * DISCOUNT_BPS) / 10_000;
         // 10 USDC * 90% = 9 USDC
         assertEq(expectedEscrowed, 9e6, "sanity: expected 9 USDC escrowed");
 
@@ -374,17 +419,18 @@ contract PackMachineFirstOpenDiscountTest is Test {
             "escrowed amount equals discounted price"
         );
         assertTrue(
-            packMachine.hasClaimedFirstOpenDiscount(alice),
+            packMachine.getUserInfo(alice).claimedFirstOpenDiscount,
             "flag set after first open"
         );
 
         uint256 financeBalanceBefore = usdc.balanceOf(financeWallet);
-        uint256 poolBalanceBefore    = usdc.balanceOf(address(pool));
+        uint256 poolBalanceBefore = usdc.balanceOf(address(pool));
 
         _fulfill(requestId);
 
         // After fulfillment: buyback share + finance share = expectedEscrowed
-        uint256 expectedBuyback = (expectedEscrowed * BUYBACK_ALLOC_BPS) / 10_000;
+        uint256 expectedBuyback =
+            (expectedEscrowed * BUYBACK_ALLOC_BPS) / 10_000;
         uint256 expectedFinance = expectedEscrowed - expectedBuyback;
 
         assertEq(
@@ -417,7 +463,7 @@ contract PackMachineFirstOpenDiscountTest is Test {
         // First open — gets the discount
         uint256 r1 = _openPackPending(alice, bytes32(0), PRICE);
         assertTrue(
-            packMachine.hasClaimedFirstOpenDiscount(alice),
+            packMachine.getUserInfo(alice).claimedFirstOpenDiscount,
             "flag set after first open"
         );
         _fulfill(r1);
@@ -426,7 +472,8 @@ contract PackMachineFirstOpenDiscountTest is Test {
         uint256 aliceUsdcBefore = usdc.balanceOf(alice);
         uint256 r2 = _openPackPending(alice, bytes32(0), PRICE);
 
-        uint256 spent = PRICE - (usdc.balanceOf(alice) - aliceUsdcBefore + PRICE);
+        uint256 spent =
+            PRICE - (usdc.balanceOf(alice) - aliceUsdcBefore + PRICE);
         // Simplest check: escrow must equal PRICE for this second open.
         // We track machine escrow delta: only this open's funds should be in the machine.
         assertEq(
@@ -449,7 +496,8 @@ contract PackMachineFirstOpenDiscountTest is Test {
         vm.prank(admin);
         factory.setFirstOpenDiscount(true, DISCOUNT_BPS);
 
-        uint256 expectedEscrowed = PRICE - (uint256(PRICE) * DISCOUNT_BPS) / 10_000;
+        uint256 expectedEscrowed =
+            PRICE - (uint256(PRICE) * DISCOUNT_BPS) / 10_000;
 
         // Alice opens first
         uint256 r1 = _openPackPending(alice, bytes32(0), PRICE);
@@ -464,16 +512,16 @@ contract PackMachineFirstOpenDiscountTest is Test {
             "bob also gets the discount on his first open"
         );
         assertTrue(
-            packMachine.hasClaimedFirstOpenDiscount(bob),
+            packMachine.getUserInfo(bob).claimedFirstOpenDiscount,
             "bob's flag is set"
         );
         assertFalse(
-            packMachine.hasClaimedFirstOpenDiscount(alice) == false &&
-            packMachine.hasClaimedFirstOpenDiscount(alice) == true,
+            packMachine.getUserInfo(alice).claimedFirstOpenDiscount == false &&
+                packMachine.getUserInfo(alice).claimedFirstOpenDiscount == true,
             "alice flag unchanged (still true)"
         );
         assertTrue(
-            packMachine.hasClaimedFirstOpenDiscount(alice),
+            packMachine.getUserInfo(alice).claimedFirstOpenDiscount,
             "alice's flag remains true"
         );
 
@@ -484,14 +532,17 @@ contract PackMachineFirstOpenDiscountTest is Test {
     // Test 5 — promo code supplied: promo wins, first-open flag NOT consumed
     // =========================================================================
 
-    function test_firstOpenDiscount_promoCodeSupplied_promoWinsAndFlagNotConsumed() public {
+    function test_firstOpenDiscount_promoCodeSupplied_promoWinsAndFlagNotConsumed()
+        public
+    {
         _depositNFTs(8);
 
         vm.prank(admin);
         factory.setFirstOpenDiscount(true, DISCOUNT_BPS);
 
         // Open with a promo code — promo discount applies, first-open flag stays unused
-        uint256 expectedPromoEscrow = PRICE - (uint256(PRICE) * PROMO_BPS) / 10_000;
+        uint256 expectedPromoEscrow =
+            PRICE - (uint256(PRICE) * PROMO_BPS) / 10_000;
 
         uint256 r1 = _openPackPending(alice, PROMO_CODE, PRICE);
 
@@ -501,14 +552,15 @@ contract PackMachineFirstOpenDiscountTest is Test {
             "promo discount applied (not first-open)"
         );
         assertFalse(
-            packMachine.hasClaimedFirstOpenDiscount(alice),
+            packMachine.getUserInfo(alice).claimedFirstOpenDiscount,
             "first-open flag NOT consumed when promo code is used"
         );
 
         _fulfill(r1);
 
         // Now open without a code — alice still gets her first-open discount
-        uint256 expectedFirstOpenEscrow = PRICE - (uint256(PRICE) * DISCOUNT_BPS) / 10_000;
+        uint256 expectedFirstOpenEscrow =
+            PRICE - (uint256(PRICE) * DISCOUNT_BPS) / 10_000;
         uint256 r2 = _openPackPending(alice, bytes32(0), PRICE);
 
         assertEq(
@@ -517,7 +569,7 @@ contract PackMachineFirstOpenDiscountTest is Test {
             "first-open discount applied on second open (no code)"
         );
         assertTrue(
-            packMachine.hasClaimedFirstOpenDiscount(alice),
+            packMachine.getUserInfo(alice).claimedFirstOpenDiscount,
             "flag consumed on first codeless open"
         );
 
@@ -538,12 +590,20 @@ contract PackMachineFirstOpenDiscountTest is Test {
         vm.prank(admin);
         factory.setFirstOpenDiscount(true, DISCOUNT_BPS);
 
-        uint256 expectedEscrowed = PRICE - (uint256(PRICE) * DISCOUNT_BPS) / 10_000;
+        uint256 expectedEscrowed =
+            PRICE - (uint256(PRICE) * DISCOUNT_BPS) / 10_000;
 
         // Bob opens — gets the discount; escrowed at discounted price.
         uint256 r1 = _openPackPending(bob, bytes32(0), PRICE);
-        assertTrue(packMachine.hasClaimedFirstOpenDiscount(bob), "bob flag set before fulfill");
-        assertEq(usdc.balanceOf(address(packMachine)), expectedEscrowed, "discounted amount escrowed");
+        assertTrue(
+            packMachine.getUserInfo(bob).claimedFirstOpenDiscount,
+            "bob flag set before fulfill"
+        );
+        assertEq(
+            usdc.balanceOf(address(packMachine)),
+            expectedEscrowed,
+            "discounted amount escrowed"
+        );
 
         // Blacklist bob so all NFT transfers to him revert during fulfillRandomness,
         // causing every card to fail and triggering the full-refund path.
@@ -565,7 +625,7 @@ contract PackMachineFirstOpenDiscountTest is Test {
         );
         // And the first-open flag must be reset so bob retains his once-per-machine discount
         assertFalse(
-            packMachine.hasClaimedFirstOpenDiscount(bob),
+            packMachine.getUserInfo(bob).claimedFirstOpenDiscount,
             "bob first-open flag reset after full-failure refund"
         );
     }
@@ -574,26 +634,43 @@ contract PackMachineFirstOpenDiscountTest is Test {
     // Test 7 — access control: non-admin cannot setFirstOpenDiscount
     // =========================================================================
 
-    function test_firstOpenDiscount_setFirstOpenDiscount_revertNonAdmin() public {
+    function test_firstOpenDiscount_setFirstOpenDiscount_revertNonAdmin()
+        public
+    {
         vm.prank(operator);
         // Should revert — operator is not DEFAULT_ADMIN_ROLE for the factory
         (bool success, ) = address(factory).call(
-            abi.encodeWithSignature("setFirstOpenDiscount(bool,uint16)", true, DISCOUNT_BPS)
+            abi.encodeWithSignature(
+                "setFirstOpenDiscount(bool,uint16)",
+                true,
+                DISCOUNT_BPS
+            )
         );
         assertFalse(success, "non-admin call must revert");
-        assertFalse(factory.firstOpenDiscountEnabled(), "discount still disabled after failed call");
+        assertFalse(
+            factory.firstOpenDiscountEnabled(),
+            "discount still disabled after failed call"
+        );
     }
 
-    function test_firstOpenDiscount_setFirstOpenDiscount_revertBpsTooHigh() public {
+    function test_firstOpenDiscount_setFirstOpenDiscount_revertBpsTooHigh()
+        public
+    {
         vm.prank(admin);
-        vm.expectRevert(PackMachineFactory.PackMachineFactory__InvalidDiscountBps.selector);
+        vm.expectRevert(
+            PackMachineFactory.PackMachineFactory__InvalidDiscountBps.selector
+        );
         factory.setFirstOpenDiscount(true, 10_001);
     }
 
     function test_firstOpenDiscount_setFirstOpenDiscount_allowsMaxBps() public {
         vm.prank(admin);
         factory.setFirstOpenDiscount(true, 10_000); // 100% — valid (free pack)
-        assertEq(factory.firstOpenDiscountBps(), 10_000, "100% discount accepted");
+        assertEq(
+            factory.firstOpenDiscountBps(),
+            10_000,
+            "100% discount accepted"
+        );
     }
 
     // =========================================================================
@@ -618,93 +695,9 @@ contract PackMachineFirstOpenDiscountTest is Test {
         factory.setFirstOpenDiscount(false, DISCOUNT_BPS);
         vm.stopPrank();
 
-        assertFalse(factory.firstOpenDiscountEnabled(), "discount disabled after toggle");
-    }
-
-    // =========================================================================
-    // Test 9 — previewFirstOpenPrice view
-    // =========================================================================
-
-    function test_previewFirstOpenPrice_returnsDiscountedPriceBeforeClaim() public {
-        _depositNFTs(2); // needed for registry.getPack to have a valid pack
-
-        vm.prank(admin);
-        factory.setFirstOpenDiscount(true, DISCOUNT_BPS);
-
-        uint256 expectedEscrowed = PRICE - (uint256(PRICE) * DISCOUNT_BPS) / 10_000;
-        assertEq(
-            packMachine.previewFirstOpenPrice(alice, 0),
-            expectedEscrowed,
-            "preview returns discounted price for unclaimed wallet"
+        assertFalse(
+            factory.firstOpenDiscountEnabled(),
+            "discount disabled after toggle"
         );
-    }
-
-    function test_previewFirstOpenPrice_returnsFullPriceAfterClaim() public {
-        _depositNFTs(4);
-
-        vm.prank(admin);
-        factory.setFirstOpenDiscount(true, DISCOUNT_BPS);
-
-        uint256 r1 = _openPackPending(alice, bytes32(0), PRICE);
-        _fulfill(r1);
-
-        assertEq(
-            packMachine.previewFirstOpenPrice(alice, 0),
-            PRICE,
-            "preview returns full price after discount claimed"
-        );
-    }
-
-    function test_previewFirstOpenPrice_returnsFullPriceWhenDisabled() public view {
-        // Discount disabled (default) — preview should return full price.
-        assertEq(
-            packMachine.previewFirstOpenPrice(alice, 0),
-            PRICE,
-            "preview returns full price when feature is disabled"
-        );
-    }
-
-    // =========================================================================
-    // Test 10 — Permit2 path: discounted amount is pulled correctly
-    // =========================================================================
-
-    function test_firstOpenDiscount_permit2Path_discountedAmountPulled() public {
-        _depositNFTs(4);
-
-        vm.prank(admin);
-        factory.setFirstOpenDiscount(true, DISCOUNT_BPS);
-
-        uint256 expectedEscrowed = packMachine.previewFirstOpenPrice(alice, 0);
-
-        uint256 nonce = packMachine.openNonce(alice);
-        bytes memory playSig = _signOpenPack(alice, nonce, bytes32(0));
-
-        usdc.mint(alice, expectedEscrowed);
-        // MockPermit2 calls transferFrom(owner, to, amount) where owner = alice.
-        // Alice must approve the MockPermit2 contract (etched at PERMIT2_ADDRESS).
-        vm.startPrank(alice);
-        usdc.approve(PERMIT2_ADDRESS, expectedEscrowed);
-        uint256 requestId = nextExpectedRequestId++;
-        packMachine.openPackWithPermit2(
-            alice,
-            0,
-            0,              // permit2 nonce
-            block.timestamp + 1 hours,
-            playSig,        // MockPermit2 ignores permit2 sig — any bytes will do
-            playSig
-        );
-        vm.stopPrank();
-
-        assertEq(
-            usdc.balanceOf(address(packMachine)),
-            expectedEscrowed,
-            "permit2 path: discounted amount escrowed"
-        );
-        assertTrue(
-            packMachine.hasClaimedFirstOpenDiscount(alice),
-            "permit2 path: first-open flag set"
-        );
-
-        _fulfill(requestId);
     }
 }

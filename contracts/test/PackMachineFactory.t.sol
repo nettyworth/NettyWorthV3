@@ -208,9 +208,9 @@ contract PackMachineFactoryTest is Test {
         address machine = factory.createPackMachine(price, cards, start);
 
         PackMachine pm_ = PackMachine(machine);
-        assertEq(pm_.getPackPrice(0), price);
-        assertEq(pm_.getPackCardsPerPack(0), cards);
-        assertEq(pm_.factory(), address(factory));
+        assertEq(pm_.getPack(0).pricePerPack, price);
+        assertEq(pm_.getPack(0).cardsPerPack, cards);
+        assertEq(pm_.getMachineInfo().factory, address(factory));
     }
 
     function test_CreatePackMachine_UnauthorizedReverts() public {

@@ -97,14 +97,14 @@
     "deployedAt": "2026-07-01T10:19:12.984Z"
   },
   "NettyWorthMarketplace": {
-    "proxy": "0x07AdDaab6d7AEb0DB9804377d8Ea7593C2C0e772",
-    "implementation": "0x09923F6de5CED6c8258C908997cDFfbdD2ba50f0",
+    "proxy": "0x6345a3d117da45601dd1920d7b65125d5432087c",
+    "implementation": "0x38e75848885ea51d12ff0fc6394e4d764580b850",
     "permissionManager": "0x27b125fB73094e53741b850ad779a746a59B089A",
     "feeController": "0x6066CB78cD147546c9F2a103Ac95fE48F2A37ed9",
     "lendingPool": "0x1a4a158294B8270a2beB7de5eA152e23ae9585D4",
     "assetNFT": "0xeA3aDEac6b82b9852a140E642BC10135638653E1",
     "paymentToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
     "treasury": "0x0ed8BDFbb4803CD29d3C436AeaCdb48A9fa22A74",
-    "deployedAt": "2026-07-01T10:44:20.021Z"
+    "deployedAt": "2026-07-01T16:54:07.480Z"
   }
 }

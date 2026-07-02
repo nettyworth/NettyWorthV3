@@ -13,6 +13,7 @@ import {MockERC20} from "../test-helpers/MockERC20.sol";
 import {AssetNFT} from "../AssetNFT.sol";
 import {MockVRFCoordinatorV2Plus} from "../test-helpers/MockVRFCoordinatorV2Plus.sol";
 import {MockPermit2} from "../test-helpers/MockPermit2.sol";
+import {MockAssetLendingPool} from "../test-helpers/MockAssetLendingPool.sol";
 
 /// @title PackMachineEligibilityTest
 /// @notice Covers per-pack card eligibility: deposit with masks, setPackEligibility,
@@ -134,11 +135,13 @@ contract PackMachineEligibilityTest is Test {
         vm.prank(operator);
         vrfRouter.setAuthorizedPackMachine(cloneAddr, true);
 
-        vm.prank(operator);
-        packMachine.setRetentionThreshold(0);
+        // Wire mock lending pool so getAppraisalValue works
+        MockAssetLendingPool mockLendingPool = new MockAssetLendingPool();
+        vm.prank(admin);
+        assetNFT.setLendingPool(address(mockLendingPool));
 
         // Add Pro (pack 1) and Elite (pack 2)
-        uint32[5] memory weights = [uint32(7500), 1950, 400, 100, 50];
+        uint32[6] memory weights = [uint32(7040), 2500, 400, 50, 9, 1];
         vm.startPrank(operator);
         packPro = packRegistry.addPack(
             cloneAddr, PRICE, CARDS_PER_PACK, uint40(block.timestamp), 0, weights
@@ -146,6 +149,16 @@ contract PackMachineEligibilityTest is Test {
         packElite = packRegistry.addPack(
             cloneAddr, PRICE * 2, CARDS_PER_PACK, uint40(block.timestamp), 0, weights
         );
+        vm.stopPrank();
+
+        // Wide-open FMV bounds for all packs so deposits don't require per-token appraisals
+        uint128[6] memory minFmv;
+        uint128[6] memory maxFmv;
+        for (uint256 t; t < 6; ++t) maxFmv[t] = type(uint128).max;
+        vm.startPrank(operator);
+        packRegistry.setPackTierFmvBounds(address(packMachine), PACK_BASE, minFmv, maxFmv);
+        packRegistry.setPackTierFmvBounds(address(packMachine), packPro, minFmv, maxFmv);
+        packRegistry.setPackTierFmvBounds(address(packMachine), packElite, minFmv, maxFmv);
         vm.stopPrank();
     }
 
@@ -209,7 +222,7 @@ contract PackMachineEligibilityTest is Test {
     }
 
     function _openPack(address user_, uint256 packId) internal returns (uint256 requestId) {
-        uint256 nonce = packMachine.openNonce(user_);
+        uint256 nonce = packMachine.getUserInfo(user_).openNonce;
         bytes memory sig = _signOpenPack(user_, packId, nonce);
         usdc.mint(user_, PRICE * 3);
         vm.startPrank(user_);
@@ -244,7 +257,7 @@ contract PackMachineEligibilityTest is Test {
         _deposit(ids, tiers, masks);
 
         // Machine-wide: 3 tokens
-        assertEq(packMachine.effectivePrizePoolSize(), 3);
+        assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 3);
         assertEq(packMachine.getTierPoolSize(0), 3);
 
         // Per-pack pool sizes
@@ -414,7 +427,7 @@ contract PackMachineEligibilityTest is Test {
 
         assertEq(packMachine.getPackAvailable(packElite), 0);
 
-        uint256 nonce = packMachine.openNonce(user);
+        uint256 nonce = packMachine.getUserInfo(user).openNonce;
         bytes memory sig = _signOpenPack(user, packElite, nonce);
         usdc.mint(user, PRICE * 3);
         vm.startPrank(user);
@@ -476,7 +489,7 @@ contract PackMachineEligibilityTest is Test {
         uint256 reqId = _openPack(user, PACK_BASE);
 
         // effectivePrizePoolSize = 0 after reservation, availablePerPack[Base] = 0.
-        assertEq(packMachine.effectivePrizePoolSize(), 0);
+        assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 0);
         assertEq(packMachine.getPackAvailable(PACK_BASE), 0);
 
         // Fulfill — card is in pool, normal win path. Check the winner got the card.
@@ -484,7 +497,7 @@ contract PackMachineEligibilityTest is Test {
         assertEq(assetNFT.ownerOf(ids[0]), user);
 
         // effectivePrizePoolSize stays 0 (machine-wide win reduced it).
-        assertEq(packMachine.effectivePrizePoolSize(), 0);
+        assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 0);
     }
 
     // =========================================================================
@@ -535,7 +548,7 @@ contract PackMachineEligibilityTest is Test {
     function test_Registry_256PackCap() public {
         // Pack 0 was created by factory, Pro = 1, Elite = 2 → 3 packs already.
         // Add up to 256, then 257th should revert.
-        uint32[5] memory weights = [uint32(7500), 1950, 400, 100, 50];
+        uint32[6] memory weights = [uint32(7040), 2500, 400, 50, 9, 1];
         vm.startPrank(operator);
         for (uint256 p = 3; p < 256; ++p) {
             packRegistry.addPack(
@@ -602,7 +615,7 @@ contract PackMachineEligibilityTest is Test {
         vm.prank(operator);
         packMachine.resetEffectivePrizePoolSize();
 
-        assertEq(packMachine.effectivePrizePoolSize(), 2);
+        assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 2);
         assertEq(packMachine.getPackAvailable(PACK_BASE), 1);
         assertEq(packMachine.getPackAvailable(packPro), 2);
         assertEq(packMachine.getPackAvailable(packElite), 0);
@@ -630,7 +643,7 @@ contract PackMachineEligibilityTest is Test {
         }
 
         assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 0), 0);
-        assertEq(packMachine.effectivePrizePoolSize(), 0);
+        assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 0);
     }
 
     // =========================================================================
