@@ -89,7 +89,7 @@ contract BuybackPool is
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.BuybackPool")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant BUYBACK_POOL_STORAGE_SLOT =
-        0x3f1a2b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f00;
+        0xcde91e075f2798ca63d14356a360b0f16575d21d6ecd1d5809e671a133dd7f00;
 
     function _getStorage() private pure returns (BuybackPoolStorage storage $) {
         assembly {
@@ -101,9 +101,11 @@ contract BuybackPool is
     // EIP-712 typehash
     // =========================================================================
 
-    /// @dev keccak256("FMVQuote(uint256 tokenId,uint256 fmv,uint256 deadline,uint256 nonce)")
+    /// @dev keccak256("FMVQuote(uint256 tokenId,uint256 fmv,uint256 deadline,uint256 nonce,address seller)")
+    ///      seller is bound so a leaked quote cannot be redeemed by anyone other than the
+    ///      intended recipient (H002 fix).
     bytes32 private constant FMV_QUOTE_TYPEHASH = keccak256(
-        "FMVQuote(uint256 tokenId,uint256 fmv,uint256 deadline,uint256 nonce)"
+        "FMVQuote(uint256 tokenId,uint256 fmv,uint256 deadline,uint256 nonce,address seller)"
     );
 
     // =========================================================================
@@ -131,6 +133,9 @@ contract BuybackPool is
         address indexed sourcePackMachine,
         uint8 tier
     );
+    /// @notice Emitted when a buyback NFT cannot be redeposited because its source
+    ///         PackMachine has been deregistered. Admin must call rescueNFT to recover (L003 fix).
+    event TokenStuck(uint256 indexed tokenId, address indexed sourceMachine);
     event DefaultBuybackBpsUpdated(uint16 oldBps, uint16 newBps);
     event PackMachineBuybackBpsUpdated(
         address indexed machine,
@@ -196,6 +201,8 @@ contract BuybackPool is
     error BuybackPool__FMVQuoteTokenMismatch(uint256 expected, uint256 given);
     /// @notice Attempted to set the default model to Unset, which is not valid.
     error BuybackPool__InvalidModel();
+    /// @notice The FMV quote's seller does not match the caller (H002 fix).
+    error BuybackPool__FMVQuoteSellerMismatch(address expected, address actual);
 
     uint16 private constant BPS_PRECISION = 10000;
 
@@ -241,24 +248,18 @@ contract BuybackPool is
         $.modelEnabled[IBuybackPool.BuybackModel.FMV] = true;
     }
 
-    /// @notice Upgrade initializer for existing proxies that were deployed before the model feature.
-    /// @dev    Called once after the UUPS upgrade to seed the new storage fields.
-    ///         Idempotent: sets AmountSpent + both toggles true, which preserves prior behavior.
-    function initializeV2() external reinitializer(2) {
-        __EIP712_init("NettyWorthBuyback", "1");
-
-        BuybackPoolStorage storage $ = _getStorage();
-        $.defaultBuybackModel = IBuybackPool.BuybackModel.AmountSpent;
-        $.modelEnabled[IBuybackPool.BuybackModel.AmountSpent] = true;
-        $.modelEnabled[IBuybackPool.BuybackModel.FMV] = true;
-    }
-
     // =========================================================================
     // Core: register & buyback
     // =========================================================================
 
     /// @notice Called by PackMachine during fulfillRandomness to record a won token's buyback data.
     /// @dev Only callable by registered PackMachines.
+    ///      If the token already has an active registration (stale flag from a prior win/recycle
+    ///      cycle that bypassed buyback), the record is silently overwritten with the current
+    ///      price/tier/source. This prevents a stale `isActive` from permanently bricking a
+    ///      pack's VRF fulfillment — an authorized machine re-registering its own token is safe
+    ///      because the token physically left the machine before the next win, making any prior
+    ///      record obsolete.
     function registerToken(
         uint256 tokenId,
         uint128 pricePerCard,
@@ -268,8 +269,6 @@ contract BuybackPool is
         BuybackPoolStorage storage $ = _getStorage();
         if (!$.registeredPackMachines[msg.sender])
             revert BuybackPool__UnauthorizedSource(msg.sender);
-        if ($.tokenInfo[tokenId].isActive)
-            revert BuybackPool__TokenAlreadyRegistered(tokenId);
 
         $.tokenInfo[tokenId] = TokenBuybackInfo({
             pricePerCard: pricePerCard,
@@ -288,7 +287,7 @@ contract BuybackPool is
         _executeBuyback(
             tokenId,
             bytes32(0),
-            IBuybackPool.FMVQuote(0, 0, 0, 0),
+            IBuybackPool.FMVQuote(0, 0, 0, 0, address(0)),
             "",
             false
         );
@@ -307,7 +306,7 @@ contract BuybackPool is
         _executeBuyback(
             tokenId,
             codeId,
-            IBuybackPool.FMVQuote(0, 0, 0, 0),
+            IBuybackPool.FMVQuote(0, 0, 0, 0, address(0)),
             "",
             false
         );
@@ -689,14 +688,19 @@ contract BuybackPool is
         if (quote.nonce != expectedNonce)
             revert BuybackPool__FMVQuoteBadNonce(expectedNonce, quote.nonce);
 
-        // EIP-712 signature verification.
+        // Seller binding: the quote must have been issued for this specific caller (H002 fix).
+        if (quote.seller != caller)
+            revert BuybackPool__FMVQuoteSellerMismatch(quote.seller, caller);
+
+        // EIP-712 signature verification (seller is now part of the struct hash).
         bytes32 structHash = keccak256(
             abi.encode(
                 FMV_QUOTE_TYPEHASH,
                 quote.tokenId,
                 quote.fmv,
                 quote.deadline,
-                quote.nonce
+                quote.nonce,
+                quote.seller
             )
         );
         address signer = _hashTypedDataV4(structHash).recover(sig);
@@ -712,9 +716,6 @@ contract BuybackPool is
         // Consume the nonce.
         $.fmvQuoteNonce[tokenId] = expectedNonce + 1;
 
-        // Suppress unused-variable warning; caller kept for future allowlist use.
-        caller;
-
         return quote.fmv;
     }
 
@@ -725,8 +726,10 @@ contract BuybackPool is
         address sourceMachine
     ) private {
         // If the source machine is no longer a valid PackMachine (e.g. deregistered),
-        // hold the NFT here — admin can rescue it later.
+        // hold the NFT here — admin can rescue it later. Emit TokenStuck so off-chain
+        // tooling can flag the NFT for admin rescue (L003 fix).
         if (!IPackMachineFactory($.factory).isPackMachine(sourceMachine)) {
+            emit TokenStuck(tokenId, sourceMachine);
             return;
         }
 

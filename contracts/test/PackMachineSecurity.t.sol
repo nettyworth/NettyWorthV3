@@ -7,12 +7,14 @@ import {PackMachine} from "../PackMachine.sol";
 import {PackMachineFactory} from "../PackMachineFactory.sol";
 import {PackVRFRouter} from "../PackVRFRouter.sol";
 import {PackRegistry} from "../PackRegistry.sol";
+import {PackTierRegistry} from "../PackTierRegistry.sol";
 import {PermissionManager} from "../PermissionManager.sol";
 import {Roles} from "../lib/Roles.sol";
 import {MockERC20} from "../test-helpers/MockERC20.sol";
 import {AssetNFT} from "../AssetNFT.sol";
 import {MockVRFCoordinatorV2Plus} from "../test-helpers/MockVRFCoordinatorV2Plus.sol";
 import {MockPermit2} from "../test-helpers/MockPermit2.sol";
+import {MockAssetLendingPool} from "../test-helpers/MockAssetLendingPool.sol";
 
 /// @notice Security regression tests — each test demonstrates a known vulnerability.
 ///         After applying the corresponding fix, the test outcome should invert as documented.
@@ -21,6 +23,7 @@ contract PackMachineSecurityTest is Test {
     PackMachineFactory internal factory;
     PackVRFRouter internal vrfRouter;
     PackRegistry internal packRegistry;
+    PackTierRegistry internal packTierRegistry;
     PermissionManager internal pm;
     MockERC20 internal usdc;
     AssetNFT internal assetNFT;
@@ -40,7 +43,7 @@ contract PackMachineSecurityTest is Test {
         0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     bytes32 internal constant OPEN_PACK_TYPEHASH = keccak256(
-        "OpenPack(address user,uint256 packId,uint256 nonce)"
+        "OpenPack(address user,uint256 packId,uint256 nonce,bytes32 codeId)"
     );
 
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
@@ -138,6 +141,15 @@ contract PackMachineSecurityTest is Test {
         vm.startPrank(admin);
         factory.setPackRegistry(address(packRegistry));
         packRegistry.setFactory(address(factory));
+
+        PackTierRegistry tierRegistryImpl = new PackTierRegistry();
+        ERC1967Proxy tierRegistryProxy = new ERC1967Proxy(
+            address(tierRegistryImpl),
+            abi.encodeCall(PackTierRegistry.initialize, (address(pm)))
+        );
+        packTierRegistry = PackTierRegistry(address(tierRegistryProxy));
+        factory.setPackTierRegistry(address(packTierRegistry));
+        packTierRegistry.setFactory(address(factory));
         vm.stopPrank();
 
         vm.prank(operator);
@@ -151,9 +163,17 @@ contract PackMachineSecurityTest is Test {
         vm.prank(operator);
         vrfRouter.setAuthorizedPackMachine(cloneAddr, true);
 
-        // Disable cut-off so security tests are not affected by the feature.
+        // Wire mock lending pool so getAppraisalValue works
+        MockAssetLendingPool mockLendingPool = new MockAssetLendingPool();
+        vm.prank(admin);
+        assetNFT.setLendingPool(address(mockLendingPool));
+
+        // Wide-open FMV bounds so deposits don't require per-token appraisals
+        uint128[6] memory minFmv;
+        uint128[6] memory maxFmv;
+        for (uint256 t; t < 6; ++t) maxFmv[t] = type(uint128).max;
         vm.prank(operator);
-        packMachine.setRetentionThreshold(0);
+        packRegistry.setPackTierFmvBounds(address(packMachine), 0, minFmv, maxFmv);
     }
 
     // =========================================================================
@@ -173,11 +193,13 @@ contract PackMachineSecurityTest is Test {
         }
         vm.prank(operator);
         assetNFT.batchMint(recipients, uris);
-        uint256[] memory masks = new uint256[](count);
-        for (uint256 i; i < count; i++) masks[i] = 1;
+        uint256[] memory _pcs = new uint256[](count);
+        uint256[] memory _pids = new uint256[](count);
+        uint8[] memory _trs = new uint8[](count);
+        for (uint256 i; i < count; i++) { _pcs[i] = 1; _trs[i] = tiers[i]; }
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(tokenIds, tiers, masks, operator);
+        packMachine.deposit(tokenIds, _pcs, _pids, _trs, operator);
         vm.stopPrank();
     }
 
@@ -187,7 +209,7 @@ contract PackMachineSecurityTest is Test {
         uint256 nonce
     ) internal view returns (bytes memory) {
         bytes32 structHash = keccak256(
-            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce)
+            abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce, bytes32(0))
         );
         bytes32 domainSeparator = keccak256(
             abi.encode(
@@ -261,7 +283,7 @@ contract PackMachineSecurityTest is Test {
         vm.prank(operator);
         packMachine.resetEffectivePrizePoolSize();
 
-        assertEq(packMachine.effectivePrizePoolSize(), 0);
+        assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 0);
     }
 
     // =========================================================================
@@ -292,7 +314,7 @@ contract PackMachineSecurityTest is Test {
 
         // All 3 cards were returned to the pool
         assertEq(assetNFT.balanceOf(address(packMachine)), 6);
-        assertEq(packMachine.getTierPoolSize(0), 6);
+        assertEq(packMachine.getPackTierPoolSize(0, 0), 6);
         // User still received nothing
         assertEq(assetNFT.balanceOf(user), 0);
     }

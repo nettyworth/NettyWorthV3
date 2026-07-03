@@ -25,6 +25,9 @@ interface IPromoCodeRegistry {
         bool active; // admin kill switch
         bool oncePerUser; // true = each address may redeem at most once
         bool exists; // distinguishes a created code from a default-zero record
+        /// @dev Discount codes only. If non-zero, only this PackMachine clone may redeem.
+        ///      address(0) = valid on any registered PackMachine (global code).
+        address machine;
     }
 
     // =========================================================================
@@ -46,6 +49,7 @@ interface IPromoCodeRegistry {
     error PromoCodeRegistry__NotAllowlisted(bytes32 codeId, address user);
     error PromoCodeRegistry__AlreadyRedeemed(bytes32 codeId, address user);
     error PromoCodeRegistry__UnauthorizedRedeemer(address caller);
+    error PromoCodeRegistry__WrongMachine(bytes32 codeId, address expected, address actual);
     error PromoCodeRegistry__BatchTooLarge(uint256 given, uint256 max);
     error PromoCodeRegistry__NotConfigured();
 
@@ -60,7 +64,8 @@ interface IPromoCodeRegistry {
         uint64 expiry,
         uint32 maxRedemptions,
         bool restricted,
-        bool oncePerUser
+        bool oncePerUser,
+        address machine
     );
     event CodeActiveSet(bytes32 indexed codeId, bool active);
     event CodeExpirySet(bytes32 indexed codeId, uint64 expiry);
@@ -75,6 +80,12 @@ interface IPromoCodeRegistry {
         address indexed user,
         PromoKind kind,
         uint16 bps,
+        uint32 redeemedCount
+    );
+    event CodeRefunded(
+        bytes32 indexed codeId,
+        address indexed user,
+        PromoKind kind,
         uint32 redeemedCount
     );
     event PackMachineFactorySet(
@@ -112,6 +123,17 @@ interface IPromoCodeRegistry {
         bytes32 codeId,
         address user
     ) external returns (uint16 bps);
+
+    /// @notice Reverse a previously consumed discount code when a pack open yields zero cards
+    ///         (all-cards-failed VRF path).
+    /// @dev Only callable by the same PackMachine clone that originally redeemed the code
+    ///      (validated via factory.isPackMachine + machine binding).
+    ///      Decrements redeemedCount and clears the oncePerUser flag for `user`.
+    ///      Called wrapped in try/catch in fulfillRandomness — must never revert to avoid
+    ///      blocking the USDC refund.
+    /// @param codeId keccak256 hash of the off-chain promo-code string.
+    /// @param user  The user whose redemption is being reversed.
+    function refundDiscount(bytes32 codeId, address user) external;
 
     // =========================================================================
     // Views

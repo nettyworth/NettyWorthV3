@@ -1,15 +1,22 @@
 import { network } from "hardhat";
 import { encodeFunctionData, getAddress } from "viem";
 import { createInterface } from "node:readline/promises";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  readDeployments,
+  saveDeployment,
+  waitForCode,
+} from "./lib/deployments.js";
+
+// ─── Rate-limit guard — pause between steps to avoid 429s on live RPCs ───────
+const STEP_DELAY_MS = Number(process.env.DEPLOY_STEP_DELAY_MS ?? "3000");
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 // ─── VRF & forwarder parameters (override via environment variables) ──────────
 const TRUSTED_FORWARDER = (process.env.TRUSTED_FORWARDER ??
   "0x0000000000000000000000000000000000000000") as `0x${string}`;
 const VRF_CALLBACK_GAS_LIMIT = Number(
-  process.env.VRF_CALLBACK_GAS_LIMIT ?? "250000",
+  process.env.VRF_CALLBACK_GAS_LIMIT ?? "500000",
 );
 const VRF_REQUEST_CONFIRMATIONS = Number(
   process.env.VRF_REQUEST_CONFIRMATIONS ?? "3",
@@ -57,19 +64,27 @@ const [deployerClient] = await viem.getWalletClients();
 const deployerAddress = deployerClient.account.address;
 const chainId = await publicClient.getChainId();
 
-// ─── Deployments JSON helpers ─────────────────────────────────────────────────
-const deploymentsDir = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "../deployments",
-);
-const deploymentPath = join(deploymentsDir, `${connection.networkName}.json`);
+const isLive = connection.networkConfig.type === "http";
+const networkName = connection.networkName;
 
-async function readDeployments(): Promise<Record<string, unknown>> {
-  try {
-    return JSON.parse(await readFile(deploymentPath, "utf8"));
-  } catch {
-    return {};
+// ─── Resume helper — returns an already-deployed address if chain has code there
+async function reuseAddress(
+  key: string,
+  field: string,
+  deployments: Record<string, unknown>,
+): Promise<`0x${string}` | undefined> {
+  const entry = deployments[key] as Record<string, unknown> | undefined;
+  const raw = entry?.[field];
+  if (typeof raw !== "string" || !raw.startsWith("0x")) return undefined;
+  const addr = getAddress(raw) as `0x${string}`;
+  const code = await publicClient.getCode({ address: addr });
+  if (!code || code === "0x") {
+    console.log(
+      `  ⚠ ${key}.${field} found in JSON (${addr}) but no bytecode on chain — will redeploy`,
+    );
+    return undefined;
   }
+  return addr;
 }
 
 // ─── Resolve PERMISSION_MANAGER_PROXY ────────────────────────────────────────
@@ -78,8 +93,8 @@ if (process.env.PERMISSION_MANAGER_PROXY) {
   permissionManagerProxy = getAddress(
     process.env.PERMISSION_MANAGER_PROXY,
   ) as `0x${string}`;
-} else if (connection.networkConfig.type === "http") {
-  const data = await readDeployments();
+} else if (isLive) {
+  const data = await readDeployments(networkName);
   const entry = data["PermissionManager"] as
     | Record<string, unknown>
     | undefined;
@@ -101,8 +116,8 @@ if (process.env.PERMISSION_MANAGER_PROXY) {
 let assetNFTProxy: `0x${string}`;
 if (process.env.ASSET_NFT_PROXY) {
   assetNFTProxy = getAddress(process.env.ASSET_NFT_PROXY) as `0x${string}`;
-} else if (connection.networkConfig.type === "http") {
-  const data = await readDeployments();
+} else if (isLive) {
+  const data = await readDeployments(networkName);
   const entry = data["AssetNFT"] as Record<string, unknown> | undefined;
   if (!entry?.proxy) {
     console.error(
@@ -162,9 +177,9 @@ if (!process.env.VRF_KEY_HASH) {
 const vrfKeyHash = process.env.VRF_KEY_HASH as `0x${string}`;
 
 // ─── Confirmation on live networks ────────────────────────────────────────────
-if (connection.networkConfig.type === "http") {
+if (isLive) {
   const ok = await confirm(
-    connection.networkName,
+    networkName,
     chainId,
     deployerAddress,
     permissionManagerProxy,
@@ -181,127 +196,411 @@ if (connection.networkConfig.type === "http") {
   }
 }
 
+// ─── Load existing deployments once for resume checks ────────────────────────
+// Re-read after confirmation so interactive pause doesn't matter.
+const savedDeployments = isLive ? await readDeployments(networkName) : {};
+
 // ─── [1/7] Deploy PackVRFRouter (UUPS proxy) ─────────────────────────────────
 console.log("\n[1/7] Deploying PackVRFRouter...");
-const vrfRouterImpl = await viem.deployContract("PackVRFRouter");
-const vrfRouterInitData = encodeFunctionData({
-  abi: vrfRouterImpl.abi,
-  functionName: "initialize",
-  args: [
-    permissionManagerProxy,
+
+let vrfRouterImplAddress = await reuseAddress(
+  "PackVRFRouter",
+  "implementation",
+  savedDeployments,
+);
+let vrfRouterProxyAddress = await reuseAddress(
+  "PackVRFRouter",
+  "proxy",
+  savedDeployments,
+);
+
+if (vrfRouterProxyAddress && vrfRouterImplAddress) {
+  console.log(`  ↻ reusing PackVRFRouter impl  ${vrfRouterImplAddress}`);
+  console.log(`  ↻ reusing PackVRFRouter proxy ${vrfRouterProxyAddress}`);
+} else {
+  if (!vrfRouterImplAddress) {
+    const vrfRouterImpl = await viem.deployContract("PackVRFRouter");
+    vrfRouterImplAddress = vrfRouterImpl.address;
+    console.log(`  Implementation: ${vrfRouterImplAddress}`);
+    // Checkpoint impl immediately so a proxy-deploy failure doesn't lose it.
+    if (isLive) {
+      await saveDeployment(networkName, "PackVRFRouter", {
+        implementation: vrfRouterImplAddress,
+        deployedAt: new Date().toISOString(),
+      });
+    }
+  } else {
+    console.log(`  ↻ reusing PackVRFRouter impl ${vrfRouterImplAddress}`);
+  }
+
+  const vrfRouterImplContract = await viem.getContractAt(
+    "PackVRFRouter",
+    vrfRouterImplAddress,
+  );
+  const vrfRouterInitData = encodeFunctionData({
+    abi: vrfRouterImplContract.abi,
+    functionName: "initialize",
+    args: [
+      permissionManagerProxy,
+      vrfCoordinator,
+      vrfSubscriptionId,
+      vrfKeyHash,
+      VRF_CALLBACK_GAS_LIMIT,
+      VRF_REQUEST_CONFIRMATIONS,
+    ],
+  });
+  await waitForCode(publicClient, vrfRouterImplAddress);
+  const vrfRouterProxyContract = await viem.deployContract(
+    "ERC1967ProxyHelper",
+    [vrfRouterImplAddress, vrfRouterInitData],
+  );
+  vrfRouterProxyAddress = vrfRouterProxyContract.address;
+  console.log(`  Proxy:          ${vrfRouterProxyAddress}`);
+}
+
+if (isLive) {
+  await saveDeployment(networkName, "PackVRFRouter", {
+    proxy: vrfRouterProxyAddress,
+    implementation: vrfRouterImplAddress,
+    permissionManager: permissionManagerProxy,
     vrfCoordinator,
-    vrfSubscriptionId,
-    vrfKeyHash,
-    VRF_CALLBACK_GAS_LIMIT,
-    VRF_REQUEST_CONFIRMATIONS,
-  ],
-});
-const vrfRouterProxy = await viem.deployContract("ERC1967ProxyHelper", [
-  vrfRouterImpl.address,
-  vrfRouterInitData,
-]);
-console.log(`  Implementation: ${vrfRouterImpl.address}`);
-console.log(`  Proxy:          ${vrfRouterProxy.address}`);
+    subscriptionId: vrfSubscriptionId.toString(),
+    keyHash: vrfKeyHash,
+    callbackGasLimit: VRF_CALLBACK_GAS_LIMIT,
+    requestConfirmations: VRF_REQUEST_CONFIRMATIONS,
+    deployedAt: new Date().toISOString(),
+  });
+  console.log("  ✓ checkpoint saved");
+}
+await sleep(STEP_DELAY_MS);
 
 // ─── [2/7] Deploy PackMachine implementation (EIP-1167 clone target — no proxy)
 console.log("[2/7] Deploying PackMachine implementation (clone target)...");
-const packMachineImpl = await viem.deployContract("PackMachine", [
-  TRUSTED_FORWARDER,
-]);
-console.log(`  Implementation: ${packMachineImpl.address}`);
+
+let packMachineImplAddress = await reuseAddress(
+  "PackMachineImplementation",
+  "implementation",
+  savedDeployments,
+);
+
+if (packMachineImplAddress) {
+  console.log(`  ↻ reusing PackMachine impl ${packMachineImplAddress}`);
+} else {
+  const packMachineImpl = await viem.deployContract("PackMachine", [
+    TRUSTED_FORWARDER,
+  ]);
+  packMachineImplAddress = packMachineImpl.address;
+  console.log(`  Implementation: ${packMachineImplAddress}`);
+}
+
+if (isLive) {
+  await saveDeployment(networkName, "PackMachineImplementation", {
+    implementation: packMachineImplAddress,
+    trustedForwarder: TRUSTED_FORWARDER,
+    deployedAt: new Date().toISOString(),
+  });
+  console.log("  ✓ checkpoint saved");
+}
+await sleep(STEP_DELAY_MS);
 
 // ─── [3/7] Deploy PackMachineFactory (UUPS proxy) ────────────────────────────
 console.log("[3/7] Deploying PackMachineFactory...");
-const factoryImpl = await viem.deployContract("PackMachineFactory", [
-  TRUSTED_FORWARDER,
-]);
-const factoryInitData = encodeFunctionData({
-  abi: factoryImpl.abi,
-  functionName: "initialize",
-  args: [permissionManagerProxy, assetNFTProxy, paymentToken, financeWallet],
-});
-const factoryProxy = await viem.deployContract("ERC1967ProxyHelper", [
-  factoryImpl.address,
-  factoryInitData,
-]);
-console.log(`  Implementation: ${factoryImpl.address}`);
-console.log(`  Proxy:          ${factoryProxy.address}`);
+
+let factoryImplAddress = await reuseAddress(
+  "PackMachineFactory",
+  "implementation",
+  savedDeployments,
+);
+let factoryProxyAddress = await reuseAddress(
+  "PackMachineFactory",
+  "proxy",
+  savedDeployments,
+);
+
+if (factoryProxyAddress && factoryImplAddress) {
+  console.log(`  ↻ reusing PackMachineFactory impl  ${factoryImplAddress}`);
+  console.log(`  ↻ reusing PackMachineFactory proxy ${factoryProxyAddress}`);
+} else {
+  if (!factoryImplAddress) {
+    const factoryImpl = await viem.deployContract("PackMachineFactory", [
+      TRUSTED_FORWARDER,
+    ]);
+    factoryImplAddress = factoryImpl.address;
+    console.log(`  Implementation: ${factoryImplAddress}`);
+    if (isLive) {
+      await saveDeployment(networkName, "PackMachineFactory", {
+        implementation: factoryImplAddress,
+        deployedAt: new Date().toISOString(),
+      });
+    }
+  } else {
+    console.log(`  ↻ reusing PackMachineFactory impl ${factoryImplAddress}`);
+  }
+
+  const factoryImplContract = await viem.getContractAt(
+    "PackMachineFactory",
+    factoryImplAddress,
+  );
+  const factoryInitData = encodeFunctionData({
+    abi: factoryImplContract.abi,
+    functionName: "initialize",
+    args: [permissionManagerProxy, assetNFTProxy, paymentToken, financeWallet],
+  });
+  await waitForCode(publicClient, factoryImplAddress);
+  const factoryProxyContract = await viem.deployContract("ERC1967ProxyHelper", [
+    factoryImplAddress,
+    factoryInitData,
+  ]);
+  factoryProxyAddress = factoryProxyContract.address;
+  console.log(`  Proxy:          ${factoryProxyAddress}`);
+}
+
+if (isLive) {
+  await saveDeployment(networkName, "PackMachineFactory", {
+    proxy: factoryProxyAddress,
+    implementation: factoryImplAddress,
+    permissionManager: permissionManagerProxy,
+    assetNFT: assetNFTProxy,
+    paymentToken,
+    financeWallet,
+    trustedForwarder: TRUSTED_FORWARDER,
+    deployedAt: new Date().toISOString(),
+  });
+  console.log("  ✓ checkpoint saved");
+}
+await sleep(STEP_DELAY_MS);
 
 // ─── [4/7] Deploy PackRegistry (UUPS proxy) ──────────────────────────────────
 // Must be deployed before BuybackPool wiring so it can be set on the factory.
 // Factory is wired to the registry in step 6.
 console.log("[4/7] Deploying PackRegistry...");
-const registryImpl = await viem.deployContract("PackRegistry");
-const registryInitData = encodeFunctionData({
-  abi: registryImpl.abi,
-  functionName: "initialize",
-  args: [permissionManagerProxy],
-});
-const registryProxy = await viem.deployContract("ERC1967ProxyHelper", [
-  registryImpl.address,
-  registryInitData,
-]);
-console.log(`  Implementation: ${registryImpl.address}`);
-console.log(`  Proxy:          ${registryProxy.address}`);
+
+let registryImplAddress = await reuseAddress(
+  "PackRegistry",
+  "implementation",
+  savedDeployments,
+);
+let registryProxyAddress = await reuseAddress(
+  "PackRegistry",
+  "proxy",
+  savedDeployments,
+);
+
+if (registryProxyAddress && registryImplAddress) {
+  console.log(`  ↻ reusing PackRegistry impl  ${registryImplAddress}`);
+  console.log(`  ↻ reusing PackRegistry proxy ${registryProxyAddress}`);
+} else {
+  if (!registryImplAddress) {
+    const registryImpl = await viem.deployContract("PackRegistry");
+    registryImplAddress = registryImpl.address;
+    console.log(`  Implementation: ${registryImplAddress}`);
+    if (isLive) {
+      await saveDeployment(networkName, "PackRegistry", {
+        implementation: registryImplAddress,
+        deployedAt: new Date().toISOString(),
+      });
+    }
+  } else {
+    console.log(`  ↻ reusing PackRegistry impl ${registryImplAddress}`);
+  }
+
+  const registryImplContract = await viem.getContractAt(
+    "PackRegistry",
+    registryImplAddress,
+  );
+  const registryInitData = encodeFunctionData({
+    abi: registryImplContract.abi,
+    functionName: "initialize",
+    args: [permissionManagerProxy],
+  });
+  await waitForCode(publicClient, registryImplAddress);
+  const registryProxyContract = await viem.deployContract(
+    "ERC1967ProxyHelper",
+    [registryImplAddress, registryInitData],
+  );
+  registryProxyAddress = registryProxyContract.address;
+  console.log(`  Proxy:          ${registryProxyAddress}`);
+}
+
+if (isLive) {
+  await saveDeployment(networkName, "PackRegistry", {
+    proxy: registryProxyAddress,
+    implementation: registryImplAddress,
+    permissionManager: permissionManagerProxy,
+    deployedAt: new Date().toISOString(),
+  });
+  console.log("  ✓ checkpoint saved");
+}
+await sleep(STEP_DELAY_MS);
 
 // ─── [5/7] Deploy BuybackPool (UUPS proxy) ───────────────────────────────────
 // BuybackPool.initialize takes the factory proxy address — deploy after factory
 // to resolve the circular dependency. factory.setBuybackPool is called in step 6.
 console.log("[5/7] Deploying BuybackPool...");
-const buybackImpl = await viem.deployContract("BuybackPool");
-const buybackInitData = encodeFunctionData({
-  abi: buybackImpl.abi,
-  functionName: "initialize",
-  args: [
-    permissionManagerProxy,
-    assetNFTProxy,
+
+let buybackImplAddress = await reuseAddress(
+  "BuybackPool",
+  "implementation",
+  savedDeployments,
+);
+let buybackProxyAddress = await reuseAddress(
+  "BuybackPool",
+  "proxy",
+  savedDeployments,
+);
+
+if (buybackProxyAddress && buybackImplAddress) {
+  console.log(`  ↻ reusing BuybackPool impl  ${buybackImplAddress}`);
+  console.log(`  ↻ reusing BuybackPool proxy ${buybackProxyAddress}`);
+} else {
+  if (!buybackImplAddress) {
+    const buybackImpl = await viem.deployContract("BuybackPool");
+    buybackImplAddress = buybackImpl.address;
+    console.log(`  Implementation: ${buybackImplAddress}`);
+    if (isLive) {
+      await saveDeployment(networkName, "BuybackPool", {
+        implementation: buybackImplAddress,
+        deployedAt: new Date().toISOString(),
+      });
+    }
+  } else {
+    console.log(`  ↻ reusing BuybackPool impl ${buybackImplAddress}`);
+  }
+
+  const buybackImplContract = await viem.getContractAt(
+    "BuybackPool",
+    buybackImplAddress,
+  );
+  const buybackInitData = encodeFunctionData({
+    abi: buybackImplContract.abi,
+    functionName: "initialize",
+    args: [
+      permissionManagerProxy,
+      assetNFTProxy,
+      paymentToken,
+      financeWallet,
+      factoryProxyAddress,
+    ],
+  });
+  await waitForCode(publicClient, buybackImplAddress);
+  const buybackProxyContract = await viem.deployContract("ERC1967ProxyHelper", [
+    buybackImplAddress,
+    buybackInitData,
+  ]);
+  buybackProxyAddress = buybackProxyContract.address;
+  console.log(`  Proxy:          ${buybackProxyAddress}`);
+}
+
+if (isLive) {
+  await saveDeployment(networkName, "BuybackPool", {
+    proxy: buybackProxyAddress,
+    implementation: buybackImplAddress,
+    permissionManager: permissionManagerProxy,
+    assetNFT: assetNFTProxy,
     paymentToken,
     financeWallet,
-    factoryProxy.address,
-  ],
-});
-const buybackProxy = await viem.deployContract("ERC1967ProxyHelper", [
-  buybackImpl.address,
-  buybackInitData,
-]);
-console.log(`  Implementation: ${buybackImpl.address}`);
-console.log(`  Proxy:          ${buybackProxy.address}`);
+    factory: factoryProxyAddress,
+    deployedAt: new Date().toISOString(),
+  });
+  console.log("  ✓ checkpoint saved");
+}
+await sleep(STEP_DELAY_MS);
 
 // ─── [6/7] Wire PackMachineFactory and PackRegistry ──────────────────────────
 // All factory setters gated by DEFAULT_ADMIN_ROLE — deployer holds it via PermissionManager.initialize.
+// Each setter is skipped if the on-chain value already matches (idempotent / resume-safe).
 console.log("[6/7] Wiring PackMachineFactory and PackRegistry...");
 const factory = await viem.getContractAt(
   "PackMachineFactory",
-  factoryProxy.address,
+  factoryProxyAddress,
 );
-let txHash = await factory.write.setImplementation([packMachineImpl.address]);
-await publicClient.waitForTransactionReceipt({ hash: txHash });
-console.log(`  setImplementation(${packMachineImpl.address}) ✓`);
-txHash = await factory.write.setPackVRFRouter([vrfRouterProxy.address]);
-await publicClient.waitForTransactionReceipt({ hash: txHash });
-console.log(`  setPackVRFRouter(${vrfRouterProxy.address}) ✓`);
-txHash = await factory.write.setBuybackPool([buybackProxy.address]);
-await publicClient.waitForTransactionReceipt({ hash: txHash });
-console.log(`  setBuybackPool(${buybackProxy.address}) ✓`);
-txHash = await factory.write.setPackRegistry([registryProxy.address]);
-await publicClient.waitForTransactionReceipt({ hash: txHash });
-console.log(`  setPackRegistry(${registryProxy.address}) ✓`);
 const packRegistry = await viem.getContractAt(
   "PackRegistry",
-  registryProxy.address,
+  registryProxyAddress,
 );
-txHash = await packRegistry.write.setFactory([factoryProxy.address]);
+
+// factory.setImplementation — no read getter; always send (PackMachineFactory
+// has no public implementation() view, so we can't check without a read).
+let txHash = await factory.write.setImplementation([packMachineImplAddress]);
 await publicClient.waitForTransactionReceipt({ hash: txHash });
-console.log(`  packRegistry.setFactory(${factoryProxy.address}) ✓`);
+console.log(`  setImplementation(${packMachineImplAddress}) ✓`);
+await sleep(STEP_DELAY_MS);
+
+// factory.setPackVRFRouter
+const currentVRFRouter = await factory.read.packVRFRouter();
+if (currentVRFRouter.toLowerCase() === vrfRouterProxyAddress.toLowerCase()) {
+  console.log(`  ↻ skipping setPackVRFRouter (already wired)`);
+} else {
+  txHash = await factory.write.setPackVRFRouter([vrfRouterProxyAddress]);
+  await publicClient.waitForTransactionReceipt({ hash: txHash });
+  console.log(`  setPackVRFRouter(${vrfRouterProxyAddress}) ✓`);
+}
+await sleep(STEP_DELAY_MS);
+
+// factory.setBuybackPool
+const currentBuybackPool = await factory.read.buybackPool();
+if (currentBuybackPool.toLowerCase() === buybackProxyAddress.toLowerCase()) {
+  console.log(`  ↻ skipping setBuybackPool (already wired)`);
+} else {
+  txHash = await factory.write.setBuybackPool([buybackProxyAddress]);
+  await publicClient.waitForTransactionReceipt({ hash: txHash });
+  console.log(`  setBuybackPool(${buybackProxyAddress}) ✓`);
+}
+await sleep(STEP_DELAY_MS);
+
+// factory.setPackRegistry
+const currentPackRegistry = await factory.read.packRegistry();
+if (currentPackRegistry.toLowerCase() === registryProxyAddress.toLowerCase()) {
+  console.log(`  ↻ skipping setPackRegistry (already wired)`);
+} else {
+  txHash = await factory.write.setPackRegistry([registryProxyAddress]);
+  await publicClient.waitForTransactionReceipt({ hash: txHash });
+  console.log(`  setPackRegistry(${registryProxyAddress}) ✓`);
+}
+await sleep(STEP_DELAY_MS);
+
+// packRegistry.setFactory
+const currentFactory = await packRegistry.read.factory();
+if (currentFactory.toLowerCase() === factoryProxyAddress.toLowerCase()) {
+  console.log(`  ↻ skipping packRegistry.setFactory (already wired)`);
+} else {
+  txHash = await packRegistry.write.setFactory([factoryProxyAddress]);
+  await publicClient.waitForTransactionReceipt({ hash: txHash });
+  console.log(`  packRegistry.setFactory(${factoryProxyAddress}) ✓`);
+}
+
+// Re-save factory and registry records with final wiring addresses.
+if (isLive) {
+  await saveDeployment(networkName, "PackMachineFactory", {
+    proxy: factoryProxyAddress,
+    implementation: factoryImplAddress,
+    permissionManager: permissionManagerProxy,
+    packMachineImplementation: packMachineImplAddress,
+    packVRFRouter: vrfRouterProxyAddress,
+    buybackPool: buybackProxyAddress,
+    packRegistry: registryProxyAddress,
+    assetNFT: assetNFTProxy,
+    paymentToken,
+    financeWallet,
+    trustedForwarder: TRUSTED_FORWARDER,
+    deployedAt: new Date().toISOString(),
+  });
+  await saveDeployment(networkName, "PackRegistry", {
+    proxy: registryProxyAddress,
+    implementation: registryImplAddress,
+    permissionManager: permissionManagerProxy,
+    factory: factoryProxyAddress,
+    deployedAt: new Date().toISOString(),
+  });
+  console.log("  ✓ checkpoint saved");
+}
+await sleep(STEP_DELAY_MS);
 
 // ─── [7/7] Verify deployments ────────────────────────────────────────────────
 console.log("[7/7] Verifying deployments...");
 
-const router = await viem.getContractAt(
-  "PackVRFRouter",
-  vrfRouterProxy.address,
-);
-const buyback = await viem.getContractAt("BuybackPool", buybackProxy.address);
+const router = await viem.getContractAt("PackVRFRouter", vrfRouterProxyAddress);
+const buyback = await viem.getContractAt("BuybackPool", buybackProxyAddress);
 
 const routerPM = await router.read.getPermissionManager();
 const routerCoordinator = await router.read.vrfCoordinator();
@@ -338,24 +637,24 @@ if (factoryPM.toLowerCase() !== permissionManagerProxy.toLowerCase()) {
     `  PackMachineFactory.permissionManager: expected "${permissionManagerProxy}", got "${factoryPM}"`,
   );
 }
-if (factoryVRFRouter.toLowerCase() !== vrfRouterProxy.address.toLowerCase()) {
+if (factoryVRFRouter.toLowerCase() !== vrfRouterProxyAddress.toLowerCase()) {
   errors.push(
-    `  PackMachineFactory.packVRFRouter: expected "${vrfRouterProxy.address}", got "${factoryVRFRouter}"`,
+    `  PackMachineFactory.packVRFRouter: expected "${vrfRouterProxyAddress}", got "${factoryVRFRouter}"`,
   );
 }
-if (factoryBuybackPool.toLowerCase() !== buybackProxy.address.toLowerCase()) {
+if (factoryBuybackPool.toLowerCase() !== buybackProxyAddress.toLowerCase()) {
   errors.push(
-    `  PackMachineFactory.buybackPool: expected "${buybackProxy.address}", got "${factoryBuybackPool}"`,
+    `  PackMachineFactory.buybackPool: expected "${buybackProxyAddress}", got "${factoryBuybackPool}"`,
   );
 }
-if (factoryPackRegistry.toLowerCase() !== registryProxy.address.toLowerCase()) {
+if (factoryPackRegistry.toLowerCase() !== registryProxyAddress.toLowerCase()) {
   errors.push(
-    `  PackMachineFactory.packRegistry: expected "${registryProxy.address}", got "${factoryPackRegistry}"`,
+    `  PackMachineFactory.packRegistry: expected "${registryProxyAddress}", got "${factoryPackRegistry}"`,
   );
 }
-if (registryFactory.toLowerCase() !== factoryProxy.address.toLowerCase()) {
+if (registryFactory.toLowerCase() !== factoryProxyAddress.toLowerCase()) {
   errors.push(
-    `  PackRegistry.factory: expected "${factoryProxy.address}", got "${registryFactory}"`,
+    `  PackRegistry.factory: expected "${factoryProxyAddress}", got "${registryFactory}"`,
   );
 }
 if (factoryAssetNFT.toLowerCase() !== assetNFTProxy.toLowerCase()) {
@@ -385,31 +684,45 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
+// ─── Final BuybackPool checkpoint with verified defaultBuybackBps ─────────────
+if (isLive) {
+  await saveDeployment(networkName, "BuybackPool", {
+    proxy: buybackProxyAddress,
+    implementation: buybackImplAddress,
+    permissionManager: permissionManagerProxy,
+    assetNFT: assetNFTProxy,
+    paymentToken,
+    financeWallet,
+    factory: factoryProxyAddress,
+    defaultBuybackBps: buybackDefaultBps,
+    deployedAt: new Date().toISOString(),
+  });
+  console.log(`Deployment info saved to deployments/${networkName}.json`);
+}
+
 // ─── Summary ──────────────────────────────────────────────────────────────────
 console.log("\n=== Deployment Successful ===");
-console.log(
-  `Network:               ${connection.networkName} (chainId: ${chainId})`,
-);
+console.log(`Network:               ${networkName} (chainId: ${chainId})`);
 console.log(`\nPackVRFRouter`);
-console.log(`  Implementation:    ${vrfRouterImpl.address}`);
-console.log(`  Proxy:             ${vrfRouterProxy.address}`);
+console.log(`  Implementation:    ${vrfRouterImplAddress}`);
+console.log(`  Proxy:             ${vrfRouterProxyAddress}`);
 console.log(`\nPackMachine (clone target)`);
-console.log(`  Implementation:    ${packMachineImpl.address}`);
+console.log(`  Implementation:    ${packMachineImplAddress}`);
 console.log(`\nPackMachineFactory`);
-console.log(`  Implementation:    ${factoryImpl.address}`);
-console.log(`  Proxy:             ${factoryProxy.address}`);
+console.log(`  Implementation:    ${factoryImplAddress}`);
+console.log(`  Proxy:             ${factoryProxyAddress}`);
 console.log(`\nPackRegistry`);
-console.log(`  Implementation:    ${registryImpl.address}`);
-console.log(`  Proxy:             ${registryProxy.address}`);
+console.log(`  Implementation:    ${registryImplAddress}`);
+console.log(`  Proxy:             ${registryProxyAddress}`);
 console.log(`\nBuybackPool`);
-console.log(`  Implementation:    ${buybackImpl.address}`);
-console.log(`  Proxy:             ${buybackProxy.address}`);
+console.log(`  Implementation:    ${buybackImplAddress}`);
+console.log(`  Proxy:             ${buybackProxyAddress}`);
 console.log(`\nWiring`);
-console.log(`  Factory.implementation:  ${packMachineImpl.address} ✓`);
-console.log(`  Factory.packVRFRouter:   ${vrfRouterProxy.address} ✓`);
-console.log(`  Factory.buybackPool:     ${buybackProxy.address} ✓`);
-console.log(`  Factory.packRegistry:    ${registryProxy.address} ✓`);
-console.log(`  Registry.factory:        ${factoryProxy.address} ✓`);
+console.log(`  Factory.implementation:  ${packMachineImplAddress} ✓`);
+console.log(`  Factory.packVRFRouter:   ${vrfRouterProxyAddress} ✓`);
+console.log(`  Factory.buybackPool:     ${buybackProxyAddress} ✓`);
+console.log(`  Factory.packRegistry:    ${registryProxyAddress} ✓`);
+console.log(`  Registry.factory:        ${factoryProxyAddress} ✓`);
 console.log("=============================\n");
 
 console.log("⚠️  Remaining manual steps before packs can open:");
@@ -417,7 +730,7 @@ console.log(
   `  1. Add PackVRFRouter proxy as a consumer on the Chainlink VRF subscription:`,
 );
 console.log(
-  `       subscription ${vrfSubscriptionId} → add consumer ${vrfRouterProxy.address}`,
+  `       subscription ${vrfSubscriptionId} → add consumer ${vrfRouterProxyAddress}`,
 );
 console.log(
   `  2. Create a PackMachine clone (requires PACK_OPERATOR_ROLE on PermissionManager):`,
@@ -438,70 +751,3 @@ console.log(
 console.log(
   `  6. Deposit NFT inventory and open packs (via setup-pack-machine script).\n`,
 );
-
-// ─── Persist deployment record (live networks only) ───────────────────────────
-if (connection.networkConfig.type === "http") {
-  const outPath = join(deploymentsDir, `${connection.networkName}.json`);
-
-  let existing: Record<string, unknown> = {};
-  try {
-    existing = JSON.parse(await readFile(outPath, "utf8"));
-  } catch {
-    // file doesn't exist yet — start fresh
-  }
-
-  existing["PackVRFRouter"] = {
-    proxy: vrfRouterProxy.address,
-    implementation: vrfRouterImpl.address,
-    permissionManager: permissionManagerProxy,
-    vrfCoordinator,
-    subscriptionId: vrfSubscriptionId.toString(),
-    keyHash: vrfKeyHash,
-    callbackGasLimit: VRF_CALLBACK_GAS_LIMIT,
-    requestConfirmations: VRF_REQUEST_CONFIRMATIONS,
-    deployedAt: new Date().toISOString(),
-  };
-  existing["PackMachineImplementation"] = {
-    implementation: packMachineImpl.address,
-    trustedForwarder: TRUSTED_FORWARDER,
-    deployedAt: new Date().toISOString(),
-  };
-  existing["PackRegistry"] = {
-    proxy: registryProxy.address,
-    implementation: registryImpl.address,
-    permissionManager: permissionManagerProxy,
-    factory: factoryProxy.address,
-    deployedAt: new Date().toISOString(),
-  };
-  existing["PackMachineFactory"] = {
-    proxy: factoryProxy.address,
-    implementation: factoryImpl.address,
-    permissionManager: permissionManagerProxy,
-    packMachineImplementation: packMachineImpl.address,
-    packVRFRouter: vrfRouterProxy.address,
-    buybackPool: buybackProxy.address,
-    packRegistry: registryProxy.address,
-    assetNFT: assetNFTProxy,
-    paymentToken,
-    financeWallet,
-    trustedForwarder: TRUSTED_FORWARDER,
-    deployedAt: new Date().toISOString(),
-  };
-  existing["BuybackPool"] = {
-    proxy: buybackProxy.address,
-    implementation: buybackImpl.address,
-    permissionManager: permissionManagerProxy,
-    assetNFT: assetNFTProxy,
-    paymentToken,
-    financeWallet,
-    factory: factoryProxy.address,
-    defaultBuybackBps: buybackDefaultBps,
-    deployedAt: new Date().toISOString(),
-  };
-
-  await mkdir(deploymentsDir, { recursive: true });
-  await writeFile(outPath, JSON.stringify(existing, null, 2) + "\n");
-  console.log(
-    `Deployment info saved to deployments/${connection.networkName}.json`,
-  );
-}

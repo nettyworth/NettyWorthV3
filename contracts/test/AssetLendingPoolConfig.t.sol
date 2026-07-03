@@ -5,7 +5,9 @@ import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {AssetLendingPool} from "../AssetLendingPool.sol";
+import {AssetLendingPoolConfig} from "../AssetLendingPoolConfig.sol";
 import {IAssetLendingPool} from "../interfaces/IAssetLendingPool.sol";
+import {IAssetLendingPoolConfig} from "../interfaces/IAssetLendingPoolConfig.sol";
 import {AssetNFT} from "../AssetNFT.sol";
 import {PermissionManager} from "../PermissionManager.sol";
 import {MockERC20} from "../test-helpers/MockERC20.sol";
@@ -46,13 +48,12 @@ contract MockPackMachineFactoryForConfig {
     }
 }
 
-/// @dev Focused test suite for AssetLendingPoolConfig — the abstract storage +
-///      admin-config base that AssetLendingPool inherits. Exercised through an
-///      AssetLendingPool proxy following the same deployment conventions as
-///      AssetLendingPool.t.sol. Concentrates on functions not already covered
-///      by the AssetLendingPool integration tests.
+/// @dev Focused test suite for AssetLendingPoolConfig — the standalone UUPS config contract.
+///      Deployed as a separate proxy alongside an AssetLendingPool proxy.
+///      Concentrates on config setter/getter functions not covered by AssetLendingPool.t.sol.
 contract AssetLendingPoolConfigTest is Test {
     AssetLendingPool internal pool;
+    AssetLendingPoolConfig internal config;
     AssetNFT internal assetNFT;
     PermissionManager internal pm;
     MockERC20 internal usdc;
@@ -102,17 +103,17 @@ contract AssetLendingPoolConfigTest is Test {
         );
         assetNFT = AssetNFT(address(assetNFTProxy));
 
-        // Deploy mock PackMachine infrastructure (required by initialize)
+        // Deploy mock PackMachine infrastructure (required by config initialize)
         mockMachine = new MockPackMachineForConfig(address(assetNFT));
         mockFactory = new MockPackMachineFactoryForConfig();
         mockFactory.register(address(mockMachine));
 
-        // AssetLendingPool
-        AssetLendingPool poolImpl = new AssetLendingPool();
-        ERC1967Proxy poolProxy = new ERC1967Proxy(
-            address(poolImpl),
+        // AssetLendingPoolConfig — standalone config proxy
+        AssetLendingPoolConfig configImpl = new AssetLendingPoolConfig();
+        ERC1967Proxy configProxy = new ERC1967Proxy(
+            address(configImpl),
             abi.encodeCall(
-                AssetLendingPool.initialize,
+                AssetLendingPoolConfig.initialize,
                 (
                     admin,
                     address(usdc),
@@ -124,6 +125,14 @@ contract AssetLendingPoolConfigTest is Test {
                     address(mockFactory)
                 )
             )
+        );
+        config = AssetLendingPoolConfig(address(configProxy));
+
+        // AssetLendingPool — takes only initialOwner + config address
+        AssetLendingPool poolImpl = new AssetLendingPool();
+        ERC1967Proxy poolProxy = new ERC1967Proxy(
+            address(poolImpl),
+            abi.encodeCall(AssetLendingPool.initialize, (admin, address(config)))
         );
         pool = AssetLendingPool(address(poolProxy));
 
@@ -149,7 +158,7 @@ contract AssetLendingPoolConfigTest is Test {
 
     function _appraise(uint256 tokenId) internal {
         vm.prank(admin);
-        pool.setAppraisal(tokenId, APPRAISAL_VALUE, 0, 0);
+        config.setAppraisal(tokenId, APPRAISAL_VALUE, 0, 0);
     }
 
     // =========================================================================
@@ -160,7 +169,7 @@ contract AssetLendingPoolConfigTest is Test {
         uint256[] memory add = new uint256[](0);
         uint256[] memory rem = new uint256[](0);
         vm.prank(admin);
-        pool.setEligibilityControls(500e6, 8, add, rem);
+        config.setEligibilityControls(500e6, 8, add, rem);
 
         IAssetLendingPool.PoolInfo memory info = pool.getPoolInfo();
         assertEq(info.minAppraisalValue, 500e6);
@@ -170,9 +179,9 @@ contract AssetLendingPoolConfigTest is Test {
     function test_SetEligibilityControls_EmitsEvent() public {
         uint256[] memory empty = new uint256[](0);
         vm.expectEmit(false, false, false, true);
-        emit IAssetLendingPool.EligibilityControlsUpdated(300e6, 5);
+        emit IAssetLendingPoolConfig.EligibilityControlsUpdated(300e6, 5);
         vm.prank(admin);
-        pool.setEligibilityControls(300e6, 5, empty, empty);
+        config.setEligibilityControls(300e6, 5, empty, empty);
     }
 
     function test_SetEligibilityControls_AddCategoryMakesTokenEligible()
@@ -180,18 +189,18 @@ contract AssetLendingPoolConfigTest is Test {
     {
         uint256 tokenId = _mintNFT(borrower);
         vm.prank(admin);
-        pool.setAppraisal(tokenId, APPRAISAL_VALUE, 5, 1); // category 1
+        config.setAppraisal(tokenId, APPRAISAL_VALUE, 5, 1); // category 1
 
         // category 1 not yet whitelisted → ineligible
-        assertFalse(pool.isEligible(tokenId));
+        assertFalse(config.isEligible(tokenId));
 
         uint256[] memory add = new uint256[](1);
         uint256[] memory rem = new uint256[](0);
         add[0] = 1;
         vm.prank(admin);
-        pool.setEligibilityControls(0, 0, add, rem);
+        config.setEligibilityControls(0, 0, add, rem);
 
-        assertTrue(pool.isEligible(tokenId));
+        assertTrue(config.isEligible(tokenId));
     }
 
     function test_SetEligibilityControls_RemoveCategoryMakesTokenIneligible()
@@ -199,35 +208,35 @@ contract AssetLendingPoolConfigTest is Test {
     {
         uint256 tokenId = _mintNFT(borrower);
         vm.prank(admin);
-        pool.setAppraisal(tokenId, APPRAISAL_VALUE, 5, 1); // category 1
+        config.setAppraisal(tokenId, APPRAISAL_VALUE, 5, 1); // category 1
 
         // First whitelist category 1
         uint256[] memory add = new uint256[](1);
         uint256[] memory empty = new uint256[](0);
         add[0] = 1;
         vm.prank(admin);
-        pool.setEligibilityControls(0, 0, add, empty);
-        assertTrue(pool.isEligible(tokenId));
+        config.setEligibilityControls(0, 0, add, empty);
+        assertTrue(config.isEligible(tokenId));
 
         // Then remove it
         uint256[] memory rem = new uint256[](1);
         rem[0] = 1;
         vm.prank(admin);
-        pool.setEligibilityControls(0, 0, empty, rem);
-        assertFalse(pool.isEligible(tokenId));
+        config.setEligibilityControls(0, 0, empty, rem);
+        assertFalse(config.isEligible(tokenId));
     }
 
     function test_SetEligibilityControls_CategoryZeroAlwaysAllowed() public {
         uint256 tokenId = _mintNFT(borrower);
         vm.prank(admin);
-        pool.setAppraisal(tokenId, APPRAISAL_VALUE, 0, 0); // category 0
+        config.setAppraisal(tokenId, APPRAISAL_VALUE, 0, 0); // category 0
 
         // No categories whitelisted; category 0 is exempt from whitelist check
         uint256[] memory empty = new uint256[](0);
         vm.prank(admin);
-        pool.setEligibilityControls(0, 0, empty, empty);
+        config.setEligibilityControls(0, 0, empty, empty);
 
-        assertTrue(pool.isEligible(tokenId));
+        assertTrue(config.isEligible(tokenId));
     }
 
     function test_SetEligibilityControls_BelowMinAppraisalValueIneligible()
@@ -235,32 +244,32 @@ contract AssetLendingPoolConfigTest is Test {
     {
         uint256 tokenId = _mintNFT(borrower);
         vm.prank(admin);
-        pool.setAppraisal(tokenId, 100e6, 0, 0); // value = 100 USDC
+        config.setAppraisal(tokenId, 100e6, 0, 0); // value = 100 USDC
 
         uint256[] memory empty = new uint256[](0);
         vm.prank(admin);
-        pool.setEligibilityControls(200e6, 0, empty, empty); // require >= 200
+        config.setEligibilityControls(200e6, 0, empty, empty); // require >= 200
 
-        assertFalse(pool.isEligible(tokenId));
+        assertFalse(config.isEligible(tokenId));
     }
 
     function test_SetEligibilityControls_BelowMinGradeIneligible() public {
         uint256 tokenId = _mintNFT(borrower);
         vm.prank(admin);
-        pool.setAppraisal(tokenId, APPRAISAL_VALUE, 3, 0); // grade = 3
+        config.setAppraisal(tokenId, APPRAISAL_VALUE, 3, 0); // grade = 3
 
         uint256[] memory empty = new uint256[](0);
         vm.prank(admin);
-        pool.setEligibilityControls(0, 7, empty, empty); // require grade >= 7
+        config.setEligibilityControls(0, 7, empty, empty); // require grade >= 7
 
-        assertFalse(pool.isEligible(tokenId));
+        assertFalse(config.isEligible(tokenId));
     }
 
     function test_SetEligibilityControls_OnlyOwner() public {
         uint256[] memory empty = new uint256[](0);
         vm.expectRevert();
         vm.prank(unauthorized);
-        pool.setEligibilityControls(0, 0, empty, empty);
+        config.setEligibilityControls(0, 0, empty, empty);
     }
 
     // =========================================================================
@@ -269,27 +278,27 @@ contract AssetLendingPoolConfigTest is Test {
 
     function test_SetLtvBps_UpdatesValue() public {
         vm.prank(admin);
-        pool.setLtvBps(7000);
+        config.setLtvBps(7000);
         assertEq(pool.getPoolInfo().ltvBps, 7000);
     }
 
     function test_SetLtvBps_EmitsEvent() public {
         vm.expectEmit(false, false, false, true);
-        emit IAssetLendingPool.LtvUpdated(LTV_BPS, 7000);
+        emit IAssetLendingPoolConfig.LtvUpdated(LTV_BPS, 7000);
         vm.prank(admin);
-        pool.setLtvBps(7000);
+        config.setLtvBps(7000);
     }
 
     function test_SetLtvBps_RecalculatesGetMaxLoanAmount() public {
         uint256 tokenId = _mintNFT(borrower);
         _appraise(tokenId); // 1000 USDC at 50% LTV → max = 500
 
-        assertEq(pool.getMaxLoanAmount(tokenId), 500e6);
+        assertEq(config.getMaxLoanAmount(tokenId), 500e6);
 
         vm.prank(admin);
-        pool.setLtvBps(7000); // raise to 70%
+        config.setLtvBps(7000); // raise to 70%
 
-        assertEq(pool.getMaxLoanAmount(tokenId), 700e6);
+        assertEq(config.getMaxLoanAmount(tokenId), 700e6);
     }
 
     function test_SetLtvBps_RevertsOnZero() public {
@@ -297,7 +306,7 @@ contract AssetLendingPoolConfigTest is Test {
             IAssetLendingPool.AssetLendingPool__InvalidLTV.selector
         );
         vm.prank(admin);
-        pool.setLtvBps(0);
+        config.setLtvBps(0);
     }
 
     function test_SetLtvBps_RevertsIfExceedsBps() public {
@@ -305,20 +314,20 @@ contract AssetLendingPoolConfigTest is Test {
             IAssetLendingPool.AssetLendingPool__InvalidLTV.selector
         );
         vm.prank(admin);
-        pool.setLtvBps(10_001);
+        config.setLtvBps(10_001);
     }
 
     function test_SetLtvBps_AllowsExactMaxBps() public {
         // 10_000 == 100% LTV — should be accepted (boundary)
         vm.prank(admin);
-        pool.setLtvBps(10_000);
+        config.setLtvBps(10_000);
         assertEq(pool.getPoolInfo().ltvBps, 10_000);
     }
 
     function test_SetLtvBps_OnlyOwner() public {
         vm.expectRevert();
         vm.prank(unauthorized);
-        pool.setLtvBps(7000);
+        config.setLtvBps(7000);
     }
 
     // =========================================================================
@@ -328,7 +337,7 @@ contract AssetLendingPoolConfigTest is Test {
     function test_SetOriginationFee_StoresValues() public {
         address feeWallet = makeAddr("feeWallet");
         vm.prank(admin);
-        pool.setOriginationFee(200, feeWallet);
+        config.setOriginationFee(200, feeWallet);
 
         IAssetLendingPool.PoolInfo memory info = pool.getPoolInfo();
         assertEq(info.originationFeeBps, 200);
@@ -338,15 +347,15 @@ contract AssetLendingPoolConfigTest is Test {
     function test_SetOriginationFee_EmitsEvent() public {
         address feeWallet = makeAddr("feeWallet");
         vm.expectEmit(false, false, false, true);
-        emit IAssetLendingPool.OriginationFeeUpdated(200, feeWallet);
+        emit IAssetLendingPoolConfig.OriginationFeeUpdated(200, feeWallet);
         vm.prank(admin);
-        pool.setOriginationFee(200, feeWallet);
+        config.setOriginationFee(200, feeWallet);
     }
 
     function test_SetOriginationFee_ZeroBpsWithZeroWalletAllowed() public {
         // bps = 0 → wallet is ignored; address(0) must not revert
         vm.prank(admin);
-        pool.setOriginationFee(0, address(0));
+        config.setOriginationFee(0, address(0));
         assertEq(pool.getPoolInfo().originationFeeBps, 0);
     }
 
@@ -355,7 +364,7 @@ contract AssetLendingPoolConfigTest is Test {
             IAssetLendingPool.AssetLendingPool__InvalidBps.selector
         );
         vm.prank(admin);
-        pool.setOriginationFee(10_001, makeAddr("feeWallet"));
+        config.setOriginationFee(10_001, makeAddr("feeWallet"));
     }
 
     function test_SetOriginationFee_RevertsIfNonZeroBpsAndZeroWallet() public {
@@ -363,13 +372,13 @@ contract AssetLendingPoolConfigTest is Test {
             IAssetLendingPool.AssetLendingPool__ZeroAddress.selector
         );
         vm.prank(admin);
-        pool.setOriginationFee(100, address(0));
+        config.setOriginationFee(100, address(0));
     }
 
     function test_SetOriginationFee_OnlyOwner() public {
         vm.expectRevert();
         vm.prank(unauthorized);
-        pool.setOriginationFee(100, makeAddr("feeWallet"));
+        config.setOriginationFee(100, makeAddr("feeWallet"));
     }
 
     // =========================================================================
@@ -381,13 +390,13 @@ contract AssetLendingPoolConfigTest is Test {
             IAssetLendingPool.AssetLendingPool__ZeroAmount.selector
         );
         vm.prank(admin);
-        pool.setTermConfig(0, 0, 1000, true);
+        config.setTermConfig(0, 0, 1000, true);
     }
 
     function test_SetTermConfig_OnlyOwner() public {
         vm.expectRevert();
         vm.prank(unauthorized);
-        pool.setTermConfig(0, 7 days, 1000, true);
+        config.setTermConfig(0, 7 days, 1000, true);
     }
 
     // =========================================================================
@@ -407,7 +416,7 @@ contract AssetLendingPoolConfigTest is Test {
             IAssetLendingPool.AssetLendingPool__ArrayLengthMismatch.selector
         );
         vm.prank(admin);
-        pool.batchSetAppraisals(ids, vals, grades, cats);
+        config.batchSetAppraisals(ids, vals, grades, cats);
     }
 
     function test_BatchSetAppraisals_OnlyOwner() public {
@@ -418,7 +427,7 @@ contract AssetLendingPoolConfigTest is Test {
         ids[0] = 1;
         vm.expectRevert();
         vm.prank(unauthorized);
-        pool.batchSetAppraisals(ids, vals, grades, cats);
+        config.batchSetAppraisals(ids, vals, grades, cats);
     }
 
     // =========================================================================
@@ -427,7 +436,7 @@ contract AssetLendingPoolConfigTest is Test {
 
     function test_SetDefaultLifecycleConfig_UpdatesWindows() public {
         vm.prank(admin);
-        pool.setDefaultLifecycleConfig(48 hours, 14 days);
+        config.setDefaultLifecycleConfig(48 hours, 14 days);
 
         IAssetLendingPool.PoolInfo memory info = pool.getPoolInfo();
         assertEq(info.acquisitionWindow, 48 hours);
@@ -436,15 +445,15 @@ contract AssetLendingPoolConfigTest is Test {
 
     function test_SetDefaultLifecycleConfig_EmitsEvent() public {
         vm.expectEmit(false, false, false, true);
-        emit IAssetLendingPool.DefaultLifecycleConfigUpdated(48 hours, 14 days);
+        emit IAssetLendingPoolConfig.DefaultLifecycleConfigUpdated(48 hours, 14 days);
         vm.prank(admin);
-        pool.setDefaultLifecycleConfig(48 hours, 14 days);
+        config.setDefaultLifecycleConfig(48 hours, 14 days);
     }
 
     function test_SetDefaultLifecycleConfig_OnlyOwner() public {
         vm.expectRevert();
         vm.prank(unauthorized);
-        pool.setDefaultLifecycleConfig(48 hours, 14 days);
+        config.setDefaultLifecycleConfig(48 hours, 14 days);
     }
 
     // =========================================================================
@@ -456,21 +465,21 @@ contract AssetLendingPoolConfigTest is Test {
             IAssetLendingPool.AssetLendingPool__ZeroAddress.selector
         );
         vm.prank(admin);
-        pool.setPackMachineFactory(address(0));
+        config.setPackMachineFactory(address(0));
     }
 
     function test_SetPackMachineFactory_EmitsEvent() public {
         address newFactory = makeAddr("newFactory");
         vm.expectEmit(false, false, false, true);
-        emit IAssetLendingPool.PackMachineFactoryUpdated(newFactory);
+        emit IAssetLendingPoolConfig.PackMachineFactoryUpdated(newFactory);
         vm.prank(admin);
-        pool.setPackMachineFactory(newFactory);
+        config.setPackMachineFactory(newFactory);
     }
 
     function test_SetPackMachineFactory_OnlyOwner() public {
         vm.expectRevert();
         vm.prank(unauthorized);
-        pool.setPackMachineFactory(makeAddr("newFactory"));
+        config.setPackMachineFactory(makeAddr("newFactory"));
     }
 
     // =========================================================================
@@ -480,23 +489,23 @@ contract AssetLendingPoolConfigTest is Test {
     function test_SetDefaultPackMachine_SetsMachineAndEmitsEvent() public {
         address machine = makeAddr("machine");
         vm.expectEmit(false, false, false, true);
-        emit IAssetLendingPool.DefaultPackMachineUpdated(machine);
+        emit IAssetLendingPoolConfig.DefaultPackMachineUpdated(machine);
         vm.prank(admin);
-        pool.setDefaultPackMachine(machine);
+        config.setDefaultPackMachine(machine);
     }
 
     function test_SetDefaultPackMachine_ClearsWithZeroAddress() public {
         // address(0) is valid (clears the default machine)
         vm.expectEmit(false, false, false, true);
-        emit IAssetLendingPool.DefaultPackMachineUpdated(address(0));
+        emit IAssetLendingPoolConfig.DefaultPackMachineUpdated(address(0));
         vm.prank(admin);
-        pool.setDefaultPackMachine(address(0));
+        config.setDefaultPackMachine(address(0));
     }
 
     function test_SetDefaultPackMachine_OnlyOwner() public {
         vm.expectRevert();
         vm.prank(unauthorized);
-        pool.setDefaultPackMachine(makeAddr("machine"));
+        config.setDefaultPackMachine(makeAddr("machine"));
     }
 
     // =========================================================================
@@ -507,15 +516,15 @@ contract AssetLendingPoolConfigTest is Test {
         uint256 tokenId = 42;
         uint8 tier = 3;
         vm.expectEmit(true, false, false, true);
-        emit IAssetLendingPool.TokenTierSet(tokenId, tier);
+        emit IAssetLendingPoolConfig.TokenTierSet(tokenId, tier);
         vm.prank(admin);
-        pool.setTokenTier(tokenId, tier);
+        config.setTokenTier(tokenId, tier);
     }
 
     function test_SetTokenTier_OnlyOwner() public {
         vm.expectRevert();
         vm.prank(unauthorized);
-        pool.setTokenTier(1, 1);
+        config.setTokenTier(1, 1);
     }
 
     // =========================================================================
@@ -532,11 +541,11 @@ contract AssetLendingPoolConfigTest is Test {
 
         // Verify both TokenTierSet events are emitted
         vm.expectEmit(true, false, false, true);
-        emit IAssetLendingPool.TokenTierSet(10, 1);
+        emit IAssetLendingPoolConfig.TokenTierSet(10, 1);
         vm.expectEmit(true, false, false, true);
-        emit IAssetLendingPool.TokenTierSet(20, 2);
+        emit IAssetLendingPoolConfig.TokenTierSet(20, 2);
         vm.prank(admin);
-        pool.batchSetTokenTiers(tokenIds, tiers);
+        config.batchSetTokenTiers(tokenIds, tiers);
     }
 
     function test_BatchSetTokenTiers_RevertsIfTooLarge() public {
@@ -550,7 +559,7 @@ contract AssetLendingPoolConfigTest is Test {
             )
         );
         vm.prank(admin);
-        pool.batchSetTokenTiers(tokenIds, tiers);
+        config.batchSetTokenTiers(tokenIds, tiers);
     }
 
     function test_BatchSetTokenTiers_RevertsIfArrayLengthMismatch() public {
@@ -564,7 +573,7 @@ contract AssetLendingPoolConfigTest is Test {
             IAssetLendingPool.AssetLendingPool__ArrayLengthMismatch.selector
         );
         vm.prank(admin);
-        pool.batchSetTokenTiers(tokenIds, tiers);
+        config.batchSetTokenTiers(tokenIds, tiers);
     }
 
     function test_BatchSetTokenTiers_OnlyOwner() public {
@@ -574,7 +583,7 @@ contract AssetLendingPoolConfigTest is Test {
         tiers[0] = 1;
         vm.expectRevert();
         vm.prank(unauthorized);
-        pool.batchSetTokenTiers(tokenIds, tiers);
+        config.batchSetTokenTiers(tokenIds, tiers);
     }
 
     // =========================================================================
@@ -584,9 +593,9 @@ contract AssetLendingPoolConfigTest is Test {
     function test_GetAppraisal_ReturnsStoredValues() public {
         uint256 tokenId = _mintNFT(borrower);
         vm.prank(admin);
-        pool.setAppraisal(tokenId, 800e6, 9, 2);
+        config.setAppraisal(tokenId, 800e6, 9, 2);
 
-        IAssetLendingPool.AssetAppraisal memory a = pool.getAppraisal(tokenId);
+        IAssetLendingPool.AssetAppraisal memory a = config.getAppraisal(tokenId);
         assertEq(a.value, 800e6);
         assertEq(a.grade, 9);
         assertEq(a.category, 2);
@@ -594,7 +603,7 @@ contract AssetLendingPoolConfigTest is Test {
     }
 
     function test_GetAppraisal_ReturnsZeroStructForUnknownToken() public view {
-        IAssetLendingPool.AssetAppraisal memory a = pool.getAppraisal(999);
+        IAssetLendingPool.AssetAppraisal memory a = config.getAppraisal(999);
         assertEq(a.value, 0);
         assertEq(a.updatedAt, 0);
     }
@@ -606,11 +615,11 @@ contract AssetLendingPoolConfigTest is Test {
     function test_GetMaxLoanAmount_ReflectsCurrentLtv() public {
         uint256 tokenId = _mintNFT(borrower);
         _appraise(tokenId); // 1000 USDC, LTV = 50%
-        assertEq(pool.getMaxLoanAmount(tokenId), 500e6);
+        assertEq(config.getMaxLoanAmount(tokenId), 500e6);
     }
 
     function test_GetMaxLoanAmount_ZeroForUnappraisedToken() public view {
-        assertEq(pool.getMaxLoanAmount(999), 0);
+        assertEq(config.getMaxLoanAmount(999), 0);
     }
 
     // =========================================================================
@@ -618,14 +627,14 @@ contract AssetLendingPoolConfigTest is Test {
     // =========================================================================
 
     function test_IsEligible_FalseBeforeAppraisal() public view {
-        assertFalse(pool.isEligible(999));
+        assertFalse(config.isEligible(999));
     }
 
     function test_IsEligible_TrueAfterAppraisal() public {
         uint256 tokenId = _mintNFT(borrower);
-        assertFalse(pool.isEligible(tokenId));
+        assertFalse(config.isEligible(tokenId));
         _appraise(tokenId);
-        assertTrue(pool.isEligible(tokenId));
+        assertTrue(config.isEligible(tokenId));
     }
 
     function test_IsEligible_NotAffectedByStaleness() public {
@@ -635,6 +644,6 @@ contract AssetLendingPoolConfigTest is Test {
         vm.warp(block.timestamp + 365 days); // far past the default 7-day max age
 
         // isEligible only checks value/grade/category — staleness is a borrow-time check
-        assertTrue(pool.isEligible(tokenId));
+        assertTrue(config.isEligible(tokenId));
     }
 }

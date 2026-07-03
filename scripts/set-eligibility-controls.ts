@@ -164,10 +164,16 @@ if (process.env.ASSET_LENDING_POOL_PROXY) {
   proxyAddress = getAddress(entry.proxy as string) as `0x${string}`;
 }
 
-// ─── Verify caller is owner ───────────────────────────────────────────────────
-
+// ─── Resolve config proxy (setEligibilityControls lives on AssetLendingPoolConfig) ──
 const pool = await viem.getContractAt("AssetLendingPool", proxyAddress);
-const owner = await pool.read.owner();
+const configProxyAddress = await pool.read.getConfig();
+const config = await viem.getContractAt(
+  "AssetLendingPoolConfig",
+  configProxyAddress,
+);
+
+// ─── Verify caller is owner ───────────────────────────────────────────────────
+const owner = await config.read.owner();
 
 if (owner.toLowerCase() !== callerAddress.toLowerCase()) {
   console.error(
@@ -253,7 +259,7 @@ if (connection.networkConfig.type === "http") {
 console.log(
   `\n[1/2] Calling setEligibilityControls(minValue=${newMinValue}, minGrade=${newMinGrade}, add=[${addCategories.map(String).join(", ")}], remove=[${removeCategories.map(String).join(", ")}])...`,
 );
-const txHash = await pool.write.setEligibilityControls(
+const txHash = await config.write.setEligibilityControls(
   [newMinValue, newMinGrade, addCategories, removeCategories],
   { account: callerClient.account },
 );

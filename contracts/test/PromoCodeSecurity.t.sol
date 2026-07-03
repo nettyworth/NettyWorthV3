@@ -7,6 +7,7 @@ import {PackMachine} from "../PackMachine.sol";
 import {PackMachineFactory} from "../PackMachineFactory.sol";
 import {PackVRFRouter} from "../PackVRFRouter.sol";
 import {PackRegistry} from "../PackRegistry.sol";
+import {PackTierRegistry} from "../PackTierRegistry.sol";
 import {BuybackPool} from "../BuybackPool.sol";
 import {PromoCodeRegistry} from "../PromoCodeRegistry.sol";
 import {IPromoCodeRegistry} from "../interfaces/IPromoCodeRegistry.sol";
@@ -17,6 +18,7 @@ import {AssetNFT} from "../AssetNFT.sol";
 import {MockVRFCoordinatorV2Plus} from "../test-helpers/MockVRFCoordinatorV2Plus.sol";
 import {MockPermit2} from "../test-helpers/MockPermit2.sol";
 import {FakePackMachine} from "../test-helpers/FakePackMachine.sol";
+import {MockAssetLendingPool} from "../test-helpers/MockAssetLendingPool.sol";
 
 /// @notice Adversarial test suite proving that a publicly-visible promo codeId
 ///         cannot be stolen or misused by a third party.
@@ -40,6 +42,7 @@ contract PromoCodeSecurityTest is Test {
     PackMachineFactory internal factory;
     PackVRFRouter internal vrfRouter;
     PackRegistry internal packRegistry;
+    PackTierRegistry internal packTierRegistry;
     BuybackPool internal pool;
     PromoCodeRegistry internal registry;
     PermissionManager internal pm;
@@ -72,7 +75,7 @@ contract PromoCodeSecurityTest is Test {
         0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     bytes32 internal constant OPEN_PACK_TYPEHASH = keccak256(
-        "OpenPack(address user,uint256 packId,uint256 nonce)"
+        "OpenPack(address user,uint256 packId,uint256 nonce,bytes32 codeId)"
     );
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -169,6 +172,15 @@ contract PromoCodeSecurityTest is Test {
         vm.startPrank(admin);
         factory.setPackRegistry(address(packRegistry));
         packRegistry.setFactory(address(factory));
+
+        PackTierRegistry tierRegistryImpl = new PackTierRegistry();
+        ERC1967Proxy tierRegistryProxy = new ERC1967Proxy(
+            address(tierRegistryImpl),
+            abi.encodeCall(PackTierRegistry.initialize, (address(pm)))
+        );
+        packTierRegistry = PackTierRegistry(address(tierRegistryProxy));
+        factory.setPackTierRegistry(address(packTierRegistry));
+        packTierRegistry.setFactory(address(factory));
         vm.stopPrank();
 
         vm.prank(operator);
@@ -177,8 +189,17 @@ contract PromoCodeSecurityTest is Test {
 
         vm.prank(operator);
         vrfRouter.setAuthorizedPackMachine(cloneAddr, true);
+        // Wire mock lending pool so getAppraisalValue works
+        MockAssetLendingPool mockLendingPool = new MockAssetLendingPool();
+        vm.prank(admin);
+        assetNFT.setLendingPool(address(mockLendingPool));
+
+        // Wide-open FMV bounds so deposits don't require per-token appraisals
+        uint128[6] memory minFmv;
+        uint128[6] memory maxFmv;
+        for (uint256 t; t < 6; ++t) maxFmv[t] = type(uint128).max;
         vm.prank(operator);
-        packMachine.setRetentionThreshold(0); // disable cut-off
+        packRegistry.setPackTierFmvBounds(address(packMachine), 0, minFmv, maxFmv);
 
         // ── BuybackPool ───────────────────────────────────────────────────────
         BuybackPool poolImpl = new BuybackPool();
@@ -191,8 +212,13 @@ contract PromoCodeSecurityTest is Test {
         );
         pool = BuybackPool(address(poolProxy));
 
+        // setBuybackPool requires paused (L001 fix)
+        vm.prank(pauser);
+        packMachine.pause();
         vm.prank(operator);
         packMachine.setBuybackPool(address(pool));
+        vm.prank(pauser);
+        packMachine.unpause();
         vm.prank(operator);
         packRegistry.setPackBuybackAllocation(address(packMachine), 0, BUYBACK_ALLOC_BPS);
         vm.prank(operator);
@@ -228,7 +254,8 @@ contract PromoCodeSecurityTest is Test {
             0,  // no expiry
             0,  // uncapped
             false, // not restricted
-            false  // not oncePerUser
+            false, // not oncePerUser
+            address(0)
         );
         // Open buyback boost code
         registry.createCode(
@@ -238,7 +265,8 @@ contract PromoCodeSecurityTest is Test {
             0,
             0,
             false,
-            false
+            false,
+            address(0)
         );
         // Restricted discount code — allowlist gated
         registry.createCode(
@@ -248,7 +276,8 @@ contract PromoCodeSecurityTest is Test {
             0,
             0,
             true,  // restricted
-            false
+            false,
+            address(0)
         );
         vm.stopPrank();
     }
@@ -270,22 +299,26 @@ contract PromoCodeSecurityTest is Test {
         }
         vm.prank(operator);
         assetNFT.batchMint(recipients, uris);
-        uint256[] memory masks = new uint256[](count);
-        for (uint256 i; i < count; i++) masks[i] = 1;
+        uint256[] memory _pcs = new uint256[](count);
+        uint256[] memory _pids = new uint256[](count);
+        uint8[] memory _trs = new uint8[](count);
+        for (uint256 i; i < count; i++) { _pcs[i] = 1; _trs[i] = tiers[i]; }
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(tokenIds, tiers, masks, operator);
+        packMachine.deposit(tokenIds, _pcs, _pids, _trs, operator);
         vm.stopPrank();
     }
 
-    /// @dev Build an operator-signed OpenPack digest for a given (machine, user, nonce).
+    /// @dev Build an operator-signed OpenPack digest for a given (machine, user, nonce, codeId).
+    ///      codeId must match the code passed to openPack() — it is bound in the digest (L004 fix).
     function _signOpenPackFor(
         address machine,
         address user_,
         uint256 nonce,
-        uint256 signerPk
+        uint256 signerPk,
+        bytes32 codeId
     ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce));
+        bytes32 structHash = keccak256(abi.encode(OPEN_PACK_TYPEHASH, user_, uint256(0), nonce, codeId));
         bytes32 domainSeparator = keccak256(
             abi.encode(
                 EIP712_DOMAIN_TYPEHASH,
@@ -307,8 +340,8 @@ contract PromoCodeSecurityTest is Test {
         bytes32 codeId,
         uint256 requestId
     ) internal returns (uint256[] memory wonTokens) {
-        uint256 nonce = packMachine.openNonce(who);
-        bytes memory sig = _signOpenPackFor(address(packMachine), who, nonce, operatorPk);
+        uint256 nonce = packMachine.getUserInfo(who).openNonce;
+        bytes memory sig = _signOpenPackFor(address(packMachine), who, nonce, operatorPk, codeId);
 
         usdc.mint(who, PRICE);
         vm.startPrank(who);
@@ -435,7 +468,7 @@ contract PromoCodeSecurityTest is Test {
         usdc.mint(attacker, PRICE);
         // Attacker signs the OpenPack message with their OWN key — not PACK_OPERATOR_ROLE.
         bytes memory forgedSig = _signOpenPackFor(
-            address(packMachine), attacker, packMachine.openNonce(attacker), attackerPk
+            address(packMachine), attacker, packMachine.getUserInfo(attacker).openNonce, attackerPk, DISCOUNT_CODE
         );
 
         vm.startPrank(attacker);
@@ -466,9 +499,9 @@ contract PromoCodeSecurityTest is Test {
     {
         _depositNFTs(CARDS_PER_PACK * 2); // enough for two potential opens
 
-        uint256 victimNonce = packMachine.openNonce(victim);
+        uint256 victimNonce = packMachine.getUserInfo(victim).openNonce;
         bytes memory sig = _signOpenPackFor(
-            address(packMachine), victim, victimNonce, operatorPk
+            address(packMachine), victim, victimNonce, operatorPk, DISCOUNT_CODE
         );
 
         // 5a. Attacker relays the victim's signed transaction.
@@ -560,8 +593,8 @@ contract PromoCodeSecurityTest is Test {
         _depositNFTs(CARDS_PER_PACK);
         uint32 countBefore = registry.getCode(RESTRICTED_CODE).redeemedCount;
 
-        uint256 nonce = packMachine.openNonce(attacker);
-        bytes memory sig = _signOpenPackFor(address(packMachine), attacker, nonce, operatorPk);
+        uint256 nonce = packMachine.getUserInfo(attacker).openNonce;
+        bytes memory sig = _signOpenPackFor(address(packMachine), attacker, nonce, operatorPk, RESTRICTED_CODE);
 
         usdc.mint(attacker, PRICE);
         vm.startPrank(attacker);
@@ -594,8 +627,8 @@ contract PromoCodeSecurityTest is Test {
         vm.prank(operator);
         registry.addToAllowlist(RESTRICTED_CODE, users);
 
-        uint256 nonce = packMachine.openNonce(victim);
-        bytes memory sig = _signOpenPackFor(address(packMachine), victim, nonce, operatorPk);
+        uint256 nonce = packMachine.getUserInfo(victim).openNonce;
+        bytes memory sig = _signOpenPackFor(address(packMachine), victim, nonce, operatorPk, RESTRICTED_CODE);
 
         usdc.mint(victim, PRICE);
         vm.startPrank(victim);

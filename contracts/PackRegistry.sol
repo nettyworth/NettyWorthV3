@@ -6,6 +6,7 @@ import {PermissionConsumer} from "./PermissionConsumer.sol";
 import {Roles} from "./lib/Roles.sol";
 import {PackTypes} from "./lib/PackTypes.sol";
 import {IPackRegistry} from "./interfaces/IPackRegistry.sol";
+import {IPackMachine} from "./interfaces/IPackMachine.sol";
 
 /// @title PackRegistry
 /// @author NettyWorth
@@ -24,14 +25,15 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
     // Constants
     // =========================================================================
 
-    uint256 private constant NUM_TIERS = 5;
+    uint256 private constant NUM_TIERS = 6;
 
-    /// @dev Tier weights are expressed in basis points; all five must sum to this value.
+    /// @dev Tier weights are expressed in basis points; all six must sum to this value.
     uint16 private constant WEIGHT_PRECISION = 10000;
 
-    /// @dev Returns the default pack-0 tier weight distribution: Base 75% / Common 19.5% / Uncommon 4% / Rare 1% / Ultra 0.5%.
-    function _defaultTierWeights() private pure returns (uint32[5] memory) {
-        return [uint32(7500), 1950, 400, 100, 50];
+    /// @dev Returns the default pack-0 tier weight distribution:
+    ///      Base 70.40% / Common 25% / Uncommon 4% / Rare 0.50% / Ultra Rare 0.09% / Grail 0.01%.
+    function _defaultTierWeights() private pure returns (uint32[6] memory) {
+        return [uint32(7040), 2500, 400, 50, 9, 1];
     }
 
     // =========================================================================
@@ -52,7 +54,11 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
     bytes32 private constant PACK_REGISTRY_STORAGE_SLOT =
         0x051948dd914a2e26cbeb540527ddd2a939cd898f59c5a55b473376d6422dd400;
 
-    function _getStorage() private pure returns (PackRegistryStorage storage $) {
+    function _getStorage()
+        private
+        pure
+        returns (PackRegistryStorage storage $)
+    {
         assembly {
             $.slot := PACK_REGISTRY_STORAGE_SLOT
         }
@@ -89,7 +95,7 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
     event PackTierWeightsUpdated(
         address indexed machine,
         uint256 indexed packId,
-        uint32[5] weights
+        uint32[6] weights
     );
     event PackBuybackAllocationUpdated(
         address indexed machine,
@@ -101,6 +107,18 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
         address indexed machine,
         uint256 indexed packId,
         uint40 startTime
+    );
+    event PackTierFmvBoundsUpdated(
+        address indexed machine,
+        uint256 indexed packId,
+        uint128[6] minFmv,
+        uint128[6] maxFmv
+    );
+    event PackCardBoundsUpdated(
+        address indexed machine,
+        uint256 indexed packId,
+        uint32 minCards,
+        uint32 maxCards
     );
 
     // =========================================================================
@@ -117,6 +135,9 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
     error PackRegistry__ZeroAddress();
     error PackRegistry__InvalidCardsPerPack();
     error PackRegistry__TooManyPacks();
+    error PackRegistry__InvalidFmvBounds(uint256 tier);
+    error PackRegistry__InvalidCardBounds(uint32 minCards, uint32 maxCards);
+    error PackRegistry__MaxCardsNotReached(uint256 available, uint32 maxCards);
 
     // =========================================================================
     // Modifiers
@@ -223,7 +244,7 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
         uint8 cardsPerPack_,
         uint40 startTime_,
         uint16 buybackAllocationBps_,
-        uint32[5] calldata tierWeights_
+        uint32[6] calldata tierWeights_
     )
         external
         onlyProtocolRole(Roles.PACK_OPERATOR_ROLE)
@@ -241,8 +262,7 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
             revert PackRegistry__InvalidWeights(total);
 
         PackRegistryStorage storage $ = _getStorage();
-        if ($.packs[machine].length >= 256)
-            revert PackRegistry__TooManyPacks();
+        if ($.packs[machine].length >= 256) revert PackRegistry__TooManyPacks();
         packId = $.packs[machine].length;
 
         PackTypes.Pack memory pack;
@@ -262,7 +282,11 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
     function stopPack(
         address machine,
         uint256 packId
-    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) onlyRegistered(machine) {
+    )
+        external
+        onlyProtocolRole(Roles.PACK_OPERATOR_ROLE)
+        onlyRegistered(machine)
+    {
         PackRegistryStorage storage $ = _getStorage();
         if (packId >= $.packs[machine].length)
             revert PackRegistry__InvalidPackId(machine, packId);
@@ -271,17 +295,32 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
     }
 
     /// @notice Pause or unpause a single pack (reversible).
+    ///         When enabling (active = true) and pack.maxCards > 0, the pack's current eligible
+    ///         card count (availablePerPack) must be >= maxCards. This ensures the pack is fully
+    ///         stocked before opening to buyers. Disabling is never gated.
     function setPackActive(
         address machine,
         uint256 packId,
         bool active
-    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) onlyRegistered(machine) {
+    )
+        external
+        onlyProtocolRole(Roles.PACK_OPERATOR_ROLE)
+        onlyRegistered(machine)
+    {
         PackRegistryStorage storage $ = _getStorage();
         if (packId >= $.packs[machine].length)
             revert PackRegistry__InvalidPackId(machine, packId);
         PackTypes.Pack storage pack = $.packs[machine][packId];
-        if (pack.finished)
-            revert PackRegistry__PackFinished(machine, packId);
+        if (pack.finished) revert PackRegistry__PackFinished(machine, packId);
+        // Enforce maxCards gate only when enabling.
+        if (active && pack.maxCards != 0) {
+            uint256 available = IPackMachine(machine).getPackAvailable(packId);
+            if (available < pack.maxCards)
+                revert PackRegistry__MaxCardsNotReached(
+                    available,
+                    pack.maxCards
+                );
+        }
         pack.active = active;
         emit PackActiveUpdated(machine, packId, active);
     }
@@ -294,13 +333,16 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
         address machine,
         uint256 packId,
         uint128 newPrice
-    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) onlyRegistered(machine) {
+    )
+        external
+        onlyProtocolRole(Roles.PACK_OPERATOR_ROLE)
+        onlyRegistered(machine)
+    {
         PackRegistryStorage storage $ = _getStorage();
         if (packId >= $.packs[machine].length)
             revert PackRegistry__InvalidPackId(machine, packId);
         PackTypes.Pack storage pack = $.packs[machine][packId];
-        if (pack.finished)
-            revert PackRegistry__PackFinished(machine, packId);
+        if (pack.finished) revert PackRegistry__PackFinished(machine, packId);
         emit PackPriceUpdated(machine, packId, pack.pricePerPack, newPrice);
         pack.pricePerPack = newPrice;
     }
@@ -309,8 +351,12 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
     function setPackTierWeights(
         address machine,
         uint256 packId,
-        uint32[5] calldata weights
-    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) onlyRegistered(machine) {
+        uint32[6] calldata weights
+    )
+        external
+        onlyProtocolRole(Roles.PACK_OPERATOR_ROLE)
+        onlyRegistered(machine)
+    {
         uint256 total;
         for (uint256 i; i < NUM_TIERS; ++i) {
             total += weights[i];
@@ -322,8 +368,7 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
         if (packId >= $.packs[machine].length)
             revert PackRegistry__InvalidPackId(machine, packId);
         PackTypes.Pack storage pack = $.packs[machine][packId];
-        if (pack.finished)
-            revert PackRegistry__PackFinished(machine, packId);
+        if (pack.finished) revert PackRegistry__PackFinished(machine, packId);
         pack.tierWeights = weights;
         emit PackTierWeightsUpdated(machine, packId, weights);
     }
@@ -333,16 +378,24 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
         address machine,
         uint256 packId,
         uint16 bps
-    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) onlyRegistered(machine) {
+    )
+        external
+        onlyProtocolRole(Roles.PACK_OPERATOR_ROLE)
+        onlyRegistered(machine)
+    {
         if (bps > WEIGHT_PRECISION) revert PackRegistry__InvalidBps(bps);
 
         PackRegistryStorage storage $ = _getStorage();
         if (packId >= $.packs[machine].length)
             revert PackRegistry__InvalidPackId(machine, packId);
         PackTypes.Pack storage pack = $.packs[machine][packId];
-        if (pack.finished)
-            revert PackRegistry__PackFinished(machine, packId);
-        emit PackBuybackAllocationUpdated(machine, packId, pack.buybackAllocationBps, bps);
+        if (pack.finished) revert PackRegistry__PackFinished(machine, packId);
+        emit PackBuybackAllocationUpdated(
+            machine,
+            packId,
+            pack.buybackAllocationBps,
+            bps
+        );
         pack.buybackAllocationBps = bps;
     }
 
@@ -351,15 +404,76 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
         address machine,
         uint256 packId,
         uint40 startTime
-    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) onlyRegistered(machine) {
+    )
+        external
+        onlyProtocolRole(Roles.PACK_OPERATOR_ROLE)
+        onlyRegistered(machine)
+    {
         PackRegistryStorage storage $ = _getStorage();
         if (packId >= $.packs[machine].length)
             revert PackRegistry__InvalidPackId(machine, packId);
         PackTypes.Pack storage pack = $.packs[machine][packId];
-        if (pack.finished)
-            revert PackRegistry__PackFinished(machine, packId);
+        if (pack.finished) revert PackRegistry__PackFinished(machine, packId);
         pack.startTime = startTime;
         emit PackStartTimeUpdated(machine, packId, startTime);
+    }
+
+    /// @notice Update per-tier FMV bounds for a pack.
+    ///         min=0 and max=0 for a tier means "unset" — PackMachine will reject deposits into
+    ///         that tier until bounds are configured.
+    /// @param machine  Registered PackMachine address.
+    /// @param packId   Target pack index.
+    /// @param minFmv   Inclusive lower bound per tier (payment-token units).
+    /// @param maxFmv   Inclusive upper bound per tier (must be >= minFmv unless both are 0).
+    function setPackTierFmvBounds(
+        address machine,
+        uint256 packId,
+        uint128[6] calldata minFmv,
+        uint128[6] calldata maxFmv
+    )
+        external
+        onlyProtocolRole(Roles.PACK_OPERATOR_ROLE)
+        onlyRegistered(machine)
+    {
+        PackRegistryStorage storage $ = _getStorage();
+        if (packId >= $.packs[machine].length)
+            revert PackRegistry__InvalidPackId(machine, packId);
+        PackTypes.Pack storage pack = $.packs[machine][packId];
+        if (pack.finished) revert PackRegistry__PackFinished(machine, packId);
+        for (uint256 i; i < NUM_TIERS; ++i) {
+            // Allow (0,0) = unset. Any other combination requires min <= max.
+            if (maxFmv[i] != 0 && minFmv[i] > maxFmv[i])
+                revert PackRegistry__InvalidFmvBounds(i);
+        }
+        pack.tierMinFmv = minFmv;
+        pack.tierMaxFmv = maxFmv;
+        emit PackTierFmvBoundsUpdated(machine, packId, minFmv, maxFmv);
+    }
+
+    /// @notice Set the minimum and maximum eligible card-count bounds for a pack.
+    ///         minCards: opens revert when availablePerPack < minCards (0 = no floor).
+    ///         maxCards: setPackActive(true) reverts until availablePerPack >= maxCards (0 = no gate).
+    ///         Requires minCards <= maxCards unless either is 0.
+    function setPackCardBounds(
+        address machine,
+        uint256 packId,
+        uint32 minCards,
+        uint32 maxCards
+    )
+        external
+        onlyProtocolRole(Roles.PACK_OPERATOR_ROLE)
+        onlyRegistered(machine)
+    {
+        if (maxCards != 0 && minCards > maxCards)
+            revert PackRegistry__InvalidCardBounds(minCards, maxCards);
+        PackRegistryStorage storage $ = _getStorage();
+        if (packId >= $.packs[machine].length)
+            revert PackRegistry__InvalidPackId(machine, packId);
+        PackTypes.Pack storage pack = $.packs[machine][packId];
+        if (pack.finished) revert PackRegistry__PackFinished(machine, packId);
+        pack.minCards = minCards;
+        pack.maxCards = maxCards;
+        emit PackCardBoundsUpdated(machine, packId, minCards, maxCards);
     }
 
     // =========================================================================
@@ -411,11 +525,41 @@ contract PackRegistry is UUPSUpgradeable, PermissionConsumer {
     function getPackTierWeights(
         address machine,
         uint256 packId
-    ) external view returns (uint32[5] memory) {
+    ) external view returns (uint32[6] memory) {
         PackRegistryStorage storage $ = _getStorage();
         if (packId >= $.packs[machine].length)
             revert PackRegistry__InvalidPackId(machine, packId);
         return $.packs[machine][packId].tierWeights;
+    }
+
+    /// @notice Returns the per-tier FMV bounds for a pack.
+    ///         (0,0) for a tier means unset — deposits into that tier are rejected.
+    function getPackTierFmvBounds(
+        address machine,
+        uint256 packId
+    )
+        external
+        view
+        returns (uint128[6] memory minFmv, uint128[6] memory maxFmv)
+    {
+        PackRegistryStorage storage $ = _getStorage();
+        if (packId >= $.packs[machine].length)
+            revert PackRegistry__InvalidPackId(machine, packId);
+        PackTypes.Pack storage pack = $.packs[machine][packId];
+        return (pack.tierMinFmv, pack.tierMaxFmv);
+    }
+
+    /// @notice Returns the min/max eligible card-count bounds for a pack.
+    ///         (0,0) means no bounds configured.
+    function getPackCardBounds(
+        address machine,
+        uint256 packId
+    ) external view returns (uint32 minCards, uint32 maxCards) {
+        PackRegistryStorage storage $ = _getStorage();
+        if (packId >= $.packs[machine].length)
+            revert PackRegistry__InvalidPackId(machine, packId);
+        PackTypes.Pack storage pack = $.packs[machine][packId];
+        return (pack.minCards, pack.maxCards);
     }
 
     function getPackBuybackAllocationBps(

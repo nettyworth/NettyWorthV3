@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
+import {INettyWorthMarketplace} from "./INettyWorthMarketplace.sol";
+
 /// @title IAssetLendingPool
 /// @notice Interface for the NettyWorth-operated AssetNFT-backed lending pool.
 interface IAssetLendingPool {
@@ -38,6 +40,13 @@ interface IAssetLendingPool {
         bool isPaid;
         bool isDefaulted;
         bool isMarketplaceFinanced;
+        // ---- appended fields (append-only for upgrade safety) ----
+        /// @dev lenderShareBps captured at origination so mid-loan admin changes don't
+        ///      retroactively reprice in-flight interest (M003 fix).
+        uint256 lenderShareBpsSnapshot;
+        /// @dev totalLenderDeposits captured at origination so JIT deposit sandwiches
+        ///      cannot dilute honest lenders' share of a specific loan's interest (H001 fix).
+        uint256 lenderDepositsSnapshot;
     }
 
     struct AssetAppraisal {
@@ -50,9 +59,16 @@ interface IAssetLendingPool {
     struct DefaultRecord {
         uint256 loanId;
         uint256[] tokenIds; // collateral token IDs at the time of default
-        uint256 outstandingValue; // principal to recover
+        uint256 outstandingValue; // principal to recover (interest is tracked separately via interestValue)
         uint256 defaultedAt; // timestamp of initiateDefault()
         bool resolved;
+        // ---- appended fields (append-only for upgrade safety) ----
+        /// @dev Snapshot of loan.interest taken at default time. Used by _resolveAndRecredit to
+        ///      distribute interest to lenders/protocol on successful recovery.
+        uint256 interestValue;
+        /// @dev Set true by prepareDefaultedListing once the marketplace auction is live.
+        ///      Prevents double-listing; reset by onDefaultedListingCancelled to allow relist.
+        bool listedOnMarketplace;
     }
 
     struct LenderInfo {
@@ -84,6 +100,7 @@ interface IAssetLendingPool {
         uint256 acquisitionWindow;
         uint256 auctionWindow;
         uint256 totalDefaultedPrincipal;
+        uint256 maxUtilizationBps; // e.g. 8000 = 80% cap; 10000 = no reserve
     }
 
     // =========================================================================
@@ -135,31 +152,16 @@ interface IAssetLendingPool {
     event PoolFunded(uint256 amount, uint256 newTotalDeposited);
     event PoolWithdrawn(uint256 amount, uint256 newTotalDeposited);
     event InterestWithdrawn(uint256 amount);
-    event AppraisalSet(
-        uint256 indexed tokenId,
-        uint256 value,
-        uint256 grade,
-        uint256 category
-    );
-    event TermConfigUpdated(
-        uint8 indexed termId,
-        uint256 duration,
-        uint256 aprBps,
-        bool active
-    );
-    event EligibilityControlsUpdated(
-        uint256 minAppraisalValue,
-        uint256 minGrade
-    );
-    event LtvUpdated(uint256 oldLtv, uint256 newLtv);
-    event OriginationFeeUpdated(uint256 bps, address wallet);
-    event MaxAppraisalAgeUpdated(uint256 oldMaxAge, uint256 newMaxAge);
+    // Note: config-domain events (AppraisalSet, TermConfigUpdated, EligibilityControlsUpdated,
+    // LtvUpdated, MaxUtilizationUpdated, OriginationFeeUpdated, MaxAppraisalAgeUpdated,
+    // LenderConfigUpdated, DefaultLifecycleConfigUpdated, FinanceWalletUpdated,
+    // PackMachineFactoryUpdated, DefaultPackMachineUpdated, TokenTierSet, MarketplaceUpdated)
+    // are defined in IAssetLendingPoolConfig — they are emitted by the config contract.
 
     // Lender events
     event LenderDeposited(address indexed lender, uint256 amount);
     event LenderWithdrawn(address indexed lender, uint256 amount);
     event LenderInterestClaimed(address indexed lender, uint256 amount);
-    event LenderConfigUpdated(uint256 shareBps, bool enabled);
 
     // Default lifecycle events
     event DefaultInitiated(
@@ -172,23 +174,23 @@ interface IAssetLendingPool {
         uint256 indexed tokenId,
         address packMachine
     );
+    /// @notice Emitted when a pool-default auction settlement resolves the default record.
+    event DefaultedAssetSold(
+        uint256 indexed loanId,
+        uint256 indexed tokenId,
+        uint256 proceeds,
+        uint256 principal,
+        uint256 interest,
+        uint256 surplus
+    );
+    /// @notice Emitted when a defaulted asset is purchased via the old flat on-pool path (now deprecated).
     event DefaultedAssetPurchased(
         uint256 indexed loanId,
         uint256 indexed tokenId,
         address indexed buyer,
         uint256 price
     );
-    event DefaultLifecycleConfigUpdated(
-        uint256 acquisitionWindow,
-        uint256 auctionWindow
-    );
-    event PackMachineFactoryUpdated(address factory);
-    event DefaultPackMachineUpdated(address machine);
-    event TokenTierSet(uint256 indexed tokenId, uint8 tier);
     event NFTRescued(uint256 indexed tokenId, address indexed recipient);
-
-    /// @notice Emitted when the authorized marketplace address is updated.
-    event MarketplaceUpdated(address indexed marketplace);
 
     /// @notice Emitted when a loan is settled atomically as part of a marketplace sale.
     event LoanSettledOnSale(
@@ -207,6 +209,7 @@ interface IAssetLendingPool {
     error AssetLendingPool__IneligibleAsset();
     error AssetLendingPool__ExceedsLTV();
     error AssetLendingPool__InsufficientLiquidity();
+    error AssetLendingPool__ExceedsMaxUtilization();
     error AssetLendingPool__ActiveLoanExists();
     error AssetLendingPool__LoanNotFound();
     error AssetLendingPool__LoanAlreadyPaid();
@@ -239,6 +242,19 @@ interface IAssetLendingPool {
     error AssetLendingPool__InvalidPackMachine();
     error AssetLendingPool__OwnerWithdrawExceedsOwnerDeposits();
     error AssetLendingPool__NotMarketplace();
+    error AssetLendingPool__InvalidSignature();
+    error AssetLendingPool__ListingExpired();
+    error AssetLendingPool__ListingNonceUsed();
+    error AssetLendingPool__ListingCollectionMismatch();
+    error AssetLendingPool__ListingPaymentTokenMismatch();
+    error AssetLendingPool__DefaultNotListed();
+    error AssetLendingPool__AlreadyListed();
+    error AssetLendingPool__InsufficientProceeds();
+    error AssetLendingPool__FinanceWalletNotSet();
+    /// @dev Thrown when purchaseDefaultedAsset is called (deprecated; use marketplace auction path).
+    error AssetLendingPool__Deprecated();
+    /// @dev Thrown by financeMarketplacePurchase when seller == address(this) (M009 fix).
+    error AssetLendingPool__InvalidSeller();
 
     // =========================================================================
     // Borrower functions
@@ -256,11 +272,24 @@ interface IAssetLendingPool {
         uint8 termId
     ) external;
 
+    /// @notice Atomically purchase a marketplace-listed AssetNFT with partial deposit,
+    ///         financing the remainder as a collateralized loan from this pool.
+    ///
+    ///         Price is taken from the seller's EIP-712 signed listing (verified on-chain
+    ///         against the marketplace domain). The pool pays the seller the full listing
+    ///         price (buyer deposit + pool loan). Loan exposure is capped at LTV × appraisalValue
+    ///         so the pool never lends more than the collateral is worth.
+    ///
+    /// @param listing  The seller's signed listing struct (collection, tokenId, price, nonce, expiry).
+    /// @param sig      EIP-712 signature over `listing` produced by `listing.seller`.
+    /// @param depositAmount Buyer's upfront payment in payment-token units.
+    ///                 Must satisfy: depositAmount >= listing.price - (appraisalValue * ltvBps / BPS).
+    /// @param termId   Loan term index (must be active).
     function financeMarketplacePurchase(
-        uint256 tokenId,
+        INettyWorthMarketplace.SignedListing calldata listing,
+        bytes calldata sig,
         uint256 depositAmount,
-        uint8 termId,
-        address seller
+        uint8 termId
     ) external;
 
     function repay(uint256 loanId) external;
@@ -289,57 +318,11 @@ interface IAssetLendingPool {
 
     function withdrawInterest(uint256 amount) external;
 
-    function setAppraisal(
-        uint256 tokenId,
-        uint256 value,
-        uint256 grade,
-        uint256 category
-    ) external;
-
-    function batchSetAppraisals(
-        uint256[] calldata tokenIds,
-        uint256[] calldata values,
-        uint256[] calldata grades,
-        uint256[] calldata categories
-    ) external;
-
-    function setTermConfig(
-        uint8 termId,
-        uint256 duration,
-        uint256 aprBps,
-        bool active
-    ) external;
-
-    function setEligibilityControls(
-        uint256 minAppraisalValue,
-        uint256 minGrade,
-        uint256[] calldata addCategories,
-        uint256[] calldata removeCategories
-    ) external;
-
-    function setLtvBps(uint256 newLtv) external;
-
-    function setOriginationFee(uint256 bps, address wallet) external;
-
-    function setMaxAppraisalAge(uint256 newMaxAge) external;
-
-    function setLenderConfig(uint256 shareBps, bool enabled) external;
-
-    function setDefaultLifecycleConfig(
-        uint256 acquisitionWindow_,
-        uint256 auctionWindow_
-    ) external;
-
-    function setPackMachineFactory(address factory_) external;
-
-    function setDefaultPackMachine(address machine_) external;
-
-    function setTokenTier(uint256 tokenId, uint8 tier) external;
-
-    function batchSetTokenTiers(
-        uint256[] calldata tokenIds,
-        uint8[] calldata tiers
-    ) external;
+    // Note: all config setters (setAppraisal, batchSetAppraisals, setTermConfig,
+    // setEligibilityControls, setLtvBps, setMaxUtilizationBps, setOriginationFee,
+    // setMaxAppraisalAge, setLenderConfig, setDefaultLifecycleConfig, setPackMachineFactory,
+    // setDefaultPackMachine, setTokenTier, batchSetTokenTiers, setFinanceWallet, setMarketplace)
+    // are declared in IAssetLendingPoolConfig and must be called on the config contract.
 
     /// @notice Initiate the default lifecycle for an expired loan.
     function initiateDefault(uint256 loanId) external;
@@ -348,6 +331,7 @@ interface IAssetLendingPool {
     function liquidate(uint256 loanId) external;
 
     /// @notice NettyWorth acquires defaulted asset within the acquisition window and recycles it into packs.
+    ///         The financeWallet must have pre-approved the pool for principal + interest in paymentToken.
     function acquireDefaultedAsset(
         uint256 loanId,
         address targetPackMachine,
@@ -355,11 +339,35 @@ interface IAssetLendingPool {
     ) external;
 
     // =========================================================================
-    // Public default lifecycle functions
+    // Marketplace callbacks (onlyMarketplace)
     // =========================================================================
 
-    /// @notice Purchase a defaulted asset at the outstanding loan value (Phase 2 or 3).
-    function purchaseDefaultedAsset(uint256 loanId) external;
+    /// @notice Called by the marketplace before listing a defaulted asset for auction.
+    ///         Validates the phase, marks the record as listed, and approves the marketplace
+    ///         to transfer each collateral token (NFTs are in Held state after default).
+    ///         Restricted to single-token loans; bundle auctions are a future extension.
+    /// @param loanId Loan ID whose default record should be prepared for listing.
+    /// @return tokenIds The collateral token IDs approved for marketplace transfer.
+    function prepareDefaultedListing(
+        uint256 loanId
+    ) external returns (uint256[] memory tokenIds);
+
+    /// @notice Called by the marketplace after a pool-default auction settles.
+    ///         Resolves the default record, re-credits principal, distributes interest,
+    ///         and books any surplus to protocol earnings.
+    ///         Proceeds must already have been transferred to this contract by the marketplace.
+    /// @param loanId   The loan ID of the resolved default.
+    /// @param proceeds USDC amount the pool received (= winning bid, fees waived for pool sales).
+    function onDefaultedAssetSold(uint256 loanId, uint256 proceeds) external;
+
+    /// @notice Called by the marketplace when a pool-default auction is cancelled (e.g. unsold).
+    ///         Resets listedOnMarketplace so the operator can relist.
+    /// @param loanId The loan ID whose listing is being cancelled.
+    function onDefaultedListingCancelled(uint256 loanId) external;
+
+    /// @notice Returns the currently configured finance wallet address.
+    ///         Passthrough to the config contract.
+    function getFinanceWallet() external view returns (address);
 
     // =========================================================================
     // View functions
@@ -368,7 +376,9 @@ interface IAssetLendingPool {
     function getLoan(uint256 loanId) external view returns (Loan memory);
 
     /// @notice Returns just the collateral token IDs for a loan.
-    function getLoanTokenIds(uint256 loanId) external view returns (uint256[] memory);
+    function getLoanTokenIds(
+        uint256 loanId
+    ) external view returns (uint256[] memory);
 
     function getBorrowerLoans(
         address borrower
@@ -402,11 +412,8 @@ interface IAssetLendingPool {
     // Marketplace integration
     // =========================================================================
 
-    /// @notice Set the authorized marketplace address allowed to call settleLoanRepaymentOnSale.
-    /// @dev onlyOwner. Pass the marketplace proxy address after deployment.
-    function setMarketplace(address marketplace_) external;
-
     /// @notice Returns the currently authorized marketplace address (0 if not set).
+    ///         Passthrough to the config contract.
     function getMarketplace() external view returns (address);
 
     /// @notice Atomically repay a loan from sale proceeds and release the collateral to the buyer.
@@ -416,10 +423,26 @@ interface IAssetLendingPool {
     /// @param loanId Loan to settle.
     /// @param payer  Address from which principal+interest is pulled (the marketplace contract).
     /// @param buyer  Address that receives the released collateral NFT(s).
-    function settleLoanRepaymentOnSale(uint256 loanId, address payer, address buyer) external;
+    function settleLoanRepaymentOnSale(
+        uint256 loanId,
+        address payer,
+        address buyer
+    ) external;
 
     /// @notice Active loan ID for a given token (0 if no active loan).
     function getActiveLoanId(uint256 tokenId) external view returns (uint256);
+
+    /// @notice Returns the borrower address for a given loan (address(0) if not found).
+    ///         Used by the marketplace to enforce seller == borrower on collateralized sales (C004 fix).
+    function getLoanBorrower(uint256 loanId) external view returns (address);
+
+    /// @notice Returns the number of collateral tokens in a loan.
+    ///         Used by the marketplace to reject single-token sales of multi-NFT bundle loans (H003 fix).
+    function getLoanCollateralCount(uint256 loanId) external view returns (uint256);
+
+    /// @notice Returns the AssetNFT contract address used by this pool.
+    ///         Used by the marketplace to guard loan lookups to the correct collection (H005 fix).
+    function getAssetNFT() external view returns (address);
 
     /// @notice Debt components for the active loan collateralized by `tokenId`.
     /// @return principal Loan principal.
@@ -428,5 +451,8 @@ interface IAssetLendingPool {
     ///                   Returns (0, 0, 0) if the token has no active loan.
     function getLoanDebt(
         uint256 tokenId
-    ) external view returns (uint256 principal, uint256 interest, uint256 total);
+    )
+        external
+        view
+        returns (uint256 principal, uint256 interest, uint256 total);
 }

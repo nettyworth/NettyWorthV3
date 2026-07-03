@@ -7,8 +7,11 @@
     "test": "hardhat test",
     "fork:mainnet": "hardhat node --network forkMainnet",
     "fork:base": "hardhat node --network forkBase",
+    "fork:base-sepolia": "hardhat node --network forkBaseSepolia",
     "fork:sepolia": "hardhat node --network forkSepolia",
-    "lint": "solhint 'contracts/**/*.sol'"
+    "lint": "solhint 'contracts/**/*.sol'",
+    "verify:slots": "node --experimental-strip-types scripts/verify-storage-slots.ts",
+    "verify:tenderly": "node --experimental-strip-types scripts/verify-tenderly.ts"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-ignition": "^3.1.5",

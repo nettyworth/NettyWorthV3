@@ -124,7 +124,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -140,7 +140,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [BUYBACK_CODE_ID, PromoKind.Buyback, BUYBACK_BPS_95, 0n, 0, false, false],
+            [BUYBACK_CODE_ID, PromoKind.Buyback, BUYBACK_BPS_95, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -153,7 +153,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
         await assert.rejects(
             registry.write.createCode(
-                [DISCOUNT_CODE_ID, PromoKind.Discount, 9000, 0n, 0, false, false],
+                [DISCOUNT_CODE_ID, PromoKind.Discount, 9000, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
                 { account: walletOperator.account },
             ),
             /InvalidBps|revert/i,
@@ -164,13 +164,13 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
         await assert.rejects(
             registry.write.createCode(
-                [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false],
+                [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
                 { account: walletOperator.account },
             ),
             /CodeExists|revert/i,
@@ -185,7 +185,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -201,7 +201,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -221,7 +221,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -241,7 +241,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [BUYBACK_CODE_ID, PromoKind.Buyback, BUYBACK_BPS_95, 0n, 0, false, false],
+            [BUYBACK_CODE_ID, PromoKind.Buyback, BUYBACK_BPS_95, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -257,7 +257,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [BUYBACK_CODE_ID, PromoKind.Buyback, BUYBACK_BPS_95, 0n, 0, false, false],
+            [BUYBACK_CODE_ID, PromoKind.Buyback, BUYBACK_BPS_95, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -277,7 +277,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 1, false, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 1, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -305,7 +305,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -330,7 +330,7 @@ describe("PromoCodeRegistry", async function () {
         const currentTime = block.timestamp;
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, currentTime + 10n, 0, false, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, currentTime + 10n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -350,7 +350,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -362,7 +362,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -382,7 +382,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -400,7 +400,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -424,7 +424,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, true, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, true, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 
@@ -458,7 +458,7 @@ describe("PromoCodeRegistry", async function () {
         const { registry } = await deploy();
 
         await registry.write.createCode(
-            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false],
+            [DISCOUNT_CODE_ID, PromoKind.Discount, DISCOUNT_BPS_20, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
             { account: walletOperator.account },
         );
 

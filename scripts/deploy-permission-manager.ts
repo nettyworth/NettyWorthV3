@@ -2,6 +2,7 @@ import { network } from "hardhat";
 import { encodeFunctionData } from "viem";
 import { createInterface } from "node:readline/promises";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { waitForCode } from "./lib/deployments.js";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -50,11 +51,16 @@ const initData = encodeFunctionData({
 });
 
 console.log("[3/3] Deploying ERC1967 proxy...");
+await waitForCode(publicClient, impl.address);
 const proxy = await viem.deployContract("ERC1967ProxyHelper", [
   impl.address,
   initData,
 ]);
 console.log(`  Proxy: ${proxy.address}`);
+
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+await sleep(5000);
 
 // Verify
 const pm = await viem.getContractAt("PermissionManager", proxy.address);

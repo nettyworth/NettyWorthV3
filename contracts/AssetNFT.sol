@@ -94,7 +94,7 @@ contract AssetNFT is
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.AssetNFT")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant ASSET_NFT_STORAGE_SLOT =
-        0x675aac697fe56d36fbae4d3e62e7ee038891694765a00c8d87dcb6940159f900;
+        0xdf981ac21670c8d86950dabc51999eae0654f62defa8cd0d5ce4ac3696fabe00;
 
     function _getAssetNFTStorage()
         private
@@ -144,16 +144,29 @@ contract AssetNFT is
     );
 
     /// @notice Emitted when a user initiates physical shipment of their asset.
-    event ShipmentInitiated(uint256 indexed tokenId, address indexed owner, uint256 fee);
+    event ShipmentInitiated(
+        uint256 indexed tokenId,
+        address indexed owner,
+        uint256 fee
+    );
 
     /// @notice Emitted when the payment token for redemption fees is updated.
-    event PaymentTokenUpdated(address indexed oldToken, address indexed newToken);
+    event PaymentTokenUpdated(
+        address indexed oldToken,
+        address indexed newToken
+    );
 
     /// @notice Emitted when the platform treasury address is updated.
-    event TreasuryUpdated(address indexed oldTreasury, address indexed newTreasury);
+    event TreasuryUpdated(
+        address indexed oldTreasury,
+        address indexed newTreasury
+    );
 
     /// @notice Emitted when the FeeController address is updated.
-    event FeeControllerUpdated(address indexed oldController, address indexed newController);
+    event FeeControllerUpdated(
+        address indexed oldController,
+        address indexed newController
+    );
 
     /// @notice Emitted when the AssetLendingPool address is updated.
     event LendingPoolUpdated(address indexed oldPool, address indexed newPool);
@@ -506,14 +519,19 @@ contract AssetNFT is
     ) external nonReentrant whenNotPaused {
         if (!_exists(tokenId)) revert AssetNFT__TokenNotFound(tokenId);
         address caller = _msgSender();
-        if (ownerOf(tokenId) != caller) revert AssetNFT__NotTokenOwner(tokenId, caller);
+        if (ownerOf(tokenId) != caller)
+            revert AssetNFT__NotTokenOwner(tokenId, caller);
 
         AssetNFTStorage storage $ = _getAssetNFTStorage();
 
         // Validate current state is Held (transition check mirrors _isValidTransition)
         AssetState current = $.assetStates[tokenId];
         if (current != AssetState.Held) {
-            revert AssetNFT__InvalidStateTransition(tokenId, current, AssetState.InShipment);
+            revert AssetNFT__InvalidStateTransition(
+                tokenId,
+                current,
+                AssetState.InShipment
+            );
         }
 
         if ($.feeController == address(0) || $.lendingPool == address(0)) {
@@ -524,12 +542,14 @@ contract AssetNFT is
         uint256 appraisalValue = IAssetLendingPool($.lendingPool)
             .getAppraisal(tokenId)
             .value;
-        (uint256 fee, bool enabled) = IFeeController($.feeController).getRedemptionFee(
-            appraisalValue
-        );
+        (uint256 fee, bool enabled) = IFeeController($.feeController)
+            .getRedemptionFee(appraisalValue);
 
         if (enabled && fee > 0) {
-            if (address($.paymentToken) == address(0) || $.treasury == address(0)) {
+            if (
+                address($.paymentToken) == address(0) ||
+                $.treasury == address(0)
+            ) {
                 revert AssetNFT__ShipmentConfigNotSet();
             }
             $.paymentToken.safeTransferFrom(caller, $.treasury, fee);
@@ -575,6 +595,17 @@ contract AssetNFT is
         address old = $.feeController;
         $.feeController = feeController_;
         emit FeeControllerUpdated(old, feeController_);
+    }
+
+    /// @notice Returns the appraisal value for a token from the lending pool.
+    ///         Returns 0 if the lending pool is not configured or the token has no appraisal.
+    ///         Used by PackMachine to validate FMV bounds at deposit time.
+    function getAppraisalValue(
+        uint256 tokenId
+    ) external view returns (uint256) {
+        address pool = _getAssetNFTStorage().lendingPool;
+        if (pool == address(0)) return 0;
+        return IAssetLendingPool(pool).getAppraisal(tokenId).value;
     }
 
     /// @notice Set the AssetLendingPool used to look up appraisal values for the redemption fee.

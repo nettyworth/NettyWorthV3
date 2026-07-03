@@ -174,6 +174,9 @@ contract PromoCodeRegistry is
     /// @param maxRedemptions Maximum total redemptions; 0 = uncapped.
     /// @param restricted     true = only addresses on the allowlist may redeem.
     /// @param oncePerUser    true = each address may redeem at most once.
+    /// @param machine        Discount only: PackMachine clone this code is scoped to.
+    ///                       address(0) = global code valid on any registered PackMachine.
+    ///                       Ignored (stored as 0) for Buyback codes.
     function createCode(
         bytes32 codeId,
         PromoKind kind,
@@ -181,11 +184,15 @@ contract PromoCodeRegistry is
         uint64 expiry,
         uint32 maxRedemptions,
         bool restricted,
-        bool oncePerUser
+        bool oncePerUser,
+        address machine
     ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
         PromoCodeRegistryStorage storage $ = _getStorage();
         if ($.codes[codeId].exists) revert PromoCodeRegistry__CodeExists(codeId);
         _validateBps(kind, bps);
+
+        // Machine binding is only meaningful for Discount codes.
+        address boundMachine = (kind == PromoKind.Discount) ? machine : address(0);
 
         $.codes[codeId] = PromoCode({
             kind: kind,
@@ -196,7 +203,8 @@ contract PromoCodeRegistry is
             restricted: restricted,
             active: true,
             oncePerUser: oncePerUser,
-            exists: true
+            exists: true,
+            machine: boundMachine
         });
 
         emit CodeCreated(
@@ -206,7 +214,8 @@ contract PromoCodeRegistry is
             expiry,
             maxRedemptions,
             restricted,
-            oncePerUser
+            oncePerUser,
+            boundMachine
         );
     }
 
@@ -285,7 +294,41 @@ contract PromoCodeRegistry is
         if (factory == address(0)) revert PromoCodeRegistry__NotConfigured();
         if (!IPackMachineFactory(factory).isPackMachine(msg.sender))
             revert PromoCodeRegistry__UnauthorizedRedeemer(msg.sender);
+        // Enforce machine binding: if the code is scoped to a specific PackMachine,
+        // only that clone may redeem it.
+        address bound = $.codes[codeId].machine;
+        if (bound != address(0) && msg.sender != bound)
+            revert PromoCodeRegistry__WrongMachine(codeId, bound, msg.sender);
         return _validateAndConsume($, codeId, user, PromoKind.Discount);
+    }
+
+    /// @inheritdoc IPromoCodeRegistry
+    function refundDiscount(
+        bytes32 codeId,
+        address user
+    ) external override whenNotPaused {
+        PromoCodeRegistryStorage storage $ = _getStorage();
+        address factory = $.packMachineFactory;
+        if (factory == address(0)) revert PromoCodeRegistry__NotConfigured();
+        if (!IPackMachineFactory(factory).isPackMachine(msg.sender))
+            revert PromoCodeRegistry__UnauthorizedRedeemer(msg.sender);
+        // Only the machine that originally redeemed the code may refund it.
+        address bound = $.codes[codeId].machine;
+        if (bound != address(0) && msg.sender != bound)
+            revert PromoCodeRegistry__WrongMachine(codeId, bound, msg.sender);
+
+        PromoCode storage c = $.codes[codeId];
+        if (!c.exists) revert PromoCodeRegistry__CodeNotFound(codeId);
+
+        // Reverse the consumption: decrement count and clear oncePerUser flag.
+        if (c.redeemedCount > 0) {
+            unchecked {
+                c.redeemedCount -= 1;
+            }
+        }
+        if (c.oncePerUser) $.hasRedeemed[codeId][user] = false;
+
+        emit CodeRefunded(codeId, user, c.kind, c.redeemedCount);
     }
 
     /// @inheritdoc IPromoCodeRegistry

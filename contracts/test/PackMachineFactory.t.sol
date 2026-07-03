@@ -7,6 +7,7 @@ import {PackMachine} from "../PackMachine.sol";
 import {PackMachineFactory} from "../PackMachineFactory.sol";
 import {PackVRFRouter} from "../PackVRFRouter.sol";
 import {PackRegistry} from "../PackRegistry.sol";
+import {PackTierRegistry} from "../PackTierRegistry.sol";
 import {PermissionManager} from "../PermissionManager.sol";
 import {PermissionConsumer} from "../PermissionConsumer.sol";
 import {Roles} from "../lib/Roles.sol";
@@ -18,6 +19,7 @@ contract PackMachineFactoryTest is Test {
     PackMachineFactory internal factory;
     PackVRFRouter internal vrfRouter;
     PackRegistry internal packRegistry;
+    PackTierRegistry internal packTierRegistry;
     PermissionManager internal pm;
     MockERC20 internal usdc;
     MockERC721 internal assetNFT;
@@ -93,6 +95,15 @@ contract PackMachineFactoryTest is Test {
         vm.startPrank(admin);
         factory.setPackRegistry(address(packRegistry));
         packRegistry.setFactory(address(factory));
+
+        PackTierRegistry tierRegistryImpl = new PackTierRegistry();
+        ERC1967Proxy tierRegistryProxy = new ERC1967Proxy(
+            address(tierRegistryImpl),
+            abi.encodeCall(PackTierRegistry.initialize, (address(pm)))
+        );
+        packTierRegistry = PackTierRegistry(address(tierRegistryProxy));
+        factory.setPackTierRegistry(address(packTierRegistry));
+        packTierRegistry.setFactory(address(factory));
         vm.stopPrank();
     }
 
@@ -208,9 +219,9 @@ contract PackMachineFactoryTest is Test {
         address machine = factory.createPackMachine(price, cards, start);
 
         PackMachine pm_ = PackMachine(machine);
-        assertEq(pm_.getPackPrice(0), price);
-        assertEq(pm_.getPackCardsPerPack(0), cards);
-        assertEq(pm_.factory(), address(factory));
+        assertEq(pm_.getPack(0).pricePerPack, price);
+        assertEq(pm_.getPack(0).cardsPerPack, cards);
+        assertEq(pm_.getMachineInfo().factory, address(factory));
     }
 
     function test_CreatePackMachine_UnauthorizedReverts() public {

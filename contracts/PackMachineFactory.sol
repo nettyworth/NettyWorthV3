@@ -43,11 +43,22 @@ contract PackMachineFactory is
         /// @dev PackRegistry proxy address. Clones read pack definitions from here via
         ///      IPackMachineFactory.packRegistry(). Must be set before createPackMachine.
         address packRegistry;
+        // ── Appended ──────────────────────────────────────────────────────────
+        /// @dev Global first-open discount. When enabled, a wallet that has never opened
+        ///      a pack on a given PackMachine receives `firstOpenDiscountBps` off its first
+        ///      purchase. Discount flag is reset on a fully-failed (zero-card) VRF open.
+        bool firstOpenDiscountEnabled;
+        uint16 firstOpenDiscountBps;
+        // ── Appended ──────────────────────────────────────────────────────────
+        /// @dev PackTierRegistry proxy address. Clones read/write per-(token, pack) tier data
+        ///      here via IPackMachineFactory.packTierRegistry() instead of carrying the storage
+        ///      themselves — keeps PackMachine bytecode under the 24 KiB EVM limit.
+        address packTierRegistry;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.PackMachineFactory")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant PACK_MACHINE_FACTORY_STORAGE_SLOT =
-        0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a00;
+        0x8e80552b741b8b80b7858148bf33ea537542bd5cd613b93df76c968fde960e00;
 
     function _getStorage()
         private
@@ -90,6 +101,11 @@ contract PackMachineFactory is
         address indexed oldRegistry,
         address indexed newRegistry
     );
+    event PackTierRegistryUpdated(
+        address indexed oldRegistry,
+        address indexed newRegistry
+    );
+    event FirstOpenDiscountUpdated(bool enabled, uint16 bps);
 
     // =========================================================================
     // Errors
@@ -104,6 +120,7 @@ contract PackMachineFactory is
     error PackMachineFactory__OnlyPackMachine(address caller);
     error PackMachineFactory__InvalidCardsPerPack();
     error PackMachineFactory__PackRegistryNotSet();
+    error PackMachineFactory__InvalidDiscountBps();
 
     // =========================================================================
     // Modifiers
@@ -334,6 +351,29 @@ contract PackMachineFactory is
         $.packRegistry = registry;
     }
 
+    function setPackTierRegistry(
+        address registry
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
+        if (registry == address(0)) revert PackMachineFactory__ZeroAddress();
+        PackMachineFactoryStorage storage $ = _getStorage();
+        emit PackTierRegistryUpdated($.packTierRegistry, registry);
+        $.packTierRegistry = registry;
+    }
+
+    /// @notice Configure the global first-open pack discount.
+    /// @param enabled Whether the discount is active.
+    /// @param bps     Discount in basis points (max 10 000 = 100%).
+    function setFirstOpenDiscount(
+        bool enabled,
+        uint16 bps
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
+        if (bps > 10_000) revert PackMachineFactory__InvalidDiscountBps();
+        PackMachineFactoryStorage storage $ = _getStorage();
+        $.firstOpenDiscountEnabled = enabled;
+        $.firstOpenDiscountBps = bps;
+        emit FirstOpenDiscountUpdated(enabled, bps);
+    }
+
     // =========================================================================
     // Views
     // =========================================================================
@@ -370,8 +410,20 @@ contract PackMachineFactory is
         return _getStorage().packRegistry;
     }
 
+    function packTierRegistry() external view returns (address) {
+        return _getStorage().packTierRegistry;
+    }
+
     function getAllPackMachines() external view returns (address[] memory) {
         return _getStorage().allPackMachines;
+    }
+
+    function firstOpenDiscountEnabled() external view returns (bool) {
+        return _getStorage().firstOpenDiscountEnabled;
+    }
+
+    function firstOpenDiscountBps() external view returns (uint16) {
+        return _getStorage().firstOpenDiscountBps;
     }
 
     function isTrustedForwarder(

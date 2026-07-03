@@ -17,14 +17,25 @@ interface IBuybackPool {
     }
 
     /// @notice Off-chain FMV quote signed by an account holding PACK_OPERATOR_ROLE.
-    /// @dev    codeId MUST be keccak256("FMVQuote(uint256 tokenId,uint256 fmv,uint256 deadline,uint256 nonce)").
+    /// @dev    Typehash: keccak256("FMVQuote(uint256 tokenId,uint256 fmv,uint256 deadline,uint256 nonce,address seller)").
     ///         nonce is per-token; incremented after each use to prevent replay.
+    ///         seller is the specific address permitted to redeem this quote; prevents leaked
+    ///         quotes from being used by any current token holder (H002 fix).
     struct FMVQuote {
         uint256 tokenId;
         uint256 fmv;      // USDC, 6-decimal precision
         uint256 deadline; // Unix seconds; revert if block.timestamp > deadline
         uint256 nonce;    // must equal on-chain fmvQuoteNonce[tokenId]
+        address seller;   // must match msg.sender at redemption (H002 fix)
     }
+
+    // =========================================================================
+    // Events
+    // =========================================================================
+
+    /// @notice Emitted when a buyback NFT cannot be redeposited because its source
+    ///         PackMachine has been deregistered. Admin must call rescueNFT to recover.
+    event TokenStuck(uint256 indexed tokenId, address indexed sourceMachine);
 
     // =========================================================================
     // Pack-opening registration
@@ -33,7 +44,7 @@ interface IBuybackPool {
     /// @notice Called by PackMachine during fulfillRandomness to record a won token's buyback data.
     /// @param tokenId The AssetNFT token ID.
     /// @param pricePerCard USDC per-card price (pricePerPack / cardsPerPack), 6-decimal precision.
-    /// @param tier Rarity tier the token came from (0-4).
+    /// @param tier Rarity tier the token came from (0-5).
     /// @param sourcePackMachine The PackMachine clone that minted this pack opening.
     function registerToken(
         uint256 tokenId,

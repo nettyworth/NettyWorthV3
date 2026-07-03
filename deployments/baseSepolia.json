@@ -1,0 +1,110 @@
+{
+  "PermissionManager": {
+    "proxy": "0x27b125fb73094e53741b850ad779a746a59b089a",
+    "implementation": "0x0e7df2de89f5e85edd2f26def332a404b3813fdd",
+    "admin": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
+    "deployedAt": "2026-07-01T10:06:06.708Z"
+  },
+  "AssetNFT": {
+    "proxy": "0xea3adeac6b82b9852a140e642bc10135638653e1",
+    "implementation": "0xd70381eab150ebd57be4f59a765e85e03ff4f96b",
+    "permissionManager": "0x27b125fB73094e53741b850ad779a746a59B089A",
+    "trustedForwarder": "0x0000000000000000000000000000000000000000",
+    "name": "NettyWorth Assets",
+    "symbol": "NWA",
+    "contractURI": "https://staging-v2-api.nettyworth.io/asset-nfts",
+    "deployedAt": "2026-07-01T10:15:42.398Z"
+  },
+  "PackVRFRouter": {
+    "proxy": "0x9fe3342674008f8426372c21f6e94ad15df5492b",
+    "implementation": "0x2012cb1a266d2b4d7beedce5e694c67c565853d4",
+    "permissionManager": "0x27b125fB73094e53741b850ad779a746a59B089A",
+    "vrfCoordinator": "0x5C210eF41CD1a72de73bF76eC39637bB0d3d7BEE",
+    "subscriptionId": "103219065887991739790097222916034425636826984156497093169524123344411963769123",
+    "keyHash": "0x9e1344a1247c8a1785d0a4681a27152bffdb43666ae5bf7d14d24a5efd44bf71",
+    "callbackGasLimit": 250000,
+    "requestConfirmations": 3,
+    "deployedAt": "2026-07-01T10:16:01.161Z"
+  },
+  "PackMachineImplementation": {
+    "implementation": "0x402a9a0a5be248eab41f74d11dbd7cdd2e37d8c7",
+    "trustedForwarder": "0x0000000000000000000000000000000000000000",
+    "deployedAt": "2026-07-01T10:16:05.240Z"
+  },
+  "PackMachineFactory": {
+    "proxy": "0x43fa1389f9beb67ad721e1ec43ab3319b69fd064",
+    "implementation": "0x6a2537fe4e683813159ea344640fcbfa78128a0c",
+    "permissionManager": "0x27b125fB73094e53741b850ad779a746a59B089A",
+    "packMachineImplementation": "0x402a9a0a5be248eab41f74d11dbd7cdd2e37d8c7",
+    "packVRFRouter": "0x9fe3342674008f8426372c21f6e94ad15df5492b",
+    "buybackPool": "0xa946f4552319fc5a22ebb479057a7bd06d2660ae",
+    "packRegistry": "0xd941a3974b1c42b4028532f71864d7ddf5844983",
+    "assetNFT": "0xeA3aDEac6b82b9852a140E642BC10135638653E1",
+    "paymentToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "financeWallet": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+    "trustedForwarder": "0x0000000000000000000000000000000000000000",
+    "deployedAt": "2026-07-01T10:16:46.196Z"
+  },
+  "PackRegistry": {
+    "proxy": "0xd941a3974b1c42b4028532f71864d7ddf5844983",
+    "implementation": "0xcb5a2077eb8e824b773fb070b628803cd9ad927a",
+    "permissionManager": "0x27b125fB73094e53741b850ad779a746a59B089A",
+    "factory": "0x43fa1389f9beb67ad721e1ec43ab3319b69fd064",
+    "deployedAt": "2026-07-01T10:16:46.201Z"
+  },
+  "BuybackPool": {
+    "proxy": "0xa946f4552319fc5a22ebb479057a7bd06d2660ae",
+    "implementation": "0xa0c14a92db204a0569fcd80de3818532531b7fcb",
+    "permissionManager": "0x27b125fB73094e53741b850ad779a746a59B089A",
+    "assetNFT": "0xeA3aDEac6b82b9852a140E642BC10135638653E1",
+    "paymentToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "financeWallet": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+    "factory": "0x43fa1389f9beb67ad721e1ec43ab3319b69fd064",
+    "defaultBuybackBps": 8000,
+    "deployedAt": "2026-07-01T10:16:49.968Z"
+  },
+  "AssetLendingPoolConfig": {
+    "proxy": "0x2a861003f5a243566ca10d8c01a546b11503c13a",
+    "implementation": "0xd5bf749cda0634a2861852516db019bd1e68a467",
+    "owner": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+    "paymentToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "assetNFT": "0xeA3aDEac6b82b9852a140E642BC10135638653E1",
+    "packMachineFactory": "0x43fa1389f9Beb67ad721E1Ec43aB3319b69FD064",
+    "ltvBps": "5000",
+    "lenderShareBps": "8000",
+    "acquisitionWindow": "86400",
+    "auctionWindow": "604800",
+    "deployedAt": "2026-07-01T10:17:39.599Z"
+  },
+  "AssetLendingPool": {
+    "proxy": "0x1a4a158294b8270a2beb7de5ea152e23ae9585d4",
+    "implementation": "0xe845fa1d0058b52845c23cf5de97af82720ba250",
+    "owner": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+    "config": "0x2a861003f5a243566ca10d8c01a546b11503c13a",
+    "permissionManager": "0x27b125fB73094e53741b850ad779a746a59B089A",
+    "deployedAt": "2026-07-01T10:17:39.601Z",
+    "lenderShareBps": "8000",
+    "lenderDepositsEnabled": true,
+    "lenderConfigUpdatedAt": "2026-07-01T10:18:32.297Z"
+  },
+  "FeeController": {
+    "proxy": "0x6066cb78cd147546c9f2a103ac95fe48f2a37ed9",
+    "implementation": "0x09b67ebdd53b928dd7bfa8b737e446fba2562807",
+    "permissionManager": "0x27b125fB73094e53741b850ad779a746a59B089A",
+    "treasury": "0x0ed8BDFbb4803CD29d3C436AeaCdb48A9fa22A74",
+    "collectibleFeesBps": "500",
+    "redemptionFeeBps": "500",
+    "deployedAt": "2026-07-01T10:19:12.984Z"
+  },
+  "NettyWorthMarketplace": {
+    "proxy": "0x6345a3d117da45601dd1920d7b65125d5432087c",
+    "implementation": "0x38e75848885ea51d12ff0fc6394e4d764580b850",
+    "permissionManager": "0x27b125fB73094e53741b850ad779a746a59B089A",
+    "feeController": "0x6066CB78cD147546c9F2a103Ac95fE48F2A37ed9",
+    "lendingPool": "0x1a4a158294B8270a2beB7de5eA152e23ae9585D4",
+    "assetNFT": "0xeA3aDEac6b82b9852a140E642BC10135638653E1",
+    "paymentToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "treasury": "0x0ed8BDFbb4803CD29d3C436AeaCdb48A9fa22A74",
+    "deployedAt": "2026-07-01T16:54:07.480Z"
+  }
+}

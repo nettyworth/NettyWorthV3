@@ -34,7 +34,7 @@ interface IPackRegistry {
         uint8 cardsPerPack,
         uint40 startTime,
         uint16 buybackAllocationBps,
-        uint32[5] calldata tierWeights
+        uint32[6] calldata tierWeights
     ) external returns (uint256 packId);
 
     /// @notice Permanently stop a pack. Irreversible.
@@ -58,7 +58,7 @@ interface IPackRegistry {
     function setPackTierWeights(
         address machine,
         uint256 packId,
-        uint32[5] calldata weights
+        uint32[6] calldata weights
     ) external;
 
     /// @notice Update a pack's buyback allocation in basis points (0–10000).
@@ -73,6 +73,24 @@ interface IPackRegistry {
         address machine,
         uint256 packId,
         uint40 startTime
+    ) external;
+
+    /// @notice Set per-tier FMV bounds. (0,0) per tier = unset (deposits rejected).
+    function setPackTierFmvBounds(
+        address machine,
+        uint256 packId,
+        uint128[6] calldata minFmv,
+        uint128[6] calldata maxFmv
+    ) external;
+
+    /// @notice Set min/max eligible card-count bounds for a pack.
+    ///         minCards: opens revert below this count (0 = no floor).
+    ///         maxCards: setPackActive(true) requires this count to be reached (0 = no gate).
+    function setPackCardBounds(
+        address machine,
+        uint256 packId,
+        uint32 minCards,
+        uint32 maxCards
     ) external;
 
     // =========================================================================
@@ -101,7 +119,22 @@ interface IPackRegistry {
     function getPackTierWeights(
         address machine,
         uint256 packId
-    ) external view returns (uint32[5] memory);
+    ) external view returns (uint32[6] memory);
+
+    /// @notice Returns the per-tier FMV bounds. (0,0) per tier = unset.
+    function getPackTierFmvBounds(
+        address machine,
+        uint256 packId
+    )
+        external
+        view
+        returns (uint128[6] memory minFmv, uint128[6] memory maxFmv);
+
+    /// @notice Returns the min/max card-count bounds. (0,0) = no bounds.
+    function getPackCardBounds(
+        address machine,
+        uint256 packId
+    ) external view returns (uint32 minCards, uint32 maxCards);
 
     function getPackBuybackAllocationBps(
         address machine,
@@ -125,4 +158,7 @@ interface IPackRegistry {
     // =========================================================================
 
     error PackRegistry__TooManyPacks();
+    error PackRegistry__InvalidFmvBounds(uint256 tier);
+    error PackRegistry__InvalidCardBounds(uint32 minCards, uint32 maxCards);
+    error PackRegistry__MaxCardsNotReached(uint256 available, uint32 maxCards);
 }

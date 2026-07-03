@@ -5,6 +5,21 @@ import {PackTypes} from "../lib/PackTypes.sol";
 
 interface IPackMachine {
     // =========================================================================
+    // View return types
+    // =========================================================================
+
+    struct MachineInfo {
+        address factory;
+        address buybackPool;
+        uint256 effectivePrizePoolSize;
+    }
+
+    struct UserInfo {
+        uint256 openNonce;
+        bool claimedFirstOpenDiscount;
+    }
+
+    // =========================================================================
     // Initializer
     // =========================================================================
 
@@ -77,17 +92,22 @@ interface IPackMachine {
     // Deposit / withdraw (machine-wide shared pool)
     // =========================================================================
 
-    /// @notice Deposit tokens into the shared tiered prize pool with per-token eligibility masks.
-    /// @param eligibilityMasks Bitmask per token: bit p set ⇒ eligible for packId p. Must be non-zero.
+    /// @notice Deposit tokens into per-pack tiered prize pools.
+    ///         Uses flat encoding: packCounts[i] entries from packIds/tiers belong to tokenIds[i].
+    /// @param packCounts Number of (pack, tier) entries per token.
+    /// @param packIds    Flat array of pack indices; contiguous blocks per token per packCounts.
+    /// @param tiers      Flat array of tiers, parallel to packIds.
     function deposit(
         uint256[] calldata tokenIds,
+        uint256[] calldata packCounts,
+        uint256[] calldata packIds,
         uint8[] calldata tiers,
-        uint256[] calldata eligibilityMasks,
         address tokensOwner
     ) external;
 
-    /// @notice Re-deposit NFTs from BuybackPool back into the shared pool.
-    ///         Only callable by the BuybackPool or an authorized depositor.
+    /// @notice Re-deposit NFTs from BuybackPool or AssetLendingPool back into pack pools.
+    ///         The dormant packTokenTier map restores per-pack tiers automatically.
+    ///         The tiers param provides a fallback for any pack with no dormant tier record.
     function depositFromPool(
         uint256[] calldata tokenIds,
         uint8[] calldata tiers,
@@ -105,71 +125,45 @@ interface IPackMachine {
     function setBuybackPool(address pool) external;
 
     /// @notice Authorize or revoke a pool contract's ability to call depositFromPool.
-    function setAuthorizedDepositor(address depositor, bool authorized) external;
-
-    /// @notice Set the machine-wide retention threshold in bps. 0 = disabled.
-    function setRetentionThreshold(uint16 bps) external;
+    function setAuthorizedDepositor(
+        address depositor,
+        bool authorized
+    ) external;
 
     // =========================================================================
     // Views — pack (pass-throughs to PackRegistry)
     // =========================================================================
 
-    function getPackCount() external view returns (uint256);
-
-    function getPack(uint256 packId) external view returns (PackTypes.Pack memory);
-
-    function getPackPrice(uint256 packId) external view returns (uint128);
-
-    function getPackCardsPerPack(uint256 packId) external view returns (uint8);
-
-    function getPackTierWeights(
+    function getPack(
         uint256 packId
-    ) external view returns (uint32[5] memory);
-
-    function getPackBuybackAllocationBps(
-        uint256 packId
-    ) external view returns (uint16);
-
-    function isPackActive(uint256 packId) external view returns (bool);
-
-    function isPackFinished(uint256 packId) external view returns (bool);
+    ) external view returns (PackTypes.Pack memory);
 
     // =========================================================================
     // Views — machine-wide pool
     // =========================================================================
 
-    function effectivePrizePoolSize() external view returns (uint256);
+    /// @notice Returns all machine-wide config and pool state in one call.
+    function getMachineInfo() external view returns (MachineInfo memory);
 
-    function getTierPoolSize(uint8 tier) external view returns (uint256);
+    /// @notice Returns per-user nonce and first-open discount status in one call.
+    function getUserInfo(address user) external view returns (UserInfo memory);
 
-    function getTierPool(uint8 tier) external view returns (uint256[] memory);
-
-    function getBuybackPool() external view returns (address);
-
-    function getRetentionThresholdBps() external view returns (uint16);
-
-    function getTotalInventory() external view returns (uint256);
-
-    function isCutOff() external view returns (bool);
-
-    function factory() external view returns (address);
-
-    function openNonce(address user) external view returns (uint256);
+    /// @notice Returns the resolved tier for a token in a specific pack.
+    function getPackTokenTier(
+        uint256 tokenId,
+        uint256 packId
+    ) external view returns (uint8);
 
     // =========================================================================
     // Eligibility setters (per-pack card membership)
     // =========================================================================
 
-    /// @notice Replace eligibility masks for a batch of in-custody tokens.
-    function setTokenEligibility(
-        uint256[] calldata tokenIds,
-        uint256[] calldata masks
-    ) external;
-
-    /// @notice Add or remove a pack's eligibility for a batch of in-custody tokens.
+    /// @notice Add or remove a single pack's eligibility for a batch of tokens.
+    ///         When adding (eligible=true), tiers must be supplied (one per token).
     function setPackEligibility(
         uint256 packId,
         uint256[] calldata tokenIds,
+        uint8[] calldata tiers,
         bool eligible
     ) external;
 
@@ -177,7 +171,9 @@ interface IPackMachine {
     // Views — per-pack eligibility
     // =========================================================================
 
-    function getTokenEligibility(uint256 tokenId) external view returns (uint256);
+    function getTokenEligibility(
+        uint256 tokenId
+    ) external view returns (uint256);
 
     function isTokenEligibleForPack(
         uint256 tokenId,
@@ -188,13 +184,6 @@ interface IPackMachine {
         uint256 packId,
         uint8 tier
     ) external view returns (uint256);
-
-    function getPackTierPool(
-        uint256 packId,
-        uint8 tier
-    ) external view returns (uint256[] memory);
-
-    function getPackPoolSize(uint256 packId) external view returns (uint256);
 
     function getPackAvailable(uint256 packId) external view returns (uint256);
 

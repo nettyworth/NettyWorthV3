@@ -1,9 +1,16 @@
 import { network } from "hardhat";
 import { encodeFunctionData, getAddress, keccak256, toBytes } from "viem";
 import { createInterface } from "node:readline/promises";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  readDeployments,
+  saveDeployment,
+  waitForCode,
+} from "./lib/deployments.js";
+
+// ─── Rate-limit guard — pause between steps to avoid 429s on live RPCs ───────
+const STEP_DELAY_MS = Number(process.env.DEPLOY_STEP_DELAY_MS ?? "3000");
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 // ─── Pool parameters (override via environment variables) ────────────────────
 const LTV_BPS = BigInt(process.env.LENDING_POOL_LTV_BPS ?? "5000"); // 50%
@@ -59,19 +66,27 @@ const [deployerClient] = await viem.getWalletClients();
 const deployerAddress = deployerClient.account.address;
 const chainId = await publicClient.getChainId();
 
-// ─── Helper: resolve an address from env or deployments JSON ─────────────────
-const deploymentsDir = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "../deployments",
-);
-const deploymentPath = join(deploymentsDir, `${connection.networkName}.json`);
+const isLive = connection.networkConfig.type === "http";
+const networkName = connection.networkName;
 
-async function readDeployments(): Promise<Record<string, unknown>> {
-  try {
-    return JSON.parse(await readFile(deploymentPath, "utf8"));
-  } catch {
-    return {};
+// ─── Resume helper — returns an already-deployed address if chain has code there
+async function reuseAddress(
+  key: string,
+  field: string,
+  deployments: Record<string, unknown>,
+): Promise<`0x${string}` | undefined> {
+  const entry = deployments[key] as Record<string, unknown> | undefined;
+  const raw = entry?.[field];
+  if (typeof raw !== "string" || !raw.startsWith("0x")) return undefined;
+  const addr = getAddress(raw) as `0x${string}`;
+  const code = await publicClient.getCode({ address: addr });
+  if (!code || code === "0x") {
+    console.log(
+      `  ⚠ ${key}.${field} found in JSON (${addr}) but no bytecode on chain — will redeploy`,
+    );
+    return undefined;
   }
+  return addr;
 }
 
 // ─── Resolve PAYMENT_TOKEN (required — no default) ───────────────────────────
@@ -89,8 +104,8 @@ if (process.env.PAYMENT_TOKEN) {
 let assetNFTProxy: `0x${string}`;
 if (process.env.ASSET_NFT_PROXY) {
   assetNFTProxy = getAddress(process.env.ASSET_NFT_PROXY) as `0x${string}`;
-} else if (connection.networkConfig.type === "http") {
-  const data = await readDeployments();
+} else if (isLive) {
+  const data = await readDeployments(networkName);
   const entry = data["AssetNFT"] as Record<string, unknown> | undefined;
   if (!entry?.proxy) {
     console.error(
@@ -112,8 +127,8 @@ if (process.env.PERMISSION_MANAGER_PROXY) {
   permissionManagerProxy = getAddress(
     process.env.PERMISSION_MANAGER_PROXY,
   ) as `0x${string}`;
-} else if (connection.networkConfig.type === "http") {
-  const data = await readDeployments();
+} else if (isLive) {
+  const data = await readDeployments(networkName);
   const entry = data["PermissionManager"] as
     | Record<string, unknown>
     | undefined;
@@ -140,8 +155,8 @@ if (process.env.PACK_MACHINE_FACTORY) {
   packMachineFactory = getAddress(
     process.env.PACK_MACHINE_FACTORY,
   ) as `0x${string}`;
-} else if (connection.networkConfig.type === "http") {
-  const data = await readDeployments();
+} else if (isLive) {
+  const data = await readDeployments(networkName);
   const entry = data["PackMachineFactory"] as
     | Record<string, unknown>
     | undefined;
@@ -162,9 +177,9 @@ const initialOwner: `0x${string}` = process.env.LENDING_POOL_OWNER
   : deployerAddress;
 
 // ─── Confirmation prompt on live networks ────────────────────────────────────
-if (connection.networkConfig.type === "http") {
+if (isLive) {
   const ok = await confirm(
-    connection.networkName,
+    networkName,
     chainId,
     deployerAddress,
     paymentToken,
@@ -184,61 +199,188 @@ if (usingFactoryPlaceholder) {
     "\n⚠️  PackMachineFactory not resolved — using placeholder address.",
   );
   console.log(
-    "   Call setPackMachineFactory(address) on the pool after deployment.",
+    "   Call setPackMachineFactory(address) on the config contract after deployment.",
   );
 }
 
-// ─── [1/5] Deploy implementation ─────────────────────────────────────────────
-console.log("\n[1/5] Deploying AssetLendingPool implementation...");
-const impl = await viem.deployContract("AssetLendingPool");
-console.log(`  Implementation: ${impl.address}`);
+// Re-read after confirmation so interactive pause doesn't matter.
+const savedDeployments = isLive ? await readDeployments(networkName) : {};
 
-// ─── [2/5] Encode initialize calldata ────────────────────────────────────────
-console.log("[2/5] Encoding initialize calldata...");
-const initData = encodeFunctionData({
-  abi: impl.abi,
-  functionName: "initialize",
-  args: [
-    initialOwner,
+// ─── [1/6]+[2/6] Deploy AssetLendingPoolConfig (impl + proxy) ────────────────
+console.log("\n[1/6] Deploying AssetLendingPoolConfig implementation...");
+
+let configImplAddress = await reuseAddress(
+  "AssetLendingPoolConfig",
+  "implementation",
+  savedDeployments,
+);
+let configProxyAddress = await reuseAddress(
+  "AssetLendingPoolConfig",
+  "proxy",
+  savedDeployments,
+);
+
+if (configImplAddress && configProxyAddress) {
+  console.log(`  ↻ reusing AssetLendingPoolConfig impl  ${configImplAddress}`);
+  console.log(`  ↻ reusing AssetLendingPoolConfig proxy ${configProxyAddress}`);
+} else {
+  if (!configImplAddress) {
+    const configImpl = await viem.deployContract("AssetLendingPoolConfig");
+    configImplAddress = configImpl.address;
+    console.log(`  Config Implementation: ${configImplAddress}`);
+    // Checkpoint impl immediately so a proxy-deploy failure doesn't lose it.
+    if (isLive) {
+      await saveDeployment(networkName, "AssetLendingPoolConfig", {
+        implementation: configImplAddress,
+        deployedAt: new Date().toISOString(),
+      });
+    }
+  } else {
+    console.log(`  ↻ reusing AssetLendingPoolConfig impl ${configImplAddress}`);
+  }
+
+  console.log("[2/6] Deploying AssetLendingPoolConfig proxy...");
+  const configImplContract = await viem.getContractAt(
+    "AssetLendingPoolConfig",
+    configImplAddress,
+  );
+  const configInitData = encodeFunctionData({
+    abi: configImplContract.abi,
+    functionName: "initialize",
+    args: [
+      initialOwner,
+      paymentToken,
+      assetNFTProxy,
+      LTV_BPS,
+      LENDER_SHARE_BPS,
+      ACQUISITION_WINDOW,
+      AUCTION_WINDOW,
+      packMachineFactory,
+    ],
+  });
+  await waitForCode(publicClient, configImplAddress);
+  const configProxy = await viem.deployContract("ERC1967ProxyHelper", [
+    configImplAddress,
+    configInitData,
+  ]);
+  configProxyAddress = configProxy.address;
+  console.log(`  Config Proxy: ${configProxyAddress}`);
+}
+
+if (isLive) {
+  await saveDeployment(networkName, "AssetLendingPoolConfig", {
+    proxy: configProxyAddress,
+    implementation: configImplAddress,
+    owner: initialOwner,
     paymentToken,
-    assetNFTProxy,
-    LTV_BPS,
-    LENDER_SHARE_BPS,
-    ACQUISITION_WINDOW,
-    AUCTION_WINDOW,
+    assetNFT: assetNFTProxy,
     packMachineFactory,
-  ],
-});
+    ltvBps: LTV_BPS.toString(),
+    lenderShareBps: LENDER_SHARE_BPS.toString(),
+    acquisitionWindow: ACQUISITION_WINDOW.toString(),
+    auctionWindow: AUCTION_WINDOW.toString(),
+    deployedAt: new Date().toISOString(),
+  });
+  console.log("  ✓ checkpoint saved");
+}
+await sleep(STEP_DELAY_MS);
 
-// ─── [3/5] Deploy ERC-1967 proxy ─────────────────────────────────────────────
-console.log("[3/5] Deploying ERC1967 proxy...");
-const proxy = await viem.deployContract("ERC1967ProxyHelper", [
-  impl.address,
-  initData,
-]);
-console.log(`  Proxy: ${proxy.address}`);
+// ─── [3/6]+[4/6] Deploy AssetLendingPool (impl + proxy) ──────────────────────
+console.log("[3/6] Deploying AssetLendingPool implementation...");
 
-// ─── [4/5] Grant STATE_MANAGER_ROLE to the pool proxy ────────────────────────
+let poolImplAddress = await reuseAddress(
+  "AssetLendingPool",
+  "implementation",
+  savedDeployments,
+);
+let poolProxyAddress = await reuseAddress(
+  "AssetLendingPool",
+  "proxy",
+  savedDeployments,
+);
+
+if (poolImplAddress && poolProxyAddress) {
+  console.log(`  ↻ reusing AssetLendingPool impl  ${poolImplAddress}`);
+  console.log(`  ↻ reusing AssetLendingPool proxy ${poolProxyAddress}`);
+} else {
+  if (!poolImplAddress) {
+    const impl = await viem.deployContract("AssetLendingPool");
+    poolImplAddress = impl.address;
+    console.log(`  Pool Implementation: ${poolImplAddress}`);
+    // Checkpoint impl immediately so a proxy-deploy failure doesn't lose it.
+    if (isLive) {
+      await saveDeployment(networkName, "AssetLendingPool", {
+        implementation: poolImplAddress,
+        deployedAt: new Date().toISOString(),
+      });
+    }
+  } else {
+    console.log(`  ↻ reusing AssetLendingPool impl ${poolImplAddress}`);
+  }
+
+  console.log("[4/6] Deploying AssetLendingPool proxy...");
+  const poolImplContract = await viem.getContractAt(
+    "AssetLendingPool",
+    poolImplAddress,
+  );
+  const poolInitData = encodeFunctionData({
+    abi: poolImplContract.abi,
+    functionName: "initialize",
+    args: [initialOwner, configProxyAddress],
+  });
+  await waitForCode(publicClient, poolImplAddress);
+  const proxy = await viem.deployContract("ERC1967ProxyHelper", [
+    poolImplAddress,
+    poolInitData,
+  ]);
+  poolProxyAddress = proxy.address;
+  console.log(`  Pool Proxy: ${poolProxyAddress}`);
+}
+
+if (isLive) {
+  await saveDeployment(networkName, "AssetLendingPool", {
+    proxy: poolProxyAddress,
+    implementation: poolImplAddress,
+    owner: initialOwner,
+    config: configProxyAddress,
+    permissionManager: permissionManagerProxy,
+    deployedAt: new Date().toISOString(),
+  });
+  console.log("  ✓ checkpoint saved");
+}
+await sleep(STEP_DELAY_MS);
+
+// ─── [5/6] Grant STATE_MANAGER_ROLE to the pool proxy (idempotent) ───────────
 console.log(
-  "[4/5] Granting STATE_MANAGER_ROLE to the pool proxy on PermissionManager...",
+  "[5/6] Granting STATE_MANAGER_ROLE to the pool proxy on PermissionManager...",
 );
 const pm = await viem.getContractAt(
   "PermissionManager",
   permissionManagerProxy,
 );
-const hash = await pm.write.grantRole([STATE_MANAGER_ROLE, proxy.address]);
-console.log(`  STATE_MANAGER_ROLE granted to ${proxy.address}`);
-await publicClient.waitForTransactionReceipt({ hash });
 
-// ─── [5/5] Verify deployment ──────────────────────────────────────────────────
-console.log("[5/5] Verifying deployment...");
-const pool = await viem.getContractAt("AssetLendingPool", proxy.address);
+const alreadyHasRole = await pm.read.hasProtocolRole([
+  STATE_MANAGER_ROLE,
+  poolProxyAddress,
+]);
+if (alreadyHasRole) {
+  console.log(`  ↻ skipping grantRole (already granted)`);
+} else {
+  const hash = await pm.write.grantRole([STATE_MANAGER_ROLE, poolProxyAddress]);
+  await publicClient.waitForTransactionReceipt({ hash });
+  console.log(`  STATE_MANAGER_ROLE granted to ${poolProxyAddress}`);
+}
+await sleep(STEP_DELAY_MS);
+
+// ─── [6/6] Verify deployment ──────────────────────────────────────────────────
+console.log("[6/6] Verifying deployment...");
+const pool = await viem.getContractAt("AssetLendingPool", poolProxyAddress);
 
 const actualOwner = await pool.read.owner();
 const poolInfo = await pool.read.getPoolInfo();
 const hasRole = await pm.read.hasProtocolRole([
   STATE_MANAGER_ROLE,
-  proxy.address,
+  poolProxyAddress,
 ]);
 
 const errors: string[] = [];
@@ -285,57 +427,50 @@ if (errors.length > 0) {
 }
 
 console.log("\n=== Deployment Successful ===");
-console.log(
-  `Network:              ${connection.networkName} (chainId: ${chainId})`,
-);
-console.log(`Implementation:       ${impl.address}`);
-console.log(`Proxy:                ${proxy.address}`);
-console.log(`Owner:                ${actualOwner}`);
-console.log(`Payment Token:        ${poolInfo.paymentToken}`);
-console.log(`AssetNFT:             ${poolInfo.assetNFT}`);
-console.log(`LTV:                  ${poolInfo.ltvBps} bps`);
-console.log(`Lender Share:         ${poolInfo.lenderShareBps} bps`);
-console.log(`Acquisition Window:   ${poolInfo.acquisitionWindow} s`);
-console.log(`Auction Window:       ${poolInfo.auctionWindow} s`);
-console.log(`STATE_MANAGER_ROLE:   granted ✓`);
+console.log(`Network:              ${networkName} (chainId: ${chainId})`);
+console.log(`Config Implementation: ${configImplAddress}`);
+console.log(`Config Proxy:          ${configProxyAddress}`);
+console.log(`Pool Implementation:   ${poolImplAddress}`);
+console.log(`Pool Proxy:            ${poolProxyAddress}`);
+console.log(`Owner:                 ${actualOwner}`);
+console.log(`Payment Token:         ${poolInfo.paymentToken}`);
+console.log(`AssetNFT:              ${poolInfo.assetNFT}`);
+console.log(`LTV:                   ${poolInfo.ltvBps} bps`);
+console.log(`Lender Share:          ${poolInfo.lenderShareBps} bps`);
+console.log(`Acquisition Window:    ${poolInfo.acquisitionWindow} s`);
+console.log(`Auction Window:        ${poolInfo.auctionWindow} s`);
+console.log(`STATE_MANAGER_ROLE:    granted ✓`);
 if (usingFactoryPlaceholder) {
   console.log(
-    `PackMachineFactory:   ${packMachineFactory} (placeholder — remember to call setPackMachineFactory)`,
+    `PackMachineFactory:    ${packMachineFactory} (placeholder — call setPackMachineFactory on config contract)`,
   );
 } else {
-  console.log(`PackMachineFactory:   ${packMachineFactory}`);
+  console.log(`PackMachineFactory:    ${packMachineFactory}`);
 }
 console.log("=============================\n");
 
-// ─── Persist deployment record ────────────────────────────────────────────────
-if (connection.networkConfig.type === "http") {
-  const outPath = join(deploymentsDir, `${connection.networkName}.json`);
-
-  let existing: Record<string, unknown> = {};
-  try {
-    existing = JSON.parse(await readFile(outPath, "utf8"));
-  } catch {
-    // file doesn't exist yet — start fresh
-  }
-
-  existing["AssetLendingPool"] = {
-    proxy: proxy.address,
-    implementation: impl.address,
+// ─── Final checkpoint with verified owner ────────────────────────────────────
+if (isLive) {
+  await saveDeployment(networkName, "AssetLendingPoolConfig", {
+    proxy: configProxyAddress,
+    implementation: configImplAddress,
     owner: actualOwner,
-    paymentToken: poolInfo.paymentToken,
-    assetNFT: poolInfo.assetNFT,
-    permissionManager: permissionManagerProxy,
+    paymentToken,
+    assetNFT: assetNFTProxy,
     packMachineFactory,
-    ltvBps: poolInfo.ltvBps.toString(),
-    lenderShareBps: poolInfo.lenderShareBps.toString(),
-    acquisitionWindow: poolInfo.acquisitionWindow.toString(),
-    auctionWindow: poolInfo.auctionWindow.toString(),
+    ltvBps: LTV_BPS.toString(),
+    lenderShareBps: LENDER_SHARE_BPS.toString(),
+    acquisitionWindow: ACQUISITION_WINDOW.toString(),
+    auctionWindow: AUCTION_WINDOW.toString(),
     deployedAt: new Date().toISOString(),
-  };
-
-  await mkdir(deploymentsDir, { recursive: true });
-  await writeFile(outPath, JSON.stringify(existing, null, 2) + "\n");
-  console.log(
-    `Deployment info saved to deployments/${connection.networkName}.json`,
-  );
+  });
+  await saveDeployment(networkName, "AssetLendingPool", {
+    proxy: poolProxyAddress,
+    implementation: poolImplAddress,
+    owner: actualOwner,
+    config: configProxyAddress,
+    permissionManager: permissionManagerProxy,
+    deployedAt: new Date().toISOString(),
+  });
+  console.log(`Deployment info saved to deployments/${networkName}.json`);
 }

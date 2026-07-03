@@ -5,7 +5,10 @@ import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {AssetLendingPool} from "../AssetLendingPool.sol";
+import {AssetLendingPoolConfig} from "../AssetLendingPoolConfig.sol";
 import {IAssetLendingPool} from "../interfaces/IAssetLendingPool.sol";
+import {IAssetLendingPoolConfig} from "../interfaces/IAssetLendingPoolConfig.sol";
+import {INettyWorthMarketplace} from "../interfaces/INettyWorthMarketplace.sol";
 import {AssetNFT} from "../AssetNFT.sol";
 import {PermissionManager} from "../PermissionManager.sol";
 import {Roles} from "../lib/Roles.sol";
@@ -49,6 +52,7 @@ contract MockPackMachineFactory {
 
 contract AssetLendingPoolTest is Test {
     AssetLendingPool internal pool;
+    AssetLendingPoolConfig internal config;
     AssetNFT internal assetNFT;
     PermissionManager internal pm;
     MockERC20 internal usdc;
@@ -59,10 +63,29 @@ contract AssetLendingPoolTest is Test {
     address internal minter = makeAddr("minter");
     address internal forwarder = makeAddr("forwarder");
     address internal borrower = makeAddr("borrower");
-    address internal seller = makeAddr("seller");
     address internal unauthorized = makeAddr("unauthorized");
     address internal lender1 = makeAddr("lender1");
     address internal lender2 = makeAddr("lender2");
+
+    // seller needs a private key for EIP-712 signing in financeMarketplacePurchase tests
+    uint256 internal sellerPk;
+    address internal seller;
+
+    // Fake marketplace address: used only for the domain separator in pool finance tests.
+    // The pool's setMarketplace is called with this address in setUp so the pool can
+    // verify listing signatures signed against this domain.
+    address internal fakeMarketplace = makeAddr("fakeMarketplace");
+
+    // financeWallet: funded USDC address used by acquireDefaultedAsset to repay defaulted loans.
+    address internal financeWallet = makeAddr("financeWallet");
+
+    bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 internal constant SIGNED_LISTING_TYPEHASH = keccak256(
+        "SignedListing(address seller,address collection,uint256 tokenId,address paymentToken,"
+        "uint256 price,uint256 nonce,uint256 expiry,address buyer)"
+    );
 
     // Default appraisal values
     uint256 internal constant APPRAISAL_VALUE = 1000e6; // 1000 USDC
@@ -71,6 +94,8 @@ contract AssetLendingPoolTest is Test {
     uint256 internal constant POOL_SEED = 10_000e6; // 10k USDC
 
     function setUp() public {
+        (seller, sellerPk) = makeAddrAndKey("seller");
+
         // PermissionManager
         PermissionManager pmImpl = new PermissionManager();
         ERC1967Proxy pmProxy = new ERC1967Proxy(
@@ -104,26 +129,41 @@ contract AssetLendingPoolTest is Test {
         );
         assetNFT = AssetNFT(address(assetNFTProxy));
 
-        // Deploy mock PackMachine infrastructure (needed for initialize)
+        // Deploy mock PackMachine infrastructure (needed for config initialize)
         mockMachine = new MockPackMachine(address(assetNFT));
         mockFactory = new MockPackMachineFactory();
         mockFactory.register(address(mockMachine));
 
-        // AssetLendingPool (24h acquisition window, 7d auction window, 80% lender share)
+        // AssetLendingPoolConfig (24h acquisition window, 7d auction window, 80% lender share)
+        AssetLendingPoolConfig configImpl = new AssetLendingPoolConfig();
+        ERC1967Proxy configProxy = new ERC1967Proxy(
+            address(configImpl),
+            abi.encodeCall(
+                AssetLendingPoolConfig.initialize,
+                (admin, address(usdc), address(assetNFT), LTV_BPS, 8000, 24 hours, 7 days, address(mockFactory))
+            )
+        );
+        config = AssetLendingPoolConfig(address(configProxy));
+
+        // AssetLendingPool — takes only initialOwner + config address
         AssetLendingPool poolImpl = new AssetLendingPool();
         ERC1967Proxy poolProxy = new ERC1967Proxy(
             address(poolImpl),
-            abi.encodeCall(
-                AssetLendingPool.initialize,
-                (admin, address(usdc), address(assetNFT), LTV_BPS, 8000, 24 hours, 7 days, address(mockFactory))
-            )
+            abi.encodeCall(AssetLendingPool.initialize, (admin, address(config)))
         );
         pool = AssetLendingPool(address(poolProxy));
 
         // Grant STATE_MANAGER_ROLE to pool so it can call batchSetAssetState
         vm.startPrank(admin);
         pm.grantRole(pm.STATE_MANAGER_ROLE(), address(pool));
+        // Set marketplace on config so financeMarketplacePurchase can verify listing signatures.
+        config.setMarketplace(fakeMarketplace);
+        // Set financeWallet on config for acquireDefaultedAsset
+        config.setFinanceWallet(financeWallet);
         vm.stopPrank();
+        usdc.mint(financeWallet, 100_000e6);
+        vm.prank(financeWallet);
+        usdc.approve(address(pool), type(uint256).max);
 
         // Fund the pool
         usdc.mint(admin, POOL_SEED);
@@ -149,7 +189,7 @@ contract AssetLendingPoolTest is Test {
 
     function _appraise(uint256 tokenId) internal {
         vm.prank(admin);
-        pool.setAppraisal(tokenId, APPRAISAL_VALUE, 0, 0);
+        config.setAppraisal(tokenId, APPRAISAL_VALUE, 0, 0);
     }
 
     function _borrow(
@@ -169,6 +209,61 @@ contract AssetLendingPoolTest is Test {
                 ]
             )
             .loanId;
+    }
+
+    // EIP-712 domain separator for the fake marketplace (used by pool to verify listing sigs).
+    function _financeDomainSeparator() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256("NettyWorthMarketplace"),
+                keccak256("1"),
+                block.chainid,
+                fakeMarketplace
+            )
+        );
+    }
+
+    function _signListing(
+        INettyWorthMarketplace.SignedListing memory l,
+        uint256 pk
+    ) internal view returns (bytes memory) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                SIGNED_LISTING_TYPEHASH,
+                l.seller,
+                l.collection,
+                l.tokenId,
+                l.paymentToken,
+                l.price,
+                l.nonce,
+                l.expiry,
+                l.buyer
+            )
+        );
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", _financeDomainSeparator(), structHash)
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _makeListing(
+        uint256 tokenId,
+        uint256 price,
+        uint256 nonce,
+        uint256 expiry
+    ) internal view returns (INettyWorthMarketplace.SignedListing memory) {
+        return INettyWorthMarketplace.SignedListing({
+            seller: seller,
+            collection: address(assetNFT),
+            tokenId: tokenId,
+            paymentToken: address(usdc),
+            price: price,
+            nonce: nonce,
+            expiry: expiry,
+            buyer: address(0)
+        });
     }
 
     // =========================================================================
@@ -202,32 +297,43 @@ contract AssetLendingPoolTest is Test {
 
     function test_Initialize_CannotReinitialize() public {
         vm.expectRevert();
-        pool.initialize(admin, address(usdc), address(assetNFT), LTV_BPS, 8000, 24 hours, 7 days, address(mockFactory));
+        pool.initialize(admin, address(config));
     }
 
-    function test_Initialize_RevertsOnZeroAddress() public {
+    function test_Initialize_RevertsOnZeroOwner() public {
+        // Pool reverts when initialOwner_ is zero
         AssetLendingPool impl = new AssetLendingPool();
         vm.expectRevert(
             IAssetLendingPool.AssetLendingPool__ZeroAddress.selector
         );
         new ERC1967Proxy(
             address(impl),
-            abi.encodeCall(
-                AssetLendingPool.initialize,
-                (address(0), address(usdc), address(assetNFT), LTV_BPS, 8000, 24 hours, 7 days, address(mockFactory))
-            )
+            abi.encodeCall(AssetLendingPool.initialize, (address(0), address(config)))
         );
     }
 
-    function test_Initialize_RevertsOnInvalidLTV() public {
+    function test_Initialize_RevertsOnZeroConfig() public {
+        // Pool reverts when config_ is zero
         AssetLendingPool impl = new AssetLendingPool();
+        vm.expectRevert(
+            IAssetLendingPool.AssetLendingPool__ZeroAddress.selector
+        );
+        new ERC1967Proxy(
+            address(impl),
+            abi.encodeCall(AssetLendingPool.initialize, (admin, address(0)))
+        );
+    }
+
+    function test_ConfigInitialize_RevertsOnInvalidLTV() public {
+        // Config reverts when LTV is invalid
+        AssetLendingPoolConfig configImpl = new AssetLendingPoolConfig();
         vm.expectRevert(
             IAssetLendingPool.AssetLendingPool__InvalidLTV.selector
         );
         new ERC1967Proxy(
-            address(impl),
+            address(configImpl),
             abi.encodeCall(
-                AssetLendingPool.initialize,
+                AssetLendingPoolConfig.initialize,
                 (admin, address(usdc), address(assetNFT), 0, 8000, 24 hours, 7 days, address(mockFactory))
             )
         );
@@ -274,10 +380,14 @@ contract AssetLendingPoolTest is Test {
     }
 
     function test_Withdraw_RevertsIfExceedsAvailableLiquidity() public {
+        // Temporarily disable utilization cap so the precondition borrow can fill the pool.
+        vm.prank(admin);
+        config.setMaxUtilizationBps(10_000);
+
         // Borrow most of the pool so available < ownerDeposited
         uint256 tokenId = _mintNFT(borrower);
         vm.prank(admin);
-        pool.setAppraisal(tokenId, POOL_SEED * 3, 0, 0);
+        config.setAppraisal(tokenId, POOL_SEED * 3, 0, 0);
         vm.prank(borrower);
         assetNFT.approve(address(pool), tokenId);
         vm.prank(borrower);
@@ -299,7 +409,7 @@ contract AssetLendingPoolTest is Test {
     function test_SetAppraisal_StoresValues() public {
         uint256 tokenId = _mintNFT(borrower);
         vm.prank(admin);
-        pool.setAppraisal(tokenId, 500e6, 8, 1);
+        config.setAppraisal(tokenId, 500e6, 8, 1);
 
         AssetLendingPool.AssetAppraisal memory a = pool.getAppraisal(tokenId);
         assertEq(a.value, 500e6);
@@ -312,7 +422,7 @@ contract AssetLendingPoolTest is Test {
         uint256 tokenId = _mintNFT(borrower);
         vm.expectRevert();
         vm.prank(unauthorized);
-        pool.setAppraisal(tokenId, 500e6, 8, 1);
+        config.setAppraisal(tokenId, 500e6, 8, 1);
     }
 
     function test_BatchSetAppraisals_Works() public {
@@ -332,7 +442,7 @@ contract AssetLendingPoolTest is Test {
         cats[1] = 0;
 
         vm.prank(admin);
-        pool.batchSetAppraisals(ids, vals, grades, cats);
+        config.batchSetAppraisals(ids, vals, grades, cats);
 
         assertEq(pool.getAppraisal(t1).value, 100e6);
         assertEq(pool.getAppraisal(t2).value, 200e6);
@@ -351,7 +461,7 @@ contract AssetLendingPoolTest is Test {
             )
         );
         vm.prank(admin);
-        pool.batchSetAppraisals(ids, vals, grades, cats);
+        config.batchSetAppraisals(ids, vals, grades, cats);
     }
 
     // =========================================================================
@@ -452,25 +562,29 @@ contract AssetLendingPoolTest is Test {
     }
 
     function test_Borrow_RevertsIfInsufficientLiquidity() public {
+        // Temporarily disable utilization cap so the precondition borrow can fill the pool.
+        vm.prank(admin);
+        config.setMaxUtilizationBps(10_000);
+
         // Drain all liquidity first by borrowing several tokens
         uint256 poolLiquidity = pool.getAvailableLiquidity();
 
         // Borrow a big amount close to pool capacity
         uint256 tokenId = _mintNFT(borrower);
         vm.prank(admin);
-        pool.setAppraisal(tokenId, poolLiquidity * 3, 0, 0); // high appraisal
+        config.setAppraisal(tokenId, poolLiquidity * 3, 0, 0); // high appraisal
         vm.prank(borrower);
         assetNFT.approve(address(pool), tokenId);
         vm.prank(borrower);
         pool.borrow(tokenId, poolLiquidity, 0); // borrow full pool
 
-        // Now try to borrow again
+        // Now try to borrow again — blocked by utilization cap (pool is at 100%)
         uint256 tokenId2 = _mintNFT(borrower);
         _appraise(tokenId2);
         vm.prank(borrower);
         assetNFT.approve(address(pool), tokenId2);
         vm.expectRevert(
-            IAssetLendingPool.AssetLendingPool__InsufficientLiquidity.selector
+            IAssetLendingPool.AssetLendingPool__ExceedsMaxUtilization.selector
         );
         vm.prank(borrower);
         pool.borrow(tokenId2, 100e6, 0);
@@ -494,13 +608,13 @@ contract AssetLendingPoolTest is Test {
     function test_Borrow_RevertsIfIneligible_BelowMinGrade() public {
         uint256 tokenId = _mintNFT(borrower);
         vm.prank(admin);
-        pool.setAppraisal(tokenId, APPRAISAL_VALUE, 5, 0);
+        config.setAppraisal(tokenId, APPRAISAL_VALUE, 5, 0);
 
         // Set minimum grade to 7
         uint256[] memory add = new uint256[](0);
         uint256[] memory rem = new uint256[](0);
         vm.prank(admin);
-        pool.setEligibilityControls(0, 7, add, rem);
+        config.setEligibilityControls(0, 7, add, rem);
 
         vm.prank(borrower);
         assetNFT.approve(address(pool), tokenId);
@@ -778,11 +892,16 @@ contract AssetLendingPoolTest is Test {
 
         // Seller approves pool
         vm.prank(seller);
-        assetNFT.approve(address(pool), tokenId);
+        assetNFT.setApprovalForAll(address(pool), true);
 
-        // Buyer provides 50% deposit (500 USDC), pool loans 500 USDC
+        // Listing price == appraisal value; buyer deposits 50% (500), pool loans 500
+        uint256 listingPrice = APPRAISAL_VALUE;
         uint256 depositAmount = 500e6;
-        uint256 loanAmount = APPRAISAL_VALUE - depositAmount;
+        uint256 loanAmount = listingPrice - depositAmount;
+
+        INettyWorthMarketplace.SignedListing memory listing =
+            _makeListing(tokenId, listingPrice, 1, block.timestamp + 1 days);
+        bytes memory sig = _signListing(listing, sellerPk);
 
         usdc.mint(borrower, depositAmount);
         vm.startPrank(borrower);
@@ -792,10 +911,10 @@ contract AssetLendingPoolTest is Test {
         uint256 sellerBefore = usdc.balanceOf(seller);
 
         vm.prank(borrower);
-        pool.financeMarketplacePurchase(tokenId, depositAmount, 0, seller);
+        pool.financeMarketplacePurchase(listing, sig, depositAmount, 0);
 
-        // Seller received full purchase price (500 deposit + 500 loan)
-        assertEq(usdc.balanceOf(seller), sellerBefore + APPRAISAL_VALUE);
+        // Seller received full listing price (500 deposit + 500 loan)
+        assertEq(usdc.balanceOf(seller), sellerBefore + listingPrice);
         // NFT in pool, Loaned state
         assertEq(assetNFT.ownerOf(tokenId), address(pool));
         assertEq(
@@ -809,16 +928,56 @@ contract AssetLendingPoolTest is Test {
         assertTrue(pool.getLoan(loanIds[0]).isMarketplaceFinanced);
     }
 
+    function test_FinanceMarketplace_SellerReceivesListingPriceNotAppraisal() public {
+        uint256 tokenId = _mintNFT(seller);
+        // Appraisal = 800, listing price = 1000 (price > appraisal is fine;
+        // loan is still capped at LTV × appraisal = 400)
+        vm.prank(admin);
+        config.setAppraisal(tokenId, 800e6, 0, 0);
+
+        vm.prank(seller);
+        assetNFT.setApprovalForAll(address(pool), true);
+
+        uint256 listingPrice = 1000e6;
+        uint256 maxLoan = (800e6 * LTV_BPS) / 10_000; // 400 USDC
+        uint256 depositAmount = listingPrice - maxLoan; // 600 USDC minimum
+        uint256 loanAmount = listingPrice - depositAmount; // 400
+
+        INettyWorthMarketplace.SignedListing memory listing =
+            _makeListing(tokenId, listingPrice, 1, block.timestamp + 1 days);
+        bytes memory sig = _signListing(listing, sellerPk);
+
+        usdc.mint(borrower, depositAmount);
+        vm.startPrank(borrower);
+        usdc.approve(address(pool), depositAmount);
+        vm.stopPrank();
+
+        uint256 sellerBefore = usdc.balanceOf(seller);
+        vm.prank(borrower);
+        pool.financeMarketplacePurchase(listing, sig, depositAmount, 0);
+
+        // Seller receives full listing price, not the appraisal value
+        assertEq(usdc.balanceOf(seller), sellerBefore + listingPrice);
+        // Loan capped at LTV × appraisal
+        uint256 loanId = pool.getBorrowerLoans(borrower)[0];
+        assertEq(pool.getLoan(loanId).principal, loanAmount);
+    }
+
     function test_FinanceMarketplace_RepayGivesNFTToBuyer() public {
         uint256 tokenId = _mintNFT(seller);
         _appraise(tokenId);
         vm.prank(seller);
-        assetNFT.approve(address(pool), tokenId);
+        assetNFT.setApprovalForAll(address(pool), true);
         uint256 depositAmount = 500e6;
+
+        INettyWorthMarketplace.SignedListing memory listing =
+            _makeListing(tokenId, APPRAISAL_VALUE, 1, block.timestamp + 1 days);
+        bytes memory sig = _signListing(listing, sellerPk);
+
         usdc.mint(borrower, depositAmount);
         vm.startPrank(borrower);
         usdc.approve(address(pool), depositAmount);
-        pool.financeMarketplacePurchase(tokenId, depositAmount, 0, seller);
+        pool.financeMarketplacePurchase(listing, sig, depositAmount, 0);
         vm.stopPrank();
 
         uint256 loanId = pool.getBorrowerLoans(borrower)[0];
@@ -838,15 +997,20 @@ contract AssetLendingPoolTest is Test {
         uint256 tokenId = _mintNFT(seller);
         _appraise(tokenId); // 1000 USDC, max loan = 500
         vm.prank(seller);
-        assetNFT.approve(address(pool), tokenId);
-        // Deposit only 400 USDC (below the 500 minimum)
+        assetNFT.setApprovalForAll(address(pool), true);
+
+        // Listing price == appraisal; deposit 400 < min (500) → ExceedsLTV
+        INettyWorthMarketplace.SignedListing memory listing =
+            _makeListing(tokenId, APPRAISAL_VALUE, 1, block.timestamp + 1 days);
+        bytes memory sig = _signListing(listing, sellerPk);
+
         usdc.mint(borrower, 400e6);
         vm.startPrank(borrower);
         usdc.approve(address(pool), 400e6);
         vm.expectRevert(
-            IAssetLendingPool.AssetLendingPool__InsufficientDeposit.selector
+            IAssetLendingPool.AssetLendingPool__ExceedsLTV.selector
         );
-        pool.financeMarketplacePurchase(tokenId, 400e6, 0, seller);
+        pool.financeMarketplacePurchase(listing, sig, 400e6, 0);
         vm.stopPrank();
     }
 
@@ -854,14 +1018,93 @@ contract AssetLendingPoolTest is Test {
         uint256 tokenId = _mintNFT(seller);
         _appraise(tokenId);
         vm.prank(seller);
-        assetNFT.approve(address(pool), tokenId);
+        assetNFT.setApprovalForAll(address(pool), true);
+
+        INettyWorthMarketplace.SignedListing memory listing =
+            _makeListing(tokenId, APPRAISAL_VALUE, 1, block.timestamp + 1 days);
+        bytes memory sig = _signListing(listing, sellerPk);
+
         usdc.mint(borrower, 500e6);
         vm.startPrank(borrower);
         usdc.approve(address(pool), 500e6);
         vm.expectRevert(
             IAssetLendingPool.AssetLendingPool__InvalidTerm.selector
         );
-        pool.financeMarketplacePurchase(tokenId, 500e6, 99, seller);
+        pool.financeMarketplacePurchase(listing, sig, 500e6, 99);
+        vm.stopPrank();
+    }
+
+    function test_FinanceMarketplace_RevertsIfBadSignature() public {
+        uint256 tokenId = _mintNFT(seller);
+        _appraise(tokenId);
+        vm.prank(seller);
+        assetNFT.setApprovalForAll(address(pool), true);
+
+        INettyWorthMarketplace.SignedListing memory listing =
+            _makeListing(tokenId, APPRAISAL_VALUE, 1, block.timestamp + 1 days);
+        // Sign with wrong key
+        (, uint256 wrongPk) = makeAddrAndKey("wrongSigner");
+        bytes memory badSig = _signListing(listing, wrongPk);
+
+        usdc.mint(borrower, 500e6);
+        vm.startPrank(borrower);
+        usdc.approve(address(pool), 500e6);
+        vm.expectRevert(IAssetLendingPool.AssetLendingPool__InvalidSignature.selector);
+        pool.financeMarketplacePurchase(listing, badSig, 500e6, 0);
+        vm.stopPrank();
+    }
+
+    function test_FinanceMarketplace_RevertsIfListingExpired() public {
+        uint256 tokenId = _mintNFT(seller);
+        _appraise(tokenId);
+        vm.prank(seller);
+        assetNFT.setApprovalForAll(address(pool), true);
+
+        uint256 expiry = block.timestamp + 1 days;
+        INettyWorthMarketplace.SignedListing memory listing =
+            _makeListing(tokenId, APPRAISAL_VALUE, 1, expiry);
+        bytes memory sig = _signListing(listing, sellerPk);
+
+        vm.warp(expiry + 1);
+
+        usdc.mint(borrower, 500e6);
+        vm.startPrank(borrower);
+        usdc.approve(address(pool), 500e6);
+        vm.expectRevert(IAssetLendingPool.AssetLendingPool__ListingExpired.selector);
+        pool.financeMarketplacePurchase(listing, sig, 500e6, 0);
+        vm.stopPrank();
+    }
+
+    function test_FinanceMarketplace_RevertsIfNonceReused() public {
+        uint256 tokenId = _mintNFT(seller);
+        _appraise(tokenId);
+        vm.prank(seller);
+        assetNFT.setApprovalForAll(address(pool), true);
+
+        INettyWorthMarketplace.SignedListing memory listing =
+            _makeListing(tokenId, APPRAISAL_VALUE, 42, block.timestamp + 1 days);
+        bytes memory sig = _signListing(listing, sellerPk);
+
+        usdc.mint(borrower, APPRAISAL_VALUE);
+        vm.startPrank(borrower);
+        usdc.approve(address(pool), APPRAISAL_VALUE);
+        pool.financeMarketplacePurchase(listing, sig, 500e6, 0);
+        vm.stopPrank();
+
+        // Mint a second NFT and try to reuse the same nonce
+        uint256 tokenId2 = _mintNFT(seller);
+        vm.prank(admin);
+        config.setAppraisal(tokenId2, APPRAISAL_VALUE, 0, 0);
+        INettyWorthMarketplace.SignedListing memory listing2 =
+            _makeListing(tokenId2, APPRAISAL_VALUE, 42, block.timestamp + 1 days);
+        // Sign legitimately but nonce 42 is burned
+        bytes memory sig2 = _signListing(listing2, sellerPk);
+
+        usdc.mint(borrower, 500e6);
+        vm.startPrank(borrower);
+        usdc.approve(address(pool), 500e6);
+        vm.expectRevert(IAssetLendingPool.AssetLendingPool__ListingNonceUsed.selector);
+        pool.financeMarketplacePurchase(listing2, sig2, 500e6, 0);
         vm.stopPrank();
     }
 
@@ -911,7 +1154,7 @@ contract AssetLendingPoolTest is Test {
     function test_OriginationFee_DeductedFromDisbursement() public {
         address feeWallet = makeAddr("feeWallet");
         vm.prank(admin);
-        pool.setOriginationFee(200, feeWallet); // 2%
+        config.setOriginationFee(200, feeWallet); // 2%
 
         uint256 tokenId = _mintNFT(borrower);
         _appraise(tokenId);
@@ -936,7 +1179,7 @@ contract AssetLendingPoolTest is Test {
 
     function test_SetTermConfig_UpdatesAndAddsTerms() public {
         vm.prank(admin);
-        pool.setTermConfig(5, 60 days, 3000, true);
+        config.setTermConfig(5, 60 days, 3000, true);
         AssetLendingPool.TermConfig memory t = pool.getTermConfig(5);
         assertEq(t.duration, 60 days);
         assertEq(t.aprBps, 3000);
@@ -946,7 +1189,7 @@ contract AssetLendingPoolTest is Test {
 
     function test_SetTermConfig_DeactivatesTerm() public {
         vm.prank(admin);
-        pool.setTermConfig(0, 7 days, 1000, false);
+        config.setTermConfig(0, 7 days, 1000, false);
         assertFalse(pool.getTermConfig(0).active);
 
         uint256 tokenId = _mintNFT(borrower);
@@ -1009,21 +1252,21 @@ contract AssetLendingPoolTest is Test {
 
     function test_SetMaxAppraisalAge_UpdatesValue() public {
         vm.prank(admin);
-        pool.setMaxAppraisalAge(14 days);
+        config.setMaxAppraisalAge(14 days);
         assertEq(pool.getPoolInfo().maxAppraisalAge, 14 days);
     }
 
     function test_SetMaxAppraisalAge_EmitsEvent() public {
         vm.expectEmit(false, false, false, true);
-        emit IAssetLendingPool.MaxAppraisalAgeUpdated(7 days, 14 days);
+        emit IAssetLendingPoolConfig.MaxAppraisalAgeUpdated(7 days, 14 days);
         vm.prank(admin);
-        pool.setMaxAppraisalAge(14 days);
+        config.setMaxAppraisalAge(14 days);
     }
 
     function test_SetMaxAppraisalAge_OnlyOwner() public {
         vm.expectRevert();
         vm.prank(unauthorized);
-        pool.setMaxAppraisalAge(14 days);
+        config.setMaxAppraisalAge(14 days);
     }
 
     function test_Borrow_RevertsIfAppraisalStale() public {
@@ -1079,7 +1322,7 @@ contract AssetLendingPoolTest is Test {
         _appraise(tokenId);
 
         vm.prank(admin);
-        pool.setMaxAppraisalAge(0); // disable check
+        config.setMaxAppraisalAge(0); // disable check
 
         vm.warp(block.timestamp + 365 days); // very stale
 
@@ -1094,10 +1337,15 @@ contract AssetLendingPoolTest is Test {
         _appraise(tokenId);
         uint256 appraisedAt = pool.getAppraisal(tokenId).updatedAt;
 
+        uint256 expiry = block.timestamp + 30 days;
+        INettyWorthMarketplace.SignedListing memory listing =
+            _makeListing(tokenId, APPRAISAL_VALUE, 1, expiry);
+        bytes memory sig = _signListing(listing, sellerPk);
+
         vm.warp(block.timestamp + 7 days + 1);
 
         vm.prank(seller);
-        assetNFT.approve(address(pool), tokenId);
+        assetNFT.setApprovalForAll(address(pool), true);
         usdc.mint(borrower, 500e6);
         vm.startPrank(borrower);
         usdc.approve(address(pool), 500e6);
@@ -1109,7 +1357,7 @@ contract AssetLendingPoolTest is Test {
                 7 days
             )
         );
-        pool.financeMarketplacePurchase(tokenId, 500e6, 0, seller);
+        pool.financeMarketplacePurchase(listing, sig, 500e6, 0);
         vm.stopPrank();
     }
 
@@ -1129,7 +1377,7 @@ contract AssetLendingPoolTest is Test {
 
     function _enableLenders() internal {
         vm.prank(admin);
-        pool.setLenderConfig(8000, true); // already set in initializeV2 but enable deposits
+        config.setLenderConfig(8000, true); // already set in initializeV2 but enable deposits
     }
 
     /// @dev Mints `amount` USDC to `lender` and deposits it into the pool.
@@ -1208,7 +1456,7 @@ contract AssetLendingPoolTest is Test {
     function test_LenderDeposit_RevertsIfDisabled() public {
         // lenderDepositsEnabled = false by default after initializeV2 (enable not called)
         vm.prank(admin);
-        pool.setLenderConfig(8000, false);
+        config.setLenderConfig(8000, false);
 
         usdc.mint(lender1, 1000e6);
         vm.startPrank(lender1);
@@ -1271,11 +1519,15 @@ contract AssetLendingPoolTest is Test {
         pool.lenderDeposit(1000e6);
         vm.stopPrank();
 
+        // Temporarily disable utilization cap so the precondition borrow can fill the pool.
+        vm.prank(admin);
+        config.setMaxUtilizationBps(10_000);
+
         // Borrow 10k (almost all of owner's capital) + lender's 1000 → pool is depleted
         uint256 tokenId = _mintNFT(borrower);
         uint256 bigAppraisal = POOL_SEED + 1000e6;
         vm.prank(admin);
-        pool.setAppraisal(tokenId, bigAppraisal * 3, 0, 0);
+        config.setAppraisal(tokenId, bigAppraisal * 3, 0, 0);
         vm.prank(borrower);
         assetNFT.approve(address(pool), tokenId);
         vm.prank(borrower);
@@ -1424,7 +1676,7 @@ contract AssetLendingPoolTest is Test {
     function test_LenderInterest_FiveLenderProRata_RequirementExample() public {
         // 90% to lenders so the protocol fee on 20 interest is exactly 2.
         vm.prank(admin);
-        pool.setLenderConfig(9000, true);
+        config.setLenderConfig(9000, true);
 
         // Owner seed would otherwise co-fund loans and earn nothing (it isn't a
         // lender); withdraw it so totalLenderDeposits == total pool capital and
@@ -1450,7 +1702,7 @@ contract AssetLendingPoolTest is Test {
         // Term 2 = 30d @ 20% APR → interest = 100 * 2000 * 30d / (365d*1e4),
         // which is not exactly 20, so set a custom term of 365d @ 20% APR.
         vm.prank(admin);
-        pool.setTermConfig(3, 365 days, 2000, true); // 20% over exactly one year
+        config.setTermConfig(3, 365 days, 2000, true); // 20% over exactly one year
 
         IAssetLendingPool.Loan memory loan = _borrowAndRepay(100e6, 3);
         assertEq(loan.interest, 20e6); // sanity: interest is exactly $20
@@ -1711,86 +1963,6 @@ contract AssetLendingPoolTest is Test {
     }
 
     // =========================================================================
-    // Default lifecycle: purchaseDefaultedAsset (Phase 2 & 3)
-    // =========================================================================
-
-    function test_PurchaseDefaultedAsset_Phase2_TransfersNFTToBuyer() public {
-        address buyer = makeAddr("buyer");
-        (uint256 loanId, uint256 tokenId) = _createDefaultedLoan(400e6);
-        IAssetLendingPool.DefaultRecord memory rec = pool.getDefaultRecord(
-            loanId
-        );
-
-        // Warp into Phase 2
-        vm.warp(rec.defaultedAt + 24 hours + 1);
-
-        uint256 depositedBefore = pool.getPoolInfo().totalDeposited;
-
-        usdc.mint(buyer, 400e6);
-        vm.startPrank(buyer);
-        usdc.approve(address(pool), 400e6);
-        pool.purchaseDefaultedAsset(loanId);
-        vm.stopPrank();
-
-        // NFT transferred to buyer
-        assertEq(assetNFT.ownerOf(tokenId), buyer);
-        // Pool made whole
-        assertEq(pool.getPoolInfo().totalDeposited, depositedBefore + 400e6);
-        assertEq(pool.getPoolInfo().totalDefaultedPrincipal, 0);
-        assertTrue(pool.getDefaultRecord(loanId).resolved);
-    }
-
-    function test_PurchaseDefaultedAsset_Phase3_Works() public {
-        address buyer = makeAddr("buyer");
-        (uint256 loanId, uint256 tokenId) = _createDefaultedLoan(400e6);
-        IAssetLendingPool.DefaultRecord memory rec = pool.getDefaultRecord(
-            loanId
-        );
-
-        // Warp into Phase 3 (past auction window too)
-        vm.warp(rec.defaultedAt + 24 hours + 7 days + 1);
-
-        usdc.mint(buyer, 400e6);
-        vm.startPrank(buyer);
-        usdc.approve(address(pool), 400e6);
-        pool.purchaseDefaultedAsset(loanId);
-        vm.stopPrank();
-
-        assertEq(assetNFT.ownerOf(tokenId), buyer);
-    }
-
-    function test_PurchaseDefaultedAsset_RevertsInPhase1() public {
-        (uint256 loanId, ) = _createDefaultedLoan(400e6);
-
-        // Still in Phase 1
-        vm.expectRevert(
-            IAssetLendingPool.AssetLendingPool__NotInPurchasePhase.selector
-        );
-        vm.prank(makeAddr("buyer"));
-        pool.purchaseDefaultedAsset(loanId);
-    }
-
-    function test_PurchaseDefaultedAsset_RevertsIfAlreadyResolved() public {
-        address buyer = makeAddr("buyer");
-        (uint256 loanId, ) = _createDefaultedLoan(400e6);
-        IAssetLendingPool.DefaultRecord memory rec = pool.getDefaultRecord(
-            loanId
-        );
-        vm.warp(rec.defaultedAt + 24 hours + 1);
-
-        usdc.mint(buyer, 800e6);
-        vm.startPrank(buyer);
-        usdc.approve(address(pool), 800e6);
-        pool.purchaseDefaultedAsset(loanId);
-
-        vm.expectRevert(
-            IAssetLendingPool.AssetLendingPool__DefaultAlreadyResolved.selector
-        );
-        pool.purchaseDefaultedAsset(loanId);
-        vm.stopPrank();
-    }
-
-    // =========================================================================
     // Default lifecycle: capital recovery restores lender value
     // =========================================================================
 
@@ -1810,20 +1982,11 @@ contract AssetLendingPoolTest is Test {
         // After default, liquidity drops by principal
         assertEq(pool.getAvailableLiquidity(), liquidityBefore - 400e6);
 
-        // Buyer purchases in Phase 2
-        IAssetLendingPool.DefaultRecord memory rec = pool.getDefaultRecord(
-            loanId
-        );
-        vm.warp(rec.defaultedAt + 24 hours + 1);
+        // Recover via acquireDefaultedAsset (Phase 1) — financeWallet (set in setUp) repays principal + interest
+        vm.prank(admin);
+        pool.acquireDefaultedAsset(loanId, address(mockMachine), 0);
 
-        address buyer = makeAddr("buyer");
-        usdc.mint(buyer, 400e6);
-        vm.startPrank(buyer);
-        usdc.approve(address(pool), 400e6);
-        pool.purchaseDefaultedAsset(loanId);
-        vm.stopPrank();
-
-        // Liquidity restored
+        // Liquidity restored (principal re-credited; interest distributed separately to lenders/protocol)
         assertEq(pool.getAvailableLiquidity(), liquidityBefore);
     }
 
@@ -1840,7 +2003,7 @@ contract AssetLendingPoolTest is Test {
         uint256 tokenId = _mintNFT(borrower);
         // Appraise below the $100 default minimum
         vm.prank(admin);
-        pool.setAppraisal(tokenId, 50e6, 0, 0);
+        config.setAppraisal(tokenId, 50e6, 0, 0);
 
         vm.startPrank(borrower);
         assetNFT.approve(address(pool), tokenId);
@@ -1853,11 +2016,11 @@ contract AssetLendingPoolTest is Test {
         // Admin lowers the minimum to 0 — a sub-$100 appraisal should then be borrowable
         vm.prank(admin);
         uint256[] memory empty = new uint256[](0);
-        pool.setEligibilityControls(0, 0, empty, empty);
+        config.setEligibilityControls(0, 0, empty, empty);
 
         uint256 tokenId = _mintNFT(borrower);
         vm.prank(admin);
-        pool.setAppraisal(tokenId, 50e6, 0, 0);
+        config.setAppraisal(tokenId, 50e6, 0, 0);
 
         vm.startPrank(borrower);
         assetNFT.approve(address(pool), tokenId);
@@ -1877,7 +2040,7 @@ contract AssetLendingPoolTest is Test {
     ) internal returns (uint256 tokenId) {
         tokenId = _mintNFT(recipient);
         vm.prank(admin);
-        pool.setAppraisal(tokenId, value, 0, 0);
+        config.setAppraisal(tokenId, value, 0, 0);
     }
 
     function test_BorrowBundle_HappyPath_AndRepay() public {
@@ -2018,43 +2181,6 @@ contract AssetLendingPoolTest is Test {
         assertEq(pool.getAvailableLiquidity(), liquidityBefore + 800e6);
     }
 
-    function test_BorrowBundle_DefaultAndPurchase() public {
-        uint256 t1 = _mintAndAppraise(borrower, APPRAISAL_VALUE);
-        uint256 t2 = _mintAndAppraise(borrower, APPRAISAL_VALUE);
-
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = t1;
-        ids[1] = t2;
-
-        vm.startPrank(borrower);
-        assetNFT.approve(address(pool), t1);
-        assetNFT.approve(address(pool), t2);
-        pool.borrowBundle(ids, 800e6, 0);
-        vm.stopPrank();
-
-        uint256 loanId = pool.getBorrowerLoans(borrower)[0];
-        IAssetLendingPool.Loan memory loan = pool.getLoan(loanId);
-        vm.warp(loan.expireTime + 1);
-
-        vm.prank(admin);
-        pool.initiateDefault(loanId);
-
-        // Warp into Phase 2 (past acquisition window)
-        IAssetLendingPool.DefaultRecord memory rec = pool.getDefaultRecord(loanId);
-        vm.warp(rec.defaultedAt + 24 hours + 1);
-
-        address buyer = makeAddr("bundleBuyer");
-        usdc.mint(buyer, 800e6);
-        vm.startPrank(buyer);
-        usdc.approve(address(pool), 800e6);
-        pool.purchaseDefaultedAsset(loanId);
-        vm.stopPrank();
-
-        // Buyer receives both NFTs
-        assertEq(assetNFT.ownerOf(t1), buyer);
-        assertEq(assetNFT.ownerOf(t2), buyer);
-        assertTrue(pool.getDefaultRecord(loanId).resolved);
-    }
 
     function test_BorrowBundle_RevertsIfPerAssetIneligible() public {
         uint256 t1 = _mintAndAppraise(borrower, APPRAISAL_VALUE);
@@ -2081,7 +2207,7 @@ contract AssetLendingPoolTest is Test {
         uint256 t2 = _mintNFT(borrower);
         // Appraise t2 below the $100 default minimum
         vm.prank(admin);
-        pool.setAppraisal(t2, 50e6, 0, 0);
+        config.setAppraisal(t2, 50e6, 0, 0);
 
         uint256[] memory ids = new uint256[](2);
         ids[0] = t1;
