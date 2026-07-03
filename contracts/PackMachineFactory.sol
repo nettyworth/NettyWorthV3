@@ -49,6 +49,11 @@ contract PackMachineFactory is
         ///      purchase. Discount flag is reset on a fully-failed (zero-card) VRF open.
         bool firstOpenDiscountEnabled;
         uint16 firstOpenDiscountBps;
+        // ── Appended ──────────────────────────────────────────────────────────
+        /// @dev PackTierRegistry proxy address. Clones read/write per-(token, pack) tier data
+        ///      here via IPackMachineFactory.packTierRegistry() instead of carrying the storage
+        ///      themselves — keeps PackMachine bytecode under the 24 KiB EVM limit.
+        address packTierRegistry;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.PackMachineFactory")) - 1)) & ~bytes32(uint256(0xff))
@@ -93,6 +98,10 @@ contract PackMachineFactory is
         address indexed newRegistry
     );
     event PackRegistryUpdated(
+        address indexed oldRegistry,
+        address indexed newRegistry
+    );
+    event PackTierRegistryUpdated(
         address indexed oldRegistry,
         address indexed newRegistry
     );
@@ -342,6 +351,15 @@ contract PackMachineFactory is
         $.packRegistry = registry;
     }
 
+    function setPackTierRegistry(
+        address registry
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
+        if (registry == address(0)) revert PackMachineFactory__ZeroAddress();
+        PackMachineFactoryStorage storage $ = _getStorage();
+        emit PackTierRegistryUpdated($.packTierRegistry, registry);
+        $.packTierRegistry = registry;
+    }
+
     /// @notice Configure the global first-open pack discount.
     /// @param enabled Whether the discount is active.
     /// @param bps     Discount in basis points (max 10 000 = 100%).
@@ -390,6 +408,10 @@ contract PackMachineFactory is
 
     function packRegistry() external view returns (address) {
         return _getStorage().packRegistry;
+    }
+
+    function packTierRegistry() external view returns (address) {
+        return _getStorage().packTierRegistry;
     }
 
     function getAllPackMachines() external view returns (address[] memory) {

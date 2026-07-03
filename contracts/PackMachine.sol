@@ -14,12 +14,14 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {PermissionConsumer} from "./PermissionConsumer.sol";
 import {Roles} from "./lib/Roles.sol";
 import {PackTypes} from "./lib/PackTypes.sol";
+import {IPackMachine} from "./interfaces/IPackMachine.sol";
 import {IPackMachineFactory} from "./interfaces/IPackMachineFactory.sol";
 import {IPackRegistry} from "./interfaces/IPackRegistry.sol";
 import {IPackVRFRouter} from "./interfaces/IPackVRFRouter.sol";
 import {ISignatureTransfer} from "./interfaces/ISignatureTransfer.sol";
 import {IBuybackPool} from "./interfaces/IBuybackPool.sol";
 import {IPromoCodeRegistry} from "./interfaces/IPromoCodeRegistry.sol";
+import {IAssetNFT} from "./interfaces/IAssetNFT.sol";
 
 /// @title PackMachine
 /// @author NettyWorth
@@ -32,7 +34,7 @@ import {IPromoCodeRegistry} from "./interfaces/IPromoCodeRegistry.sol";
 ///      Uses ERC-7201 namespaced storage to avoid slot collisions in the shared implementation.
 ///      Pack definitions (price, tier weights, buyback allocation, etc.) are stored in PackRegistry,
 ///      not here. This machine holds only custody state: prize pools, pending opens, nonces,
-///      and machine-wide config (buybackPool, retentionThresholdBps, authorizedDepositors).
+///      and machine-wide config (buybackPool, authorizedDepositors).
 /// @custom:security-contact security@nettyworth.io
 contract PackMachine is
     Initializable,
@@ -59,14 +61,14 @@ contract PackMachine is
     /// @dev EIP-712 type hash for the open-pack authorization signature.
     ///      packId is included so a signature for one pack cannot be replayed on another.
     ///      codeId is included so a leaked signature cannot burn a user's oncePerUser code
-    ///      on an unintended promo code (L004 fix). Use bytes32(0) for codeless opens.
+    ///      on an unintended promo code. Use bytes32(0) for codeless opens.
     bytes32 private constant OPEN_PACK_TYPEHASH = keccak256(
         "OpenPack(address user,uint256 packId,uint256 nonce,bytes32 codeId)"
     );
 
-    uint256 private constant NUM_TIERS = 5;
+    uint256 private constant NUM_TIERS = 6;
 
-    /// @dev Tier weights are expressed in basis points; all five must sum to this value.
+    /// @dev Tier weights are expressed in basis points; all six must sum to this value.
     uint16 private constant WEIGHT_PRECISION = 10000;
 
     // =========================================================================
@@ -79,40 +81,27 @@ contract PackMachine is
         address assetNFT;
         bool isFinished;
         // === Shared card pool ===
-        /// @dev One prize pool per tier: index 0=Base, 1=Common, 2=Uncommon, 3=Rare, 4=Ultra.
-        uint256[][5] tierPools;
-        /// @dev Reverse lookup: which tier a deposited token belongs to (for withdrawal).
-        mapping(uint256 tokenId => uint8 tier) tokenTiers;
         uint256 effectivePrizePoolSize;
         mapping(uint256 requestId => PendingOpen) pendingOpens;
         mapping(address user => uint256) openNonces;
-        // === Cut-off Logic ===
-        /// @dev Total cards ever deposited by operators (monotonically increasing; re-deposits excluded).
-        uint256 totalInventory;
-        /// @dev Machine-wide retention threshold bps (e.g. 6000 = 60%). Sales stop when
-        ///      effectivePrizePoolSize / totalInventory < threshold. Shared across all packs.
-        uint16 retentionThresholdBps;
         // === Shared Payment ===
         /// @dev BuybackPool contract address (machine-wide; per-pack buybackAllocationBps in registry controls routing).
         address buybackPool;
         // === Authorized Pool Depositors ===
         /// @dev Addresses permitted to call depositFromPool (BuybackPool + AssetLendingPool).
         mapping(address depositor => bool) authorizedDepositors;
-        // ── Per-pack eligibility (appended; ERC-7201 slot-stable) ────────────
+        // ── Per-pack eligibility ────────────────────────────────────────────
         /// @dev Eligibility bitmask per token. Bit p set ⇒ token is eligible for packId p.
         ///      Capped at 256 packs (enforced in PackRegistry.addPack).
         ///      Retained as a "dormant mask" after a win so depositFromPool can restore it.
         mapping(uint256 tokenId => uint256 mask) eligibility;
         /// @dev Per-(pack,tier) tokenId pools used for O(1) weighted random draw.
-        ///      packTierPools[packId] is a fixed-size array[5] of dynamic arrays of tokenIds.
-        mapping(uint256 packId => uint256[][5]) packTierPools;
-        /// @dev Index+1 of token in packTierPools[packId][tokenTiers[token]].
+        ///      packTierPools[packId] is a fixed-size array[6] of dynamic arrays of tokenIds.
+        mapping(uint256 packId => uint256[][6]) packTierPools;
+        /// @dev Index+1 of token in packTierPools[packId][packTokenTier[token][packId]].
         ///      0 means the token is not in that pack's pool.
         ///      Used for O(1) swap-and-pop removal across all eligible packs on a win.
         mapping(uint256 tokenId => mapping(uint256 packId => uint256 indexPlus1)) packPoolIndex;
-        /// @dev Index+1 of token in the machine-wide tierPools[tokenTiers[token]].
-        ///      0 means absent. Replaces the O(n) linear scan in the hot path.
-        mapping(uint256 tokenId => uint256 indexPlus1) machinePoolIndex;
         /// @dev True while a token is physically held by this machine.
         ///      Set true on deposit, false on win / withdrawCards.
         mapping(uint256 tokenId => bool) inCustody;
@@ -137,6 +126,10 @@ contract PackMachine is
         ///      so it can be restored in fulfillRandomness on a full-refund (all-cards-failed).
         ///      Written only when the discount is applied; cleared alongside pendingOpens.
         mapping(uint256 requestId => bool) pendingFirstOpen;
+        /// @dev Per-(token,pack) tier. Tier is purely a per-pack property.
+        ///      Survives a win as a DORMANT map (not deleted on win) so depositFromPool
+        ///      restores per-pack tiers automatically. Cleared only on withdrawCards.
+        mapping(uint256 tokenId => mapping(uint256 packId => uint8 tier)) packTokenTier;
     }
 
     struct PendingOpen {
@@ -182,7 +175,6 @@ contract PackMachine is
     event CardsDeposited(address indexed operator, uint256 count);
     event CardsWithdrawn(address indexed operator, uint256 count);
     event PackMachineStopped();
-    event RetentionThresholdUpdated(uint16 oldBps, uint16 newBps);
     event BuybackPoolUpdated(address indexed oldPool, address indexed newPool);
     event AuthorizedDepositorUpdated(
         address indexed depositor,
@@ -215,12 +207,23 @@ contract PackMachine is
     error PackMachine__ArrayLengthMismatch();
     error PackMachine__InvalidBps(uint16 given);
     error PackMachine__UnauthorizedDepositor(address caller);
-    error PackMachine__CutOff(uint256 retained, uint256 total);
     error PackMachine__PromoRegistryNotSet();
     error PackMachine__RegistryNotSet();
     error PackMachine__NoEligibility(uint256 tokenId);
     error PackMachine__InvalidPackRef(uint256 packId);
     error PackMachine__TokenNotInCustody(uint256 tokenId);
+    error PackMachine__TierFmvUnset(uint256 packId, uint8 tier);
+    error PackMachine__FmvOutOfRange(
+        uint256 tokenId,
+        uint256 packId,
+        uint8 tier,
+        uint256 fmv
+    );
+    error PackMachine__BelowMinCards(
+        uint256 packId,
+        uint256 available,
+        uint32 minCards
+    );
 
     // =========================================================================
     // Constructor (disables initializers on the implementation)
@@ -265,8 +268,6 @@ contract PackMachine is
         PackMachineStorage storage $ = _getStorage();
         $.factory = factory_;
         $.assetNFT = IPackMachineFactory(factory_).assetNFT();
-        // Default 60% machine-wide retention threshold.
-        $.retentionThresholdBps = 6000;
     }
 
     // =========================================================================
@@ -492,7 +493,7 @@ contract PackMachine is
             uint256 word = randomWords[i];
 
             // Compute active weights — exclude tiers empty for THIS PACK.
-            uint32[5] memory activeWeights;
+            uint32[6] memory activeWeights;
             uint256 totalActiveWeight;
             for (uint256 t; t < NUM_TIERS; ++t) {
                 if ($.packTierPools[pending.packId][t].length == 0) continue;
@@ -529,12 +530,12 @@ contract PackMachine is
                 index
             ];
 
-            // Remove from every pack pool it belongs to + machine-wide pool.
+            // Remove from every pack pool it belongs to.
+            // Machine-wide tier pool is intentionally absent — tier is per-pack only.
             uint256 tokenMask = $.eligibility[tokenId];
             _removeFromAllPacks($, tokenId, tokenMask);
-            _removeFromMachinePool($, selectedTier, tokenId);
             $.inCustody[tokenId] = false;
-            // Eligibility mask kept dormant for depositFromPool restoration.
+            // Eligibility mask and packTokenTier kept dormant for depositFromPool restoration.
 
             // Decrement available counters for all other overlapping packs
             // (this pack's reservation was already charged at _requestVRF time).
@@ -573,8 +574,9 @@ contract PackMachine is
                 }
             } catch {
                 // Transfer failed — return the card to all its pools.
-                _addToEligiblePacks($, tokenId, uint8(selectedTier), tokenMask);
-                _addToMachinePool($, uint8(selectedTier), tokenId);
+                // Per-pack tiers are still in the dormant packTokenTier map, so
+                // _addToEligiblePacks resolves the correct tier for each pack.
+                _addToEligiblePacks($, tokenId, tokenMask);
                 $.inCustody[tokenId] = true;
                 // Restore available counters for other packs we decremented.
                 _incrementAvailableForMask($, otherMask);
@@ -646,20 +648,34 @@ contract PackMachine is
     // Admin — deposit / withdraw (machine-wide, shared pool)
     // =========================================================================
 
-    /// @notice Deposit AssetNFTs into tiered prize pools. Caller must have approved this contract.
-    /// @param tokenIds         Array of token IDs to deposit (max 50).
-    /// @param tiers            Rarity tier for each token (0=Base…4=Ultra).
-    /// @param eligibilityMasks Per-token eligibility bitmask; bit p set ⇒ eligible for packId p.
-    ///                         Must be non-zero, and every set bit must reference an existing packId.
-    /// @param tokensOwner      Current owner of the tokens (must have approved this contract).
+    /// @notice Deposit AssetNFTs into per-pack tiered prize pools.
+    ///         Tier is a first-class per-(token, pack) property: the same card can be a
+    ///         different tier in different packs. Eligibility and tier are set together.
+    ///
+    ///         Flat encoding for efficient calldata: all (packId, tier) pairs for ALL tokens
+    ///         are concatenated into two flat arrays (`packIds` and `tiers`), and `packCounts`
+    ///         gives how many entries belong to each token.
+    ///
+    ///         Example: 2 tokens, token A in packs [0,1] at tiers [3,1], token B in pack [0] at tier [2]:
+    ///           tokenIds   = [A, B]
+    ///           packCounts = [2, 1]      // 2 entries for A, 1 for B
+    ///           packIds    = [0, 1, 0]   // A-pack0, A-pack1, B-pack0
+    ///           tiers      = [3, 1, 2]   // A in pack0=Rare, A in pack1=Common, B in pack0=Uncommon
+    ///
+    /// @param tokenIds   Array of token IDs to deposit (max 50).
+    /// @param packCounts Number of (pack, tier) entries per token. Sum must equal packIds.length.
+    /// @param packIds    Flat array of pack indices; contiguous blocks per token per packCounts.
+    /// @param tiers      Flat array of tiers, parallel to packIds.
+    /// @param tokensOwner Current owner of the tokens (must have approved this contract).
     function deposit(
         uint256[] calldata tokenIds,
+        uint256[] calldata packCounts,
+        uint256[] calldata packIds,
         uint8[] calldata tiers,
-        uint256[] calldata eligibilityMasks,
         address tokensOwner
     ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
         uint256 count = tokenIds.length;
-        if (count != tiers.length || count != eligibilityMasks.length)
+        if (count != packCounts.length || packIds.length != tiers.length)
             revert PackMachine__ArrayLengthMismatch();
         if (count > MAX_BATCH)
             revert PackMachine__BatchTooLarge(count, MAX_BATCH);
@@ -670,43 +686,47 @@ contract PackMachine is
         address assetNFT = $.assetNFT;
 
         IPackMachineFactory($.factory).beforeTransfer(assetNFT);
+        uint256 offset;
         for (uint256 i; i < count; ++i) {
-            uint8 tier = tiers[i];
-            if (tier >= NUM_TIERS) revert PackMachine__InvalidTier(tier);
             uint256 tokenId = tokenIds[i];
-            uint256 mask = eligibilityMasks[i];
-            if (mask == 0) revert PackMachine__NoEligibility(tokenId);
+            uint256 nPacks = packCounts[i];
+            if (nPacks == 0) revert PackMachine__ArrayLengthMismatch();
 
-            // Validate every set bit references an existing pack.
-            _validateMaskBits(mask, packCount, tokenId);
-
-            // Transfer first so storage changes only happen on success.
+            // Transfer NFT into custody first (CEI: external call before storage writes).
             IERC721(assetNFT).transferFrom(tokensOwner, address(this), tokenId);
-
-            // Machine-wide custody.
-            $.tierPools[tier].push(tokenId);
-            $.machinePoolIndex[tokenId] = $.tierPools[tier].length; // index+1
-            $.tokenTiers[tokenId] = tier;
             $.inCustody[tokenId] = true;
-            $.eligibility[tokenId] = mask;
 
-            // Per-pack pools.
-            _addToEligiblePacks($, tokenId, tier, mask);
+            // Register each (pack, tier) pair.
+            uint256 mask;
+            for (uint256 j; j < nPacks; ++j) {
+                uint256 p = packIds[offset + j];
+                uint8 t = tiers[offset + j];
+                if (p >= packCount) revert PackMachine__InvalidPackRef(tokenId);
+                if (t >= NUM_TIERS) revert PackMachine__InvalidTier(t);
+                if ((mask >> p) & 1 == 1)
+                    revert PackMachine__InvalidPackRef(tokenId); // duplicate pack
+                _validateFmvForPack(assetNFT, tokenId, p, t);
+                $.packTokenTier[tokenId][p] = t;
+                _addToPackPool($, tokenId, p, t);
+                mask |= uint256(1) << p;
+            }
+            $.eligibility[tokenId] = mask;
+            offset += nPacks;
         }
+        if (offset != packIds.length) revert PackMachine__ArrayLengthMismatch();
         IPackMachineFactory($.factory).afterTransfer(assetNFT);
 
         $.effectivePrizePoolSize += count;
-        $.totalInventory += count;
         emit CardsDeposited(_msgSender(), count);
     }
 
-    /// @notice Re-deposit NFTs from BuybackPool back into tier pools.
+    /// @notice Re-deposit NFTs from BuybackPool or AssetLendingPool back into pack pools.
     /// @dev Only callable by authorized pool depositors (BuybackPool or AssetLendingPool).
-    ///      Signature is intentionally unchanged from V1 (BuybackPool calls this without an
-    ///      eligibilityMasks param). The dormant `eligibility[tokenId]` mask retained from
-    ///      the token's previous win is used to restore it to all correct pack pools.
-    ///      Any set bits referencing packs added after the win are silently cleared.
-    ///      Does NOT update totalInventory.
+    ///      The dormant `eligibility[tokenId]` mask and `packTokenTier[tokenId][p]` records
+    ///      retained from the token's previous win are used to restore it to the correct
+    ///      per-(pack,tier) pools automatically. The `tiers` param provides a fallback tier
+    ///      for any pack whose dormant tier record was not set (e.g. first deposit via this path).
+    ///      Any mask bits referencing packs added after the win are silently cleared.
     function depositFromPool(
         uint256[] calldata tokenIds,
         uint8[] calldata tiers,
@@ -727,28 +747,36 @@ contract PackMachine is
 
         IPackMachineFactory($.factory).beforeTransfer(assetNFT);
         for (uint256 i; i < count; ++i) {
-            uint8 tier = tiers[i];
-            if (tier >= NUM_TIERS) revert PackMachine__InvalidTier(tier);
             uint256 tokenId = tokenIds[i];
-
-            IERC721(assetNFT).transferFrom(tokensOwner, address(this), tokenId);
-
-            // Restore machine-wide custody.
-            $.tierPools[tier].push(tokenId);
-            $.machinePoolIndex[tokenId] = $.tierPools[tier].length; // index+1
-            $.tokenTiers[tokenId] = tier;
-            $.inCustody[tokenId] = true;
-
-            // Restore per-pack pools using the dormant mask, clamped to current packCount.
-            // Clear any bits referencing packs that didn't exist when this token was won.
+            // Restore eligibility mask, clamped to current pack count.
             uint256 mask = $.eligibility[tokenId] & _validPackMask(packCount);
             if (mask == 0) {
-                // No eligible packs remain — default to pack 0 for backward-compat.
+                // No eligible packs remain — default to pack 0 with the supplied fallback tier.
                 mask = 1;
+                $.packTokenTier[tokenId][0] = tiers[i];
+            }
+
+            IERC721(assetNFT).transferFrom(tokensOwner, address(this), tokenId);
+            $.inCustody[tokenId] = true;
+            // eligibility mask is already set (dormant); no need to re-write.
+
+            // Re-add to each eligible pack, resolving tier from the dormant registry with fallback.
+            uint256 m = mask;
+            while (m != 0) {
+                uint256 p = _lsb(m);
+                uint8 t = $.packTokenTier[tokenId][p];
+                if (t == 0 && tiers[i] < NUM_TIERS) {
+                    // No dormant tier for this pack — use the supplied fallback and persist it.
+                    // (getTier returns 0 for unset AND for Base tier, so we only apply the
+                    // fallback when the token hasn't been placed in this pack before. For Base
+                    // tier (0) the dormant registry already returns 0 correctly — no override.)
+                    $.packTokenTier[tokenId][p] = tiers[i];
+                    t = tiers[i];
+                }
+                _addToPackPool($, tokenId, p, t);
+                m &= m - 1;
             }
             $.eligibility[tokenId] = mask;
-            _addToEligiblePacks($, tokenId, tier, mask);
-            // Intentionally does NOT increment totalInventory — re-deposits don't count as new inventory.
         }
         IPackMachineFactory($.factory).afterTransfer(assetNFT);
 
@@ -781,10 +809,6 @@ contract PackMachine is
             uint256 tokenId = tokenIds[i];
             if (!$.inCustody[tokenId])
                 revert PackMachine__TokenNotInPool(tokenId);
-            uint8 tier = $.tokenTiers[tokenId];
-
-            // Remove from machine-wide pool (O(1) via index map).
-            _removeFromMachinePool($, tier, tokenId);
 
             // Remove from every eligible pack pool.
             uint256 mask = $.eligibility[tokenId];
@@ -793,10 +817,19 @@ contract PackMachine is
             // Decrement per-pack available counters.
             _decrementAvailableForMask($, mask);
 
-            // Clear custody state — delete eligibility since token is leaving.
+            // Clear all custody state — token is leaving the machine entirely.
             $.inCustody[tokenId] = false;
             delete $.eligibility[tokenId];
-            delete $.tokenTiers[tokenId];
+
+            // Clear per-pack tier records so a future re-deposit starts clean.
+            {
+                uint256 m2 = mask;
+                while (m2 != 0) {
+                    uint256 p2 = _lsb(m2);
+                    delete $.packTokenTier[tokenId][p2];
+                    m2 &= m2 - 1;
+                }
+            }
 
             IERC721(assetNFT).transferFrom(address(this), recipient, tokenId);
         }
@@ -813,7 +846,7 @@ contract PackMachine is
     /// @notice Set the BuybackPool contract address (machine-wide).
     function setBuybackPool(
         address pool
-    ) external whenPaused onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
+    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
         if (pool == address(0)) revert PackMachine__ZeroAddress();
         PackMachineStorage storage $ = _getStorage();
         emit BuybackPoolUpdated($.buybackPool, pool);
@@ -828,17 +861,6 @@ contract PackMachine is
         if (depositor == address(0)) revert PackMachine__ZeroAddress();
         _getStorage().authorizedDepositors[depositor] = authorized;
         emit AuthorizedDepositorUpdated(depositor, authorized);
-    }
-
-    /// @notice Set the machine-wide retention threshold.
-    /// @param bps Sales are blocked when effectivePrizePoolSize/totalInventory < bps/10000. (0 = disabled).
-    function setRetentionThreshold(
-        uint16 bps
-    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
-        if (bps > WEIGHT_PRECISION) revert PackMachine__InvalidBps(bps);
-        PackMachineStorage storage $ = _getStorage();
-        emit RetentionThresholdUpdated($.retentionThresholdBps, bps);
-        $.retentionThresholdBps = bps;
     }
 
     function pause() external onlyProtocolRole(Roles.PAUSER_ROLE) {
@@ -875,106 +897,54 @@ contract PackMachine is
     // Views — pack (pass-throughs to PackRegistry)
     // =========================================================================
 
-    function getPackPrice(uint256 packId) external view returns (uint128) {
-        return _registry().getPackPrice(address(this), packId);
-    }
-
-    function getPackCardsPerPack(uint256 packId) external view returns (uint8) {
-        return _registry().getPackCardsPerPack(address(this), packId);
-    }
-
-    function getPackTierWeights(
+    function getPack(
         uint256 packId
-    ) external view returns (uint32[5] memory) {
-        return _registry().getPackTierWeights(address(this), packId);
-    }
-
-    function getPackBuybackAllocationBps(
-        uint256 packId
-    ) external view returns (uint16) {
-        return _registry().getPackBuybackAllocationBps(address(this), packId);
+    ) external view returns (PackTypes.Pack memory) {
+        return _registry().getPack(address(this), packId);
     }
 
     // =========================================================================
     // Views — machine-wide pool
     // =========================================================================
 
-    function effectivePrizePoolSize() external view returns (uint256) {
-        return _getStorage().effectivePrizePoolSize;
-    }
-
-    function getTierPoolSize(uint8 tier) external view returns (uint256) {
-        if (tier >= NUM_TIERS) revert PackMachine__InvalidTier(tier);
-        return _getStorage().tierPools[tier].length;
-    }
-
-    function getTierPool(uint8 tier) external view returns (uint256[] memory) {
-        if (tier >= NUM_TIERS) revert PackMachine__InvalidTier(tier);
-        return _getStorage().tierPools[tier];
-    }
-
-    function factory() external view returns (address) {
-        return _getStorage().factory;
-    }
-
-    function openNonce(address user) external view returns (uint256) {
-        return _getStorage().openNonces[user];
-    }
-
-    /// @notice Returns whether `wallet` has already claimed the global first-open discount
-    ///         on this machine (and it has not been reset by a full-failure refund).
-    function hasClaimedFirstOpenDiscount(
-        address wallet
-    ) external view returns (bool) {
-        return _getStorage().hasClaimedFirstOpenDiscount[wallet];
-    }
-
-    /// @notice Returns the price a wallet would pay to open `packId` right now, accounting
-    ///         for the global first-open discount if it applies to them.
-    ///         Use this off-chain to compute the Permit2 `amount` before signing.
-    function previewFirstOpenPrice(
-        address user,
-        uint256 packId
-    ) external view returns (uint256 escrowedAmount) {
+    /// @notice Returns all machine-wide config and pool state in one call.
+    function getMachineInfo()
+        external
+        view
+        returns (IPackMachine.MachineInfo memory)
+    {
         PackMachineStorage storage $ = _getStorage();
-        PackTypes.Pack memory pack = _registry().getPack(address(this), packId);
-        uint256 price = pack.pricePerPack;
-        IPackMachineFactory iFactory = IPackMachineFactory($.factory);
-        uint16 discountBps = 0;
-        if (
-            iFactory.firstOpenDiscountEnabled() &&
-            !$.hasClaimedFirstOpenDiscount[user]
-        ) {
-            discountBps = iFactory.firstOpenDiscountBps();
-        }
-        escrowedAmount = price - (price * discountBps) / WEIGHT_PRECISION;
-    }
-
-    function getBuybackPool() external view returns (address) {
-        return _getStorage().buybackPool;
-    }
-
-    function getRetentionThresholdBps() external view returns (uint16) {
-        return _getStorage().retentionThresholdBps;
-    }
-
-    function getTotalInventory() external view returns (uint256) {
-        return _getStorage().totalInventory;
-    }
-
-    function isCutOff() external view returns (bool) {
-        return _isCutOff(_getStorage());
-    }
-
-    /// @dev Returns true when the machine-wide retention threshold is breached.
-    ///      Zero guards: returns false if totalInventory or threshold are unset.
-    function _isCutOff(
-        PackMachineStorage storage $
-    ) private view returns (bool) {
-        if ($.totalInventory == 0 || $.retentionThresholdBps == 0) return false;
         return
-            $.effectivePrizePoolSize * WEIGHT_PRECISION <
-            $.totalInventory * uint256($.retentionThresholdBps);
+            IPackMachine.MachineInfo({
+                factory: $.factory,
+                buybackPool: $.buybackPool,
+                effectivePrizePoolSize: $.effectivePrizePoolSize
+            });
+    }
+
+    /// @notice Returns per-user nonce and first-open discount claim status in one call.
+    function getUserInfo(
+        address user
+    ) external view returns (IPackMachine.UserInfo memory) {
+        PackMachineStorage storage $ = _getStorage();
+        return
+            IPackMachine.UserInfo({
+                openNonce: $.openNonces[user],
+                claimedFirstOpenDiscount: $.hasClaimedFirstOpenDiscount[user]
+            });
+    }
+
+    /// @notice Returns the resolved tier for a token in a specific pack.
+    ///         Reverts if the token is not in custody or not eligible for the pack.
+    function getPackTokenTier(
+        uint256 tokenId,
+        uint256 packId
+    ) external view returns (uint8) {
+        PackMachineStorage storage $ = _getStorage();
+        if (!$.inCustody[tokenId]) revert PackMachine__TokenNotInPool(tokenId);
+        if ($.eligibility[tokenId] & (uint256(1) << packId) == 0)
+            revert PackMachine__InvalidPackRef(tokenId);
+        return $.packTokenTier[tokenId][packId];
     }
 
     // =========================================================================
@@ -1027,21 +997,13 @@ contract PackMachine is
         if (!pack.active) revert PackMachine__PackNotActive(packId);
         if (block.timestamp < pack.startTime) revert PackMachine__NotStarted();
 
-        // Per-pack availability check (Scheme B): ensures this pack has enough eligible
-        // cards in custody to fulfil the request. Under concurrent opens on overlapping
-        // packs a CardFailed is still possible at fulfillment (documented in NatSpec).
         uint256 available = $.availablePerPack[packId];
         if (available < pack.cardsPerPack) {
             revert PackMachine__InsufficientPool(available, pack.cardsPerPack);
         }
 
-        // Machine-wide cut-off: block sales if retained inventory < threshold.
-        if (_isCutOff($)) {
-            revert PackMachine__CutOff(
-                $.effectivePrizePoolSize,
-                $.totalInventory
-            );
-        }
+        if (pack.minCards != 0 && available < pack.minCards)
+            revert PackMachine__BelowMinCards(packId, available, pack.minCards);
     }
 
     function _verifySignature(
@@ -1052,8 +1014,6 @@ contract PackMachine is
         bytes calldata signature
     ) private {
         uint256 nonce = $.openNonces[user]++;
-        // codeId is bound into the digest so a leaked play-signature cannot be used to burn
-        // a user's oncePerUser discount on an unintended promo code (L004 fix).
         bytes32 digest = _hashTypedDataV4(
             keccak256(
                 abi.encode(OPEN_PACK_TYPEHASH, user, packId, nonce, codeId)
@@ -1105,8 +1065,6 @@ contract PackMachine is
         IPackMachineFactory iFactory = IPackMachineFactory($.factory);
         uint256 price = pack.pricePerPack;
 
-        // Resolve discount first; revert (not silent) if promo registry is unset with a non-zero code.
-        // Promo codes take priority — first-open discount is exclusive (not stacked) with them.
         uint16 discountBps = 0;
         if (codeId != bytes32(0)) {
             address promoReg = iFactory.promoCodeRegistry();
@@ -1120,15 +1078,12 @@ contract PackMachine is
             iFactory.firstOpenDiscountEnabled() &&
             !$.hasClaimedFirstOpenDiscount[user]
         ) {
-            // Apply the global first-open discount (automatic, no code required).
             discountBps = iFactory.firstOpenDiscountBps();
             $.hasClaimedFirstOpenDiscount[user] = true;
             firstOpenApplied = true;
         }
         escrowedAmount = price - (price * discountBps) / WEIGHT_PRECISION;
 
-        // Buyback allocation computed on the DISCOUNTED price so it is always <= escrowedAmount
-        // regardless of the discount applied. Finance wallet absorbs the discount proportionally.
         address pool = $.buybackPool;
         buybackAmount =
             pool != address(0)
@@ -1204,40 +1159,12 @@ contract PackMachine is
         $.totalEscrowed += escrowedAmount;
     }
 
-    /// @dev O(1) removal of tokenId from machine-wide tierPools using the stored index map.
-    function _removeFromMachinePool(
-        PackMachineStorage storage $,
-        uint256 tier,
-        uint256 tokenId
-    ) private {
-        uint256 idxPlus1 = $.machinePoolIndex[tokenId];
-        if (idxPlus1 == 0) return; // already absent
-        uint256 idx = idxPlus1 - 1;
-        uint256 last = $.tierPools[tier].length - 1;
-        if (idx != last) {
-            uint256 moved = $.tierPools[tier][last];
-            $.tierPools[tier][idx] = moved;
-            $.machinePoolIndex[moved] = idx + 1;
-        }
-        $.tierPools[tier].pop();
-        $.machinePoolIndex[tokenId] = 0;
-    }
-
-    /// @dev O(1) addition of tokenId to machine-wide pool (used on CardFailed re-add).
-    function _addToMachinePool(
-        PackMachineStorage storage $,
-        uint256 tier,
-        uint256 tokenId
-    ) private {
-        $.tierPools[tier].push(tokenId);
-        $.machinePoolIndex[tokenId] = $.tierPools[tier].length; // index+1
-    }
-
-    /// @dev Add tokenId to every pack pool indicated by mask. O(popcount(mask)).
+    /// @dev Add tokenId to every pack pool indicated by mask.
+    ///      Tier is resolved per-pack from the dormant packTokenTier map.
+    ///      O(popcount(mask)).
     function _addToEligiblePacks(
         PackMachineStorage storage $,
         uint256 tokenId,
-        uint256 tier,
         uint256 mask
     ) private {
         uint256 m = mask;
@@ -1245,23 +1172,24 @@ contract PackMachine is
             uint256 p = _lsb(m);
             // Guard against double-add.
             if ($.packPoolIndex[tokenId][p] == 0) {
-                _addToPackPool($, tokenId, p, tier);
+                _addToPackPool($, tokenId, p, $.packTokenTier[tokenId][p]);
             }
             m &= m - 1; // clear lowest set bit
         }
     }
 
-    /// @dev Remove tokenId from every pack pool indicated by mask. O(popcount(mask)).
+    /// @dev Remove tokenId from every pack pool indicated by mask.
+    ///      Tier is resolved per-pack from the PackTierRegistry.
+    ///      O(popcount(mask)).
     function _removeFromAllPacks(
         PackMachineStorage storage $,
         uint256 tokenId,
         uint256 mask
     ) private {
-        uint256 tier = $.tokenTiers[tokenId];
         uint256 m = mask;
         while (m != 0) {
             uint256 p = _lsb(m);
-            _removeFromPackPool($, tokenId, p, tier);
+            _removeFromPackPool($, tokenId, p, $.packTokenTier[tokenId][p]);
             m &= m - 1;
         }
     }
@@ -1353,6 +1281,24 @@ contract PackMachine is
             revert PackMachine__InvalidPackRef(tokenId);
     }
 
+    /// @dev Validate a single (token, pack, tier) triple against the pack's FMV bounds.
+    ///      A tier with (minFmv, maxFmv) == (0, 0) is "unset" and always reverts.
+    ///      Called per (pack, tier) pair at deposit / eligibility-setter time.
+    function _validateFmvForPack(
+        address assetNFT,
+        uint256 tokenId,
+        uint256 packId,
+        uint8 tier
+    ) private view {
+        uint256 fmv = IAssetNFT(assetNFT).getAppraisalValue(tokenId);
+        (uint128[6] memory minFmv, uint128[6] memory maxFmv) = _registry()
+            .getPackTierFmvBounds(address(this), packId);
+        // (0,0) means unset — reject the deposit.
+        if (maxFmv[tier] == 0) revert PackMachine__TierFmvUnset(packId, tier);
+        if (fmv < minFmv[tier] || fmv > maxFmv[tier])
+            revert PackMachine__FmvOutOfRange(tokenId, packId, tier, fmv);
+    }
+
     /// @dev Return the index (0-based) of the lowest set bit in x. x must be != 0.
     function _lsb(uint256 x) private pure returns (uint256 pos) {
         // Isolate lowest set bit then count trailing zeros.
@@ -1369,72 +1315,31 @@ contract PackMachine is
     // Admin — eligibility setters
     // =========================================================================
 
-    /// @notice Replace each token's full eligibility mask. Only valid for in-custody tokens.
-    ///         Diff-applies the change: tokens added to newly-set packs, removed from cleared packs.
-    /// @param tokenIds Array of in-custody token IDs (max 50).
-    /// @param masks    New eligibility bitmask per token. Must be non-zero.
-    function setTokenEligibility(
-        uint256[] calldata tokenIds,
-        uint256[] calldata masks
-    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
-        if (tokenIds.length != masks.length)
-            revert PackMachine__ArrayLengthMismatch();
-        if (tokenIds.length > MAX_BATCH)
-            revert PackMachine__BatchTooLarge(tokenIds.length, MAX_BATCH);
-
-        PackMachineStorage storage $ = _getStorage();
-        uint256 packCount = _registry().getPackCount(address(this));
-
-        for (uint256 i; i < tokenIds.length; ++i) {
-            uint256 tokenId = tokenIds[i];
-            if (!$.inCustody[tokenId])
-                revert PackMachine__TokenNotInCustody(tokenId);
-
-            uint256 newMask = masks[i];
-            if (newMask == 0) revert PackMachine__NoEligibility(tokenId);
-            _validateMaskBits(newMask, packCount, tokenId);
-
-            uint256 oldMask = $.eligibility[tokenId];
-            uint256 tier = $.tokenTiers[tokenId];
-
-            uint256 toAdd = newMask & ~oldMask;
-            uint256 toRemove = oldMask & ~newMask;
-
-            // Add to new packs.
-            _addToEligiblePacks($, tokenId, tier, toAdd);
-            // Remove from cleared packs (also decrements availablePerPack).
-            {
-                uint256 m = toRemove;
-                while (m != 0) {
-                    uint256 p = _lsb(m);
-                    _removeFromPackPool($, tokenId, p, tier);
-                    if ($.availablePerPack[p] > 0) $.availablePerPack[p]--;
-                    m &= m - 1;
-                }
-            }
-
-            $.eligibility[tokenId] = newMask;
-        }
-    }
-
     /// @notice Add or remove a single pack's eligibility for a batch of tokens.
-    ///         Idempotent: adding an already-eligible token or removing an absent one is a no-op.
-    ///         Primary use: `addPack(Pro)` → `setPackEligibility(proPackId, tokenIds, true)`.
+    ///         When adding, a tier must be supplied for each token (per-pack tier model).
+    ///         Idempotent on removal; on addition, re-specifying with a different tier re-slots
+    ///         the token.
+    ///         Primary use: `addPack(Elite)` → `setPackEligibility(elitePackId, tokenIds, tiers, true)`.
     /// @param packId   Target pack index (must be < current pack count).
     /// @param tokenIds In-custody token IDs to update (max 50).
+    /// @param tiers    Tier per token in this pack (ignored when eligible=false).
     /// @param eligible True to add eligibility, false to remove.
     function setPackEligibility(
         uint256 packId,
         uint256[] calldata tokenIds,
+        uint8[] calldata tiers,
         bool eligible
     ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
         if (tokenIds.length > MAX_BATCH)
             revert PackMachine__BatchTooLarge(tokenIds.length, MAX_BATCH);
+        if (eligible && tokenIds.length != tiers.length)
+            revert PackMachine__ArrayLengthMismatch();
 
         PackMachineStorage storage $ = _getStorage();
         uint256 packCount = _registry().getPackCount(address(this));
         if (packId >= packCount) revert PackMachine__InvalidPackRef(packId);
 
+        address assetNFT = $.assetNFT;
         uint256 bit = uint256(1) << packId;
 
         for (uint256 i; i < tokenIds.length; ++i) {
@@ -1442,19 +1347,31 @@ contract PackMachine is
             if (!$.inCustody[tokenId])
                 revert PackMachine__TokenNotInCustody(tokenId);
 
-            uint256 tier = $.tokenTiers[tokenId];
             uint256 oldMask = $.eligibility[tokenId];
 
             if (eligible) {
-                if (oldMask & bit != 0) continue; // already eligible — no-op
-                $.eligibility[tokenId] = oldMask | bit;
-                // Add to pack pool (also increments availablePerPack).
-                _addToPackPool($, tokenId, packId, tier);
+                uint8 t = tiers[i];
+                if (t >= NUM_TIERS) revert PackMachine__InvalidTier(t);
+                _validateFmvForPack(assetNFT, tokenId, packId, t);
+                if (oldMask & bit != 0) {
+                    // Already eligible — re-slot if tier changed.
+                    uint8 oldTier = $.packTokenTier[tokenId][packId];
+                    if (oldTier != t) {
+                        _removeFromPackPool($, tokenId, packId, oldTier);
+                        _addToPackPool($, tokenId, packId, t);
+                        $.packTokenTier[tokenId][packId] = t;
+                    }
+                } else {
+                    $.eligibility[tokenId] = oldMask | bit;
+                    $.packTokenTier[tokenId][packId] = t;
+                    _addToPackPool($, tokenId, packId, t);
+                }
             } else {
                 if (oldMask & bit == 0) continue; // already absent — no-op
+                uint8 oldTier = $.packTokenTier[tokenId][packId];
                 $.eligibility[tokenId] = oldMask & ~bit;
-                // Remove from pack pool.
-                _removeFromPackPool($, tokenId, packId, tier);
+                _removeFromPackPool($, tokenId, packId, oldTier);
+                delete $.packTokenTier[tokenId][packId];
                 if ($.availablePerPack[packId] > 0)
                     $.availablePerPack[packId]--;
             }
@@ -1492,25 +1409,6 @@ contract PackMachine is
         return _getStorage().packTierPools[packId][tier].length;
     }
 
-    /// @notice Full list of in-custody tokenIds eligible for packId in a given tier.
-    function getPackTierPool(
-        uint256 packId,
-        uint8 tier
-    ) external view returns (uint256[] memory) {
-        if (tier >= NUM_TIERS) revert PackMachine__InvalidTier(tier);
-        return _getStorage().packTierPools[packId][tier];
-    }
-
-    /// @notice Total in-custody tokens eligible for packId (sum across all tiers).
-    function getPackPoolSize(
-        uint256 packId
-    ) external view returns (uint256 total) {
-        PackMachineStorage storage $ = _getStorage();
-        for (uint256 t; t < NUM_TIERS; ++t) {
-            total += $.packTierPools[packId][t].length;
-        }
-    }
-
     /// @notice Available counter for packId (eligible tokens minus pending reservations).
     function getPackAvailable(uint256 packId) external view returns (uint256) {
         return _getStorage().availablePerPack[packId];
@@ -1525,8 +1423,12 @@ contract PackMachine is
     // Admin escape hatch (updated for new pools)
     // =========================================================================
 
-    /// @notice Resets effectivePrizePoolSize to actual machine-wide pool length.
-    ///         Also resets availablePerPack for all packs to actual per-pack pool sizes.
+    /// @notice Resets availablePerPack for all packs to actual per-pack pool sizes, and
+    ///         resets effectivePrizePoolSize to the sum of all per-pack pool sizes.
+    ///         Note: if tokens are eligible for multiple packs, effectivePrizePoolSize will
+    ///         over-count (each token counted once per eligible pack). This is a conservative
+    ///         estimate — it prevents the withdrawal guard from blocking valid withdrawals.
+    ///         The primary open-gate guard is per-pack availablePerPack, which is exact.
     ///         Requires the machine to be paused.
     function resetEffectivePrizePoolSize()
         external
@@ -1535,21 +1437,20 @@ contract PackMachine is
         if (!paused()) revert PackMachine__NotPaused();
         PackMachineStorage storage $ = _getStorage();
 
-        // Recompute machine-wide size.
-        uint256 total;
-        for (uint256 t; t < NUM_TIERS; ++t) {
-            total += $.tierPools[t].length;
-        }
-        $.effectivePrizePoolSize = total;
-
         // Recompute per-pack available from pool sizes (no pending reservations while paused).
         uint256 packCount = _registry().getPackCount(address(this));
+        uint256 machineTotal;
         for (uint256 p; p < packCount; ++p) {
             uint256 packTotal;
             for (uint256 t; t < NUM_TIERS; ++t) {
                 packTotal += $.packTierPools[p][t].length;
             }
             $.availablePerPack[p] = packTotal;
+            machineTotal += packTotal;
         }
+        // Use the pack-0 pool size as the machine-wide counter when there is only one pack,
+        // otherwise fall back to the summed total (conservative over-count for multi-pack tokens).
+        $.effectivePrizePoolSize =
+            packCount == 1 ? $.availablePerPack[0] : machineTotal;
     }
 }

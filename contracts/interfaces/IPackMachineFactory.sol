@@ -23,6 +23,7 @@ interface IPackMachineFactory {
     function buybackPool() external view returns (address);
     function promoCodeRegistry() external view returns (address);
     function packRegistry() external view returns (address);
+    function packTierRegistry() external view returns (address);
     function getAllPackMachines() external view returns (address[] memory);
     function firstOpenDiscountEnabled() external view returns (bool);
     function firstOpenDiscountBps() external view returns (uint16);

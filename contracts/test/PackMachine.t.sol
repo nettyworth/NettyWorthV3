@@ -7,6 +7,7 @@ import {PackMachine} from "../PackMachine.sol";
 import {PackMachineFactory} from "../PackMachineFactory.sol";
 import {PackVRFRouter} from "../PackVRFRouter.sol";
 import {PackRegistry} from "../PackRegistry.sol";
+import {PackTierRegistry} from "../PackTierRegistry.sol";
 import {PermissionManager} from "../PermissionManager.sol";
 import {PermissionConsumer} from "../PermissionConsumer.sol";
 import {Roles} from "../lib/Roles.sol";
@@ -22,6 +23,7 @@ contract PackMachineTest is Test {
     PackMachineFactory internal factory;
     PackVRFRouter internal vrfRouter;
     PackRegistry internal packRegistry;
+    PackTierRegistry internal packTierRegistry;
     PermissionManager internal pm;
     MockERC20 internal usdc;
     AssetNFT internal assetNFT;
@@ -145,6 +147,15 @@ contract PackMachineTest is Test {
         vm.startPrank(admin);
         factory.setPackRegistry(address(packRegistry));
         packRegistry.setFactory(address(factory));
+
+        PackTierRegistry tierRegistryImpl = new PackTierRegistry();
+        ERC1967Proxy tierRegistryProxy = new ERC1967Proxy(
+            address(tierRegistryImpl),
+            abi.encodeCall(PackTierRegistry.initialize, (address(pm)))
+        );
+        packTierRegistry = PackTierRegistry(address(tierRegistryProxy));
+        factory.setPackTierRegistry(address(packTierRegistry));
+        packTierRegistry.setFactory(address(factory));
         vm.stopPrank();
 
         // Create the PackMachine clone
@@ -178,7 +189,60 @@ contract PackMachineTest is Test {
     // Helpers
     // =========================================================================
 
-    /// @dev Deposits `count` NFTs into packMachine, all in tier 0 (Base).
+    /// @dev Builds 2D packIds and tiers arrays for deposit: each token goes into a single pack
+    ///      at the given tier. Used by helpers that want to call deposit() with the new API.
+    /// @dev Flat-encodes deposit data: each token goes into pack 0 with its flat tier.
+    ///      Returns (packCounts, packIds, tiers) for the 5-arg deposit signature.
+    function _flatEncode(
+        uint256 count,
+        uint8[] memory tiers
+    )
+        internal
+        pure
+        returns (uint256[] memory packCounts, uint256[] memory packIds, uint8[] memory flatTiers)
+    {
+        packCounts = new uint256[](count);
+        packIds = new uint256[](count);
+        flatTiers = new uint8[](count);
+        for (uint256 i; i < count; ++i) {
+            packCounts[i] = 1;
+            // packIds[i] = 0 (default)
+            flatTiers[i] = tiers[i];
+        }
+    }
+
+    /// @dev Flat-encodes deposit data for multi-pack tokens decoded from eligibility masks.
+    ///      All eligible packs use the same tier for that token.
+    function _flatEncodeFromMasks(
+        uint256 count,
+        uint256[] memory masks,
+        uint8[] memory tiers
+    )
+        internal
+        pure
+        returns (uint256[] memory packCounts, uint256[] memory packIds, uint8[] memory flatTiers)
+    {
+        uint256 total;
+        for (uint256 i; i < count; ++i) { uint256 tmp = masks[i]; while (tmp != 0) { total++; tmp &= tmp - 1; } }
+        packCounts = new uint256[](count);
+        packIds = new uint256[](total);
+        flatTiers = new uint8[](total);
+        uint256 offset;
+        for (uint256 i; i < count; ++i) {
+            uint256 bits;
+            uint256 mm = masks[i];
+            while (mm != 0) {
+                uint256 lsb; uint256 b = mm & (~mm + 1); while (b > 1) { b >>= 1; ++lsb; }
+                packIds[offset + bits] = lsb;
+                flatTiers[offset + bits] = tiers[i];
+                bits++; mm &= mm - 1;
+            }
+            packCounts[i] = bits;
+            offset += bits;
+        }
+    }
+
+    /// @dev Deposits `count` NFTs into packMachine, all in tier 0 (Base), eligible for pack 0.
     function _depositNFTs(
         uint256 count
     ) internal returns (uint256[] memory tokenIds) {
@@ -186,7 +250,6 @@ contract PackMachineTest is Test {
         uint256 startId = assetNFT.totalSupply() + 1;
         address[] memory recipients = new address[](count);
         string[] memory uris = new string[](count);
-        uint8[] memory tiers = new uint8[](count); // all Base = 0
         for (uint256 i; i < count; i++) {
             recipients[i] = operator;
             uris[i] = "";
@@ -194,10 +257,10 @@ contract PackMachineTest is Test {
         }
         vm.prank(operator);
         assetNFT.batchMint(recipients, uris);
-        uint256[] memory masks = _defaultMasks(count);
+        (uint256[] memory pcs, uint256[] memory pids, uint8[] memory trs) = _flatEncode(count, new uint8[](count));
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(tokenIds, tiers, masks, operator);
+        packMachine.deposit(tokenIds, pcs, pids, trs, operator);
         vm.stopPrank();
     }
 
@@ -217,14 +280,15 @@ contract PackMachineTest is Test {
         }
         vm.prank(operator);
         assetNFT.batchMint(recipients, uris);
-        uint256[] memory masks = _defaultMasks(count);
+        (uint256[] memory pcs, uint256[] memory pids, uint8[] memory trs) = _flatEncode(count, tiers);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(tokenIds, tiers, masks, operator);
+        packMachine.deposit(tokenIds, pcs, pids, trs, operator);
         vm.stopPrank();
     }
 
     /// @dev Returns an array of `count` eligibility masks all set to pack 0 (bit 0 = 1).
+    ///      Kept for test assertions that check eligibility; no longer used for deposit.
     function _defaultMasks(uint256 count) internal pure returns (uint256[] memory masks) {
         masks = new uint256[](count);
         for (uint256 i; i < count; ++i) masks[i] = 1;
@@ -321,7 +385,6 @@ contract PackMachineTest is Test {
         uint256 startId = assetNFT.totalSupply() + 1;
         address[] memory recipients = new address[](count);
         string[] memory uris = new string[](count);
-        uint8[] memory tiers = new uint8[](count); // all Base = 0
         for (uint256 i; i < count; i++) {
             recipients[i] = operator;
             uris[i] = "";
@@ -331,19 +394,19 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         // Ensure FMV bounds are set for pack 0 of this machine.
         _setWideOpenFmvBounds(address(machine), 0);
-        uint256[] memory masks = _defaultMasks(count);
+        (uint256[] memory pcs, uint256[] memory pids, uint8[] memory trs) = _flatEncode(count, new uint8[](count));
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(machine), true);
-        machine.deposit(tokenIds, tiers, masks, operator);
+        machine.deposit(tokenIds, pcs, pids, trs, operator);
         vm.stopPrank();
     }
 
-    /// @dev Sum of all tier pool lengths.
+    /// @dev Sum of all tier pool lengths for pack 0 (used in assertions that check pool size).
     function _getTotalPoolLength(
         PackMachine machine
     ) internal view returns (uint256 total) {
         for (uint8 t = 0; t < 6; t++) {
-            total += machine.getTierPoolSize(t);
+            total += machine.getPackTierPoolSize(0, t);
         }
     }
 
@@ -463,7 +526,7 @@ contract PackMachineTest is Test {
     function test_Deposit_IncreasesPoolAndEffectiveSize() public {
         _depositNFTs(5);
         // All tokens deposited to tier 0 (Base)
-        assertEq(packMachine.getTierPoolSize(0), 5);
+        assertEq(packMachine.getPackTierPoolSize(0,0), 5);
         assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 5);
     }
 
@@ -489,15 +552,15 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
-        assertEq(packMachine.getTierPoolSize(0), 2); // Base
-        assertEq(packMachine.getTierPoolSize(1), 2); // Common
-        assertEq(packMachine.getTierPoolSize(2), 0); // Uncommon
-        assertEq(packMachine.getTierPoolSize(3), 1); // Rare
-        assertEq(packMachine.getTierPoolSize(4), 0); // Ultra Rare
-        assertEq(packMachine.getTierPoolSize(5), 0); // Grail
+        assertEq(packMachine.getPackTierPoolSize(0,0), 2); // Base
+        assertEq(packMachine.getPackTierPoolSize(0,1), 2); // Common
+        assertEq(packMachine.getPackTierPoolSize(0,2), 0); // Uncommon
+        assertEq(packMachine.getPackTierPoolSize(0,3), 1); // Rare
+        assertEq(packMachine.getPackTierPoolSize(0,4), 0); // Ultra Rare
+        assertEq(packMachine.getPackTierPoolSize(0,5), 0); // Grail
         assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 5);
     }
 
@@ -520,7 +583,7 @@ contract PackMachineTest is Test {
         assetNFT.setApprovalForAll(address(packMachine), true);
         vm.expectEmit(true, false, false, true, address(packMachine));
         emit CardsDeposited(operator, 2);
-        packMachine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
     }
 
@@ -539,15 +602,18 @@ contract PackMachineTest is Test {
                 50
             )
         );
-        packMachine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
     }
 
     function test_Deposit_ArrayLengthMismatchReverts() public {
+        // tokenIds has 3 entries but packCounts has only 2 → mismatch
         uint256[] memory ids = new uint256[](3);
-        uint8[] memory tiers = new uint8[](2); // mismatched
+        uint256[] memory pcs = new uint256[](2); // mismatched vs ids
+        uint256[] memory pids = new uint256[](2);
+        uint8[] memory trs = new uint8[](2);
         vm.prank(operator);
         vm.expectRevert(PackMachine.PackMachine__ArrayLengthMismatch.selector);
-        packMachine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        packMachine.deposit(ids, pcs, pids, trs, operator);
     }
 
     function test_Deposit_InvalidTierReverts() public {
@@ -570,7 +636,7 @@ contract PackMachineTest is Test {
                 uint8(6)
             )
         );
-        packMachine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
     }
 
@@ -580,14 +646,14 @@ contract PackMachineTest is Test {
         ids[0] = 1;
         vm.prank(unauthorized);
         vm.expectRevert();
-        packMachine.deposit(ids, tiers, _defaultMasks(ids.length), unauthorized);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, unauthorized); }
     }
 
     function test_Deposit_EmptyArrayNoOp() public {
         uint256[] memory ids = new uint256[](0);
         uint8[] memory tiers = new uint8[](0);
         vm.prank(operator);
-        packMachine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 0);
     }
 
@@ -622,9 +688,9 @@ contract PackMachineTest is Test {
         mockLendingPool.setAppraisalValue(startId, 50e6);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(ids, tiers, _defaultMasks(1), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(1, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
-        assertEq(packMachine.getTierPoolSize(0), 1);
+        assertEq(packMachine.getPackTierPoolSize(0,0), 1);
     }
 
     function test_FmvBounds_BelowMinReverts() public {
@@ -657,7 +723,7 @@ contract PackMachineTest is Test {
                 startId, uint256(0), uint8(0), uint256(5e6)
             )
         );
-        packMachine.deposit(ids, tiers, _defaultMasks(1), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(1, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
     }
 
@@ -691,7 +757,7 @@ contract PackMachineTest is Test {
                 startId, uint256(0), uint8(0), uint256(200e6)
             )
         );
-        packMachine.deposit(ids, tiers, _defaultMasks(1), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(1, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
     }
 
@@ -723,7 +789,7 @@ contract PackMachineTest is Test {
                 uint256(0), uint8(0)
             )
         );
-        packMachine.deposit(ids, tiers, _defaultMasks(1), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(1, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
     }
 
@@ -766,7 +832,7 @@ contract PackMachineTest is Test {
                 startId, uint256(1), uint8(0), uint256(5e6)
             )
         );
-        packMachine.deposit(ids, tiers, masks, operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncodeFromMasks(ids.length, masks, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
     }
 
@@ -795,9 +861,9 @@ contract PackMachineTest is Test {
         mockLendingPool.setAppraisalValue(startId, 95e6); // in range → initial deposit OK
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(ids, tiers, _defaultMasks(1), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(1, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
-        assertEq(packMachine.getTierPoolSize(0), 1);
+        assertEq(packMachine.getPackTierPoolSize(0,0), 1);
 
         // Now simulate the card being "won" (transfer out) and appraisal dropping below min.
         // Register a mock buyback pool depositor and call depositFromPool with FMV below bounds.
@@ -1051,7 +1117,7 @@ contract PackMachineTest is Test {
         _setWideOpenFmvBounds(futureClone, 0);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(futureClone, true);
-        futureMachine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); futureMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         usdc.mint(user, PRICE);
@@ -1405,7 +1471,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         usdc.mint(user, PRICE);
@@ -1418,9 +1484,9 @@ contract PackMachineTest is Test {
 
         // All cards should have been drawn from Rare tier
         assertEq(assetNFT.balanceOf(user), CARDS_PER_PACK);
-        assertEq(packMachine.getTierPoolSize(3), 0);
+        assertEq(packMachine.getPackTierPoolSize(0,3), 0);
         // Other tiers remain empty
-        assertEq(packMachine.getTierPoolSize(0), 0);
+        assertEq(packMachine.getPackTierPoolSize(0,0), 0);
     }
 
     function test_FulfillRandomness_WonCardCannotBeWonByAnotherUser() public {
@@ -1444,7 +1510,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(machine), true);
-        machine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); machine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         uint256 cardX = ids[0];
@@ -1470,12 +1536,11 @@ contract PackMachineTest is Test {
 
         // Verify A received cardX.
         assertEq(assetNFT.ownerOf(cardX), user, "user A must own cardX");
-        assertEq(machine.getTierPoolSize(0), 1, "one card must remain in Base pool");
+        assertEq(machine.getPackTierPoolSize(0,0), 1, "one card must remain in Base pool");
 
-        // cardX must no longer appear in the pool (swap-and-pop placed cardY at index 0).
-        uint256[] memory remaining = machine.getTierPool(0);
-        assertEq(remaining.length, 1, "pool must have exactly 1 card");
-        assertTrue(remaining[0] != cardX, "cardX must not be in pool after A wins it");
+        // cardX must no longer be in custody (swap-and-pop removed it from all pools).
+        assertFalse(machine.isInCustody(cardX), "cardX must not be in custody after A wins it");
+        assertTrue(machine.isInCustody(cardY), "cardY must still be in custody");
 
         // --- User B opens pack, requestId = 2 ---
         // Use the same word structure (Base, index 0) — deliberately targeting the
@@ -1493,7 +1558,7 @@ contract PackMachineTest is Test {
         assertEq(assetNFT.ownerOf(cardY), user2, "user B must own cardY");
         assertEq(assetNFT.balanceOf(user), 1, "user A balance must be 1");
         assertEq(assetNFT.balanceOf(user2), 1, "user B balance must be 1");
-        assertEq(machine.getTierPoolSize(0), 0, "Base pool must be empty");
+        assertEq(machine.getPackTierPoolSize(0,0), 0, "Base pool must be empty");
     }
 
     // =========================================================================
@@ -1545,7 +1610,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients3, uris3);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(machine), true);
-        machine.deposit(ids, tiers3, _defaultMasks(3), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(3, tiers3); machine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         // User 1 opens — requestId 1 (reserves 2 of 3 cards).
@@ -1753,7 +1818,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         vm.prank(pauser);
@@ -1767,9 +1832,9 @@ contract PackMachineTest is Test {
         vm.prank(operator);
         packMachine.withdrawCards(toWithdraw);
 
-        assertEq(packMachine.getTierPoolSize(0), 1); // 1 Base remaining
-        assertEq(packMachine.getTierPoolSize(1), 1); // Common untouched
-        assertEq(packMachine.getTierPoolSize(3), 0); // Rare withdrawn
+        assertEq(packMachine.getPackTierPoolSize(0,0), 1); // 1 Base remaining
+        assertEq(packMachine.getPackTierPoolSize(0,1), 1); // Common untouched
+        assertEq(packMachine.getPackTierPoolSize(0,3), 0); // Rare withdrawn
         assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 2);
     }
 
@@ -1941,41 +2006,34 @@ contract PackMachineTest is Test {
     }
 
     // =========================================================================
-    // getTierPool / getTierPoolSize view guards
+    // getPackTokenTier / getPackTierPoolSize view guards
     // =========================================================================
 
-    function test_GetTierPoolSize_InvalidTierReverts() public {
+    function test_GetPackTierPoolSize_InvalidTierReverts() public {
         vm.expectRevert(
             abi.encodeWithSelector(
                 PackMachine.PackMachine__InvalidTier.selector,
                 uint8(6)
             )
         );
-        packMachine.getTierPoolSize(6);
+        packMachine.getPackTierPoolSize(0, 6);
     }
 
-    function test_GetTierPool_InvalidTierReverts() public {
+    function test_GetPackTokenTier_NotInCustodyReverts() public {
         vm.expectRevert(
             abi.encodeWithSelector(
-                PackMachine.PackMachine__InvalidTier.selector,
-                uint8(6)
+                PackMachine.PackMachine__TokenNotInPool.selector,
+                uint256(999)
             )
         );
-        packMachine.getTierPool(6);
+        packMachine.getPackTokenTier(999, 0);
     }
 
-    function test_GetTierPool_ReturnsCorrectTokens() public {
-        uint256[] memory ids = _depositNFTs(3);
-        uint256[] memory pool = packMachine.getTierPool(0);
-        assertEq(pool.length, 3);
-        // All three IDs should be present (order may vary)
-        bool[3] memory found;
-        for (uint256 i; i < pool.length; i++) {
-            for (uint256 j; j < ids.length; j++) {
-                if (pool[i] == ids[j]) found[j] = true;
-            }
-        }
-        assertTrue(found[0] && found[1] && found[2]);
+    function test_GetPackTokenTier_ReturnsCorrectTier() public {
+        uint8[] memory tiers = new uint8[](1);
+        tiers[0] = 3; // Rare
+        uint256[] memory ids = _depositNFTsWithTiers(1, tiers);
+        assertEq(packMachine.getPackTokenTier(ids[0], 0), 3);
     }
 
     // =========================================================================
@@ -2052,7 +2110,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 9);
@@ -2218,7 +2276,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(machine), true);
-        machine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); machine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         usdc.mint(user, PRICE);
@@ -2238,10 +2296,10 @@ contract PackMachineTest is Test {
 
         // User receives the Base card (ids[0])
         assertEq(assetNFT.ownerOf(ids[0]), user, "Base card not received");
-        assertEq(machine.getTierPoolSize(0), 0, "Base pool not empty");
+        assertEq(machine.getPackTierPoolSize(0,0), 0, "Base pool not empty");
         // Other tiers untouched
-        assertEq(machine.getTierPoolSize(1), 1);
-        assertEq(machine.getTierPoolSize(4), 1);
+        assertEq(machine.getPackTierPoolSize(0,1), 1);
+        assertEq(machine.getPackTierPoolSize(0,4), 1);
     }
 
     function test_TierSelection_CommonCard() public {
@@ -2262,7 +2320,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(machine), true);
-        machine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); machine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         usdc.mint(user, PRICE);
@@ -2281,7 +2339,7 @@ contract PackMachineTest is Test {
         coordinator.fulfillRandomWords(address(vrfRouter), 1, words);
 
         assertEq(assetNFT.ownerOf(ids[1]), user, "Common card not received");
-        assertEq(machine.getTierPoolSize(1), 0, "Common pool not empty");
+        assertEq(machine.getPackTierPoolSize(0,1), 0, "Common pool not empty");
     }
 
     function test_TierSelection_UncommonCard() public {
@@ -2302,7 +2360,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(machine), true);
-        machine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); machine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         usdc.mint(user, PRICE);
@@ -2321,7 +2379,7 @@ contract PackMachineTest is Test {
         coordinator.fulfillRandomWords(address(vrfRouter), 1, words);
 
         assertEq(assetNFT.ownerOf(ids[2]), user, "Uncommon card not received");
-        assertEq(machine.getTierPoolSize(2), 0, "Uncommon pool not empty");
+        assertEq(machine.getPackTierPoolSize(0,2), 0, "Uncommon pool not empty");
     }
 
     function test_TierSelection_RareCard() public {
@@ -2342,7 +2400,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(machine), true);
-        machine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); machine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         usdc.mint(user, PRICE);
@@ -2361,7 +2419,7 @@ contract PackMachineTest is Test {
         coordinator.fulfillRandomWords(address(vrfRouter), 1, words);
 
         assertEq(assetNFT.ownerOf(ids[3]), user, "Rare card not received");
-        assertEq(machine.getTierPoolSize(3), 0, "Rare pool not empty");
+        assertEq(machine.getPackTierPoolSize(0,3), 0, "Rare pool not empty");
     }
 
     function test_TierSelection_UltraCard() public {
@@ -2382,7 +2440,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(machine), true);
-        machine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); machine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         usdc.mint(user, PRICE);
@@ -2401,7 +2459,7 @@ contract PackMachineTest is Test {
         coordinator.fulfillRandomWords(address(vrfRouter), 1, words);
 
         assertEq(assetNFT.ownerOf(ids[4]), user, "Ultra Rare card not received");
-        assertEq(machine.getTierPoolSize(4), 0, "Ultra Rare pool not empty");
+        assertEq(machine.getPackTierPoolSize(0,4), 0, "Ultra Rare pool not empty");
     }
 
     function test_TierSelection_BoundaryBase_JustBelowCommon() public {
@@ -2425,7 +2483,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(machine), true);
-        machine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); machine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         usdc.mint(user, PRICE);
@@ -2470,7 +2528,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(machine), true);
-        machine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); machine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         usdc.mint(user, PRICE);
@@ -2520,7 +2578,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(machine), true);
-        machine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); machine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         usdc.mint(user, PRICE);
@@ -2566,7 +2624,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(machine), true);
-        machine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); machine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         usdc.mint(user, PRICE);
@@ -2619,7 +2677,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         usdc.mint(user, PRICE);
@@ -2638,12 +2696,12 @@ contract PackMachineTest is Test {
 
         assertEq(assetNFT.balanceOf(user), 3);
         assertEq(
-            packMachine.getTierPoolSize(0),
+            packMachine.getPackTierPoolSize(0,0),
             0,
             "Base pool should be empty"
         );
         assertEq(
-            packMachine.getTierPoolSize(3),
+            packMachine.getPackTierPoolSize(0,3),
             0,
             "Rare pool should be empty"
         );
@@ -2671,7 +2729,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
 
         usdc.mint(user, PRICE);
@@ -2690,7 +2748,7 @@ contract PackMachineTest is Test {
         coordinator.fulfillRandomWords(address(vrfRouter), 1, words);
 
         assertEq(
-            packMachine.getTierPoolSize(3),
+            packMachine.getPackTierPoolSize(0,3),
             0,
             "All Rare cards should be drawn"
         );
@@ -2738,7 +2796,7 @@ contract PackMachineTest is Test {
         assetNFT.batchMint(recipients, uris);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(ids, tiers, _defaultMasks(ids.length), operator);
+        { (uint256[] memory _pcs, uint256[] memory _pids, uint8[] memory _trs) = _flatEncode(ids.length, tiers); packMachine.deposit(ids, _pcs, _pids, _trs, operator); }
         vm.stopPrank();
         assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, count);
     }

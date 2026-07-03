@@ -7,6 +7,7 @@ import {PackMachine} from "../PackMachine.sol";
 import {PackMachineFactory} from "../PackMachineFactory.sol";
 import {PackVRFRouter} from "../PackVRFRouter.sol";
 import {PackRegistry} from "../PackRegistry.sol";
+import {PackTierRegistry} from "../PackTierRegistry.sol";
 import {BuybackPool} from "../BuybackPool.sol";
 import {PermissionManager} from "../PermissionManager.sol";
 import {Roles} from "../lib/Roles.sol";
@@ -21,6 +22,7 @@ contract BuybackPoolTest is Test {
     PackMachineFactory internal factory;
     PackVRFRouter internal vrfRouter;
     PackRegistry internal packRegistry;
+    PackTierRegistry internal packTierRegistry;
     BuybackPool internal pool;
     PermissionManager internal pm;
     MockERC20 internal usdc;
@@ -138,6 +140,15 @@ contract BuybackPoolTest is Test {
         vm.startPrank(admin);
         factory.setPackRegistry(address(packRegistry));
         packRegistry.setFactory(address(factory));
+
+        PackTierRegistry tierRegistryImpl = new PackTierRegistry();
+        ERC1967Proxy tierRegistryProxy = new ERC1967Proxy(
+            address(tierRegistryImpl),
+            abi.encodeCall(PackTierRegistry.initialize, (address(pm)))
+        );
+        packTierRegistry = PackTierRegistry(address(tierRegistryProxy));
+        factory.setPackTierRegistry(address(packTierRegistry));
+        packTierRegistry.setFactory(address(factory));
         vm.stopPrank();
 
         vm.prank(operator);
@@ -214,11 +225,13 @@ contract BuybackPoolTest is Test {
         }
         vm.prank(operator);
         assetNFT.batchMint(recipients, uris);
-        uint256[] memory masks = new uint256[](count);
-        for (uint256 i; i < count; i++) masks[i] = 1;
+        uint256[] memory _pcs = new uint256[](count);
+        uint256[] memory _pids = new uint256[](count);
+        uint8[] memory _trs = new uint8[](count);
+        for (uint256 i; i < count; i++) { _pcs[i] = 1; _trs[i] = tiers[i]; }
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(tokenIds, tiers, masks, operator);
+        packMachine.deposit(tokenIds, _pcs, _pids, _trs, operator);
         vm.stopPrank();
     }
 

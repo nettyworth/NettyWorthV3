@@ -186,6 +186,28 @@ describe("PackMachine Integration", async function () {
       account: walletAdmin.account,
     });
 
+    // PackTierRegistry (UUPS proxy) — stores per-(machine, token, pack) tier data
+    const tierRegistryImpl = await viem.deployContract("PackTierRegistry");
+    const tierRegistryInitData = encodeFunctionData({
+      abi: tierRegistryImpl.abi,
+      functionName: "initialize",
+      args: [permissionManager.address],
+    });
+    const tierRegistryProxy = await viem.deployContract("ERC1967ProxyHelper", [
+      tierRegistryImpl.address,
+      tierRegistryInitData,
+    ]);
+    const packTierRegistry = await viem.getContractAt(
+      "PackTierRegistry",
+      tierRegistryProxy.address,
+    );
+    await factory.write.setPackTierRegistry([packTierRegistry.address], {
+      account: walletAdmin.account,
+    });
+    await packTierRegistry.write.setFactory([factory.address], {
+      account: walletAdmin.account,
+    });
+
     // Create a PackMachine clone
     const startBlock = await publicClient.getBlockNumber();
     await factory.write.createPackMachine(
@@ -222,7 +244,14 @@ describe("PackMachine Integration", async function () {
     // unappraised tokens (FMV=0) work in existing tests.
     const MAX_UINT128 = (1n << 128n) - 1n;
     const minFmv = [0n, 0n, 0n, 0n, 0n, 0n] as const;
-    const maxFmv = [MAX_UINT128, MAX_UINT128, MAX_UINT128, MAX_UINT128, MAX_UINT128, MAX_UINT128] as const;
+    const maxFmv = [
+      MAX_UINT128,
+      MAX_UINT128,
+      MAX_UINT128,
+      MAX_UINT128,
+      MAX_UINT128,
+      MAX_UINT128,
+    ] as const;
     await packRegistry.write.setPackTierFmvBounds(
       [packMachineAddress, 0n, minFmv, maxFmv],
       { account: walletOperator.account },
@@ -237,6 +266,7 @@ describe("PackMachine Integration", async function () {
       factory,
       packMachine,
       packRegistry,
+      packTierRegistry,
       mockLendingPool,
     };
   }
@@ -260,24 +290,29 @@ describe("PackMachine Integration", async function () {
     const tokenIds = Array.from({ length: count }, (_, i) =>
       BigInt(startId + i),
     );
+    // Flat encoding: one pack (pack 0) per token at tier 0
+    const packCounts = Array(count).fill(1n) as bigint[];
+    const packIds = Array(count).fill(0n) as bigint[]; // all pack 0
     const tiers = Array(count).fill(0) as number[]; // all Base
-    const masks = Array(count).fill(1n) as bigint[]; // eligible for pack 0
     await assetNFT.write.setApprovalForAll([packMachine.address, true], {
       account: walletOperator.account,
     });
-    await packMachine.write.deposit([tokenIds, tiers, masks, operatorAddress], {
-      account: walletOperator.account,
-    });
+    await packMachine.write.deposit(
+      [tokenIds, packCounts, packIds, tiers, operatorAddress],
+      {
+        account: walletOperator.account,
+      },
+    );
     return tokenIds;
   }
 
-  /// @dev Returns the sum of all tier pool sizes.
+  /// @dev Returns the sum of all pack-0 tier pool sizes.
   async function getTotalPoolSize(
     packMachine: Awaited<ReturnType<typeof viem.getContractAt<"PackMachine">>>,
   ): Promise<bigint> {
     let total = 0n;
-    for (let t = 0; t < 5; t++) {
-      total += await packMachine.read.getTierPoolSize([t]);
+    for (let t = 0; t < 6; t++) {
+      total += await packMachine.read.getPackTierPoolSize([0n, t]);
     }
     return total;
   }
@@ -359,10 +394,16 @@ describe("PackMachine Integration", async function () {
       );
 
       // effectivePrizePoolSize decremented at request time
-      assert.equal((await packMachine.read.getMachineInfo()).effectivePrizePoolSize, 0n);
+      assert.equal(
+        (await packMachine.read.getMachineInfo()).effectivePrizePoolSize,
+        0n,
+      );
 
       // USDC is escrowed in the machine at open time — not yet forwarded.
-      assert.equal(await usdc.read.balanceOf([packMachine.address]), PRICE_PER_PACK);
+      assert.equal(
+        await usdc.read.balanceOf([packMachine.address]),
+        PRICE_PER_PACK,
+      );
       assert.equal(await usdc.read.balanceOf([userAddress]), 0n);
 
       // Simulate VRF fulfillment: coordinator calls rawFulfillRandomWords on router
@@ -442,9 +483,15 @@ describe("PackMachine Integration", async function () {
       });
 
       // USDC is escrowed in the machine at open time — settled to finance wallet at fulfillment.
-      assert.equal(await usdc.read.balanceOf([packMachine.address]), PRICE_PER_PACK);
+      assert.equal(
+        await usdc.read.balanceOf([packMachine.address]),
+        PRICE_PER_PACK,
+      );
       assert.equal(await usdc.read.balanceOf([adminAddress]), 0n);
-      assert.equal((await packMachine.read.getMachineInfo()).effectivePrizePoolSize, 0n);
+      assert.equal(
+        (await packMachine.read.getMachineInfo()).effectivePrizePoolSize,
+        0n,
+      );
 
       // Fulfill and verify cards received
       await testClient.impersonateAccount({ address: coordinator.address });
@@ -541,31 +588,42 @@ describe("PackMachine Integration", async function () {
       const tokenIds = Array.from({ length: count }, (_, i) =>
         BigInt(startId + i),
       );
-      // 2 Base, 2 Common, 1 Rare
+      // 2 Base, 2 Common, 1 Rare — flat encoding: 5 tokens each in pack 0
       const tiers = [0, 0, 1, 1, 3] as const;
-      const masks = Array(count).fill(1n) as bigint[]; // eligible for pack 0
+      const packCounts5 = Array(count).fill(1n) as bigint[];
+      const packIds5 = Array(count).fill(0n) as bigint[];
       await assetNFT.write.setApprovalForAll([packMachine.address, true], {
         account: walletOperator.account,
       });
-      await packMachine.write.deposit([tokenIds, tiers, masks, operatorAddress], {
-        account: walletOperator.account,
-      });
+      await packMachine.write.deposit(
+        [tokenIds, packCounts5, packIds5, tiers, operatorAddress],
+        {
+          account: walletOperator.account,
+        },
+      );
 
-      assert.equal(await packMachine.read.getTierPoolSize([0]), 2n); // Base
-      assert.equal(await packMachine.read.getTierPoolSize([1]), 2n); // Common
-      assert.equal(await packMachine.read.getTierPoolSize([2]), 0n); // Uncommon
-      assert.equal(await packMachine.read.getTierPoolSize([3]), 1n); // Rare
-      assert.equal(await packMachine.read.getTierPoolSize([4]), 0n); // Ultra Rare
-      assert.equal(await packMachine.read.getTierPoolSize([5]), 0n); // Grail
-      assert.equal((await packMachine.read.getMachineInfo()).effectivePrizePoolSize, 5n);
+      assert.equal(await packMachine.read.getPackTierPoolSize([0n, 0]), 2n); // Base
+      assert.equal(await packMachine.read.getPackTierPoolSize([0n, 1]), 2n); // Common
+      assert.equal(await packMachine.read.getPackTierPoolSize([0n, 2]), 0n); // Uncommon
+      assert.equal(await packMachine.read.getPackTierPoolSize([0n, 3]), 1n); // Rare
+      assert.equal(await packMachine.read.getPackTierPoolSize([0n, 4]), 0n); // Ultra Rare
+      assert.equal(await packMachine.read.getPackTierPoolSize([0n, 5]), 0n); // Grail
+      assert.equal(
+        (await packMachine.read.getMachineInfo()).effectivePrizePoolSize,
+        5n,
+      );
     });
 
     it("rejects mismatched array lengths", async function () {
       const { packMachine } = await deployFullStack();
+      // tokenIds has 2 entries but packCounts has only 1 → mismatch
       await assert.rejects(
-        packMachine.write.deposit([[1n, 2n], [0], [1n], operatorAddress], {
-          account: walletOperator.account,
-        }),
+        packMachine.write.deposit(
+          [[1n, 2n], [1n], [0n], [0], operatorAddress],
+          {
+            account: walletOperator.account,
+          },
+        ),
       );
     });
 
@@ -580,9 +638,12 @@ describe("PackMachine Integration", async function () {
         account: walletOperator.account,
       });
       await assert.rejects(
-        packMachine.write.deposit([[BigInt(startId)], [6], [1n], operatorAddress], {
-          account: walletOperator.account,
-        }),
+        packMachine.write.deposit(
+          [[BigInt(startId)], [1n], [0n], [6], operatorAddress],
+          {
+            account: walletOperator.account,
+          },
+        ),
       );
     });
   });
@@ -598,7 +659,7 @@ describe("PackMachine Integration", async function () {
         account: walletAdmin.account,
       });
       await assert.rejects(
-        packMachine.write.deposit([[1n], [0], [1n], userAddress], {
+        packMachine.write.deposit([[1n], [1n], [0n], [0], userAddress], {
           account: walletUser.account,
         }),
       );
@@ -668,7 +729,14 @@ describe("PackMachine Integration", async function () {
       {
         const MAX_UINT128 = (1n << 128n) - 1n;
         const zeroFmv = [0n, 0n, 0n, 0n, 0n, 0n] as const;
-        const maxFmvArr = [MAX_UINT128, MAX_UINT128, MAX_UINT128, MAX_UINT128, MAX_UINT128, MAX_UINT128] as const;
+        const maxFmvArr = [
+          MAX_UINT128,
+          MAX_UINT128,
+          MAX_UINT128,
+          MAX_UINT128,
+          MAX_UINT128,
+          MAX_UINT128,
+        ] as const;
         await packRegistry.write.setPackTierFmvBounds(
           [futureMachineAddr, 0n, zeroFmv, maxFmvArr],
           { account: walletOperator.account },
@@ -690,13 +758,17 @@ describe("PackMachine Integration", async function () {
         BigInt(Number(currentSupply) - CARDS_PER_PACK + 1 + i),
       );
       const tiers = Array(CARDS_PER_PACK).fill(0) as number[];
-      const masks = Array(CARDS_PER_PACK).fill(1n) as bigint[]; // eligible for pack 0
+      const pcsF = Array(CARDS_PER_PACK).fill(1n) as bigint[];
+      const pidsF = Array(CARDS_PER_PACK).fill(0n) as bigint[];
       await assetNFT.write.setApprovalForAll([futureMachineAddr, true], {
         account: walletOperator.account,
       });
-      await futureMachine.write.deposit([ids, tiers, masks, operatorAddress], {
-        account: walletOperator.account,
-      });
+      await futureMachine.write.deposit(
+        [ids, pcsF, pidsF, tiers, operatorAddress],
+        {
+          account: walletOperator.account,
+        },
+      );
 
       await usdc.write.mint([userAddress, PRICE_PER_PACK], {
         account: walletAdmin.account,

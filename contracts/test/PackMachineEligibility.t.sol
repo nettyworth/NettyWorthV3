@@ -7,6 +7,7 @@ import {PackMachine} from "../PackMachine.sol";
 import {PackMachineFactory} from "../PackMachineFactory.sol";
 import {PackVRFRouter} from "../PackVRFRouter.sol";
 import {PackRegistry} from "../PackRegistry.sol";
+import {PackTierRegistry} from "../PackTierRegistry.sol";
 import {PermissionManager} from "../PermissionManager.sol";
 import {Roles} from "../lib/Roles.sol";
 import {MockERC20} from "../test-helpers/MockERC20.sol";
@@ -23,6 +24,7 @@ contract PackMachineEligibilityTest is Test {
     PackMachineFactory internal factory;
     PackVRFRouter internal vrfRouter;
     PackRegistry internal packRegistry;
+    PackTierRegistry internal packTierRegistry;
     PermissionManager internal pm;
     MockERC20 internal usdc;
     AssetNFT internal assetNFT;
@@ -124,6 +126,15 @@ contract PackMachineEligibilityTest is Test {
         vm.startPrank(admin);
         factory.setPackRegistry(address(packRegistry));
         packRegistry.setFactory(address(factory));
+
+        PackTierRegistry tierRegistryImpl = new PackTierRegistry();
+        ERC1967Proxy tierRegistryProxy = new ERC1967Proxy(
+            address(tierRegistryImpl),
+            abi.encodeCall(PackTierRegistry.initialize, (address(pm)))
+        );
+        packTierRegistry = PackTierRegistry(address(tierRegistryProxy));
+        factory.setPackTierRegistry(address(packTierRegistry));
+        packTierRegistry.setFactory(address(factory));
         vm.stopPrank();
 
         vm.prank(operator);
@@ -180,14 +191,36 @@ contract PackMachineEligibilityTest is Test {
         assetNFT.batchMint(recipients, uris);
     }
 
+    /// @dev Deposit helper: flat-encodes (packId, tier) pairs from masks and tiers.
+    ///      Each token's eligible packs are decoded from its mask; all use the flat tier value.
     function _deposit(
         uint256[] memory tokenIds,
         uint8[] memory tiers,
         uint256[] memory masks
     ) internal {
+        uint256 count = tokenIds.length;
+        // Count total bit-count across all masks for flat arrays.
+        uint256 total;
+        for (uint256 i; i < count; ++i) { uint256 tmp = masks[i]; while (tmp != 0) { total++; tmp &= tmp - 1; } }
+        uint256[] memory pcs = new uint256[](count);
+        uint256[] memory pids = new uint256[](total);
+        uint8[] memory trs = new uint8[](total);
+        uint256 offset;
+        for (uint256 i; i < count; ++i) {
+            uint256 bits;
+            uint256 mm = masks[i];
+            while (mm != 0) {
+                uint256 lsb; uint256 b = mm & (~mm + 1); while (b > 1) { b >>= 1; ++lsb; }
+                pids[offset + bits] = lsb;
+                trs[offset + bits] = tiers[i];
+                bits++; mm &= mm - 1;
+            }
+            pcs[i] = bits;
+            offset += bits;
+        }
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        packMachine.deposit(tokenIds, tiers, masks, operator);
+        packMachine.deposit(tokenIds, pcs, pids, trs, operator);
         vm.stopPrank();
     }
 
@@ -258,7 +291,6 @@ contract PackMachineEligibilityTest is Test {
 
         // Machine-wide: 3 tokens
         assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 3);
-        assertEq(packMachine.getTierPoolSize(0), 3);
 
         // Per-pack pool sizes
         assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 0), 2); // ids[0], ids[2]
@@ -327,7 +359,7 @@ contract PackMachineEligibilityTest is Test {
         // Token won: removed from both pack pools and machine-wide pool
         assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 0), 0);
         assertEq(packMachine.getPackTierPoolSize(packPro, 0), 0);
-        assertEq(packMachine.getTierPoolSize(0), 0);
+        assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 0), 0);
         assertFalse(packMachine.isInCustody(ids[0]));
 
         // availablePerPack decremented for Pro too (otherMask)
@@ -349,19 +381,22 @@ contract PackMachineEligibilityTest is Test {
 
         assertEq(packMachine.getPackTierPoolSize(packPro, 0), 0);
 
-        // Add both to Pro
+        // Add both to Pro (tier 0)
+        uint8[] memory proTiers = new uint8[](2);
+        // proTiers stays all 0 (Base tier)
         vm.prank(operator);
-        packMachine.setPackEligibility(packPro, ids, true);
+        packMachine.setPackEligibility(packPro, ids, proTiers, true);
 
         assertEq(packMachine.getPackTierPoolSize(packPro, 0), 2);
         assertEq(packMachine.getPackAvailable(packPro), 2);
         assertTrue(packMachine.isTokenEligibleForPack(ids[0], packPro));
 
-        // Remove ids[0] from Pro
+        // Remove ids[0] from Pro (tiers param ignored on removal)
         uint256[] memory single = new uint256[](1);
         single[0] = ids[0];
+        uint8[] memory emptyTiers = new uint8[](0);
         vm.prank(operator);
-        packMachine.setPackEligibility(packPro, single, false);
+        packMachine.setPackEligibility(packPro, single, emptyTiers, false);
 
         assertEq(packMachine.getPackTierPoolSize(packPro, 0), 1);
         assertEq(packMachine.getPackAvailable(packPro), 1);
@@ -379,15 +414,16 @@ contract PackMachineEligibilityTest is Test {
         masks[0] = 1; // Base
         _deposit(ids, tiers, masks);
 
+        uint8[] memory baseTiers = new uint8[](1); // tier 0 = Base
         vm.prank(operator);
-        packMachine.setPackEligibility(PACK_BASE, ids, true); // already in Base — no-op
+        packMachine.setPackEligibility(PACK_BASE, ids, baseTiers, true); // already in Base — no-op
 
         assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 0), 1); // still 1, not doubled
         assertEq(packMachine.getPackAvailable(PACK_BASE), 1);
     }
 
     // =========================================================================
-    // Test: setTokenEligibility diff-apply
+    // Test: setPackEligibility diff-apply (remove Base, add Elite)
     // =========================================================================
 
     function test_SetTokenEligibility_DiffApply() public {
@@ -397,16 +433,20 @@ contract PackMachineEligibilityTest is Test {
         masks[0] = _maskFor(_arr(PACK_BASE, packPro)); // Base & Pro initially
         _deposit(ids, tiers, masks);
 
-        // Change to Pro & Elite (remove Base, add Elite)
-        uint256[] memory newMasks = new uint256[](1);
-        newMasks[0] = _maskFor(_arr(packPro, packElite));
+        // Remove from Base
+        uint8[] memory emptyT = new uint8[](0);
         vm.prank(operator);
-        packMachine.setTokenEligibility(ids, newMasks);
+        packMachine.setPackEligibility(PACK_BASE, ids, emptyT, false);
+
+        // Add to Elite at tier 0
+        uint8[] memory eliteT = new uint8[](1);
+        vm.prank(operator);
+        packMachine.setPackEligibility(packElite, ids, eliteT, true);
 
         assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 0), 0);  // removed
         assertEq(packMachine.getPackTierPoolSize(packPro, 0), 1);    // kept
         assertEq(packMachine.getPackTierPoolSize(packElite, 0), 1);  // added
-        assertEq(packMachine.getTokenEligibility(ids[0]), newMasks[0]);
+        assertEq(packMachine.getTokenEligibility(ids[0]), _maskFor(_arr(packPro, packElite)));
 
         assertEq(packMachine.getPackAvailable(PACK_BASE), 0);
         assertEq(packMachine.getPackAvailable(packPro), 1);
@@ -461,7 +501,7 @@ contract PackMachineEligibilityTest is Test {
         assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 0), 0);
         assertEq(packMachine.getPackTierPoolSize(packPro, 0), 0);
         assertEq(packMachine.getPackTierPoolSize(packElite, 0), 0);
-        assertEq(packMachine.getTierPoolSize(0), 0);
+        assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 0), 0);
         assertFalse(packMachine.isInCustody(ids[0]));
         assertEq(packMachine.getTokenEligibility(ids[0]), 0); // deleted on withdraw
 
@@ -569,31 +609,31 @@ contract PackMachineEligibilityTest is Test {
 
     function test_Deposit_InvalidPackRefReverts() public {
         uint256[] memory ids = _mint(1);
-        uint8[] memory tiers = new uint8[](1);
-        uint256[] memory masks = new uint256[](1);
-        masks[0] = 1 << 200; // pack 200 doesn't exist (only 0,1,2)
+        // Flat encoding referencing pack 200, which doesn't exist (only 0,1,2).
+        uint256[] memory pcs = new uint256[](1); pcs[0] = 1;
+        uint256[] memory pids = new uint256[](1); pids[0] = 200; // nonexistent
+        uint8[] memory trs = new uint8[](1);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
         vm.expectRevert();
-        packMachine.deposit(ids, tiers, masks, operator);
+        packMachine.deposit(ids, pcs, pids, trs, operator);
         vm.stopPrank();
     }
 
     // =========================================================================
-    // Test: zero eligibility mask reverts
+    // Test: empty packIds (packCounts[i]=0) per token reverts
     // =========================================================================
 
-    function test_Deposit_ZeroMaskReverts() public {
+    function test_Deposit_EmptyPackIdsReverts() public {
         uint256[] memory ids = _mint(1);
-        uint8[] memory tiers = new uint8[](1);
-        uint256[] memory masks = new uint256[](1);
-        masks[0] = 0;
+        // packCounts[0] = 0 means no packs — must revert with ArrayLengthMismatch.
+        uint256[] memory pcs = new uint256[](1); // pcs[0] = 0
+        uint256[] memory pids = new uint256[](0);
+        uint8[] memory trs = new uint8[](0);
         vm.startPrank(operator);
         assetNFT.setApprovalForAll(address(packMachine), true);
-        vm.expectRevert(
-            abi.encodeWithSelector(PackMachine.PackMachine__NoEligibility.selector, ids[0])
-        );
-        packMachine.deposit(ids, tiers, masks, operator);
+        vm.expectRevert(PackMachine.PackMachine__ArrayLengthMismatch.selector);
+        packMachine.deposit(ids, pcs, pids, trs, operator);
         vm.stopPrank();
     }
 
@@ -615,7 +655,9 @@ contract PackMachineEligibilityTest is Test {
         vm.prank(operator);
         packMachine.resetEffectivePrizePoolSize();
 
-        assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 2);
+        // After reset with multiple packs, effectivePrizePoolSize = sum of all pack pools
+        // (over-counts multi-pack tokens; 1 token in Base + 2 in Pro + 0 in Elite = 3).
+        assertEq(packMachine.getMachineInfo().effectivePrizePoolSize, 3);
         assertEq(packMachine.getPackAvailable(PACK_BASE), 1);
         assertEq(packMachine.getPackAvailable(packPro), 2);
         assertEq(packMachine.getPackAvailable(packElite), 0);
@@ -713,5 +755,216 @@ contract PackMachineEligibilityTest is Test {
         r[0] = a;
         r[1] = b;
         r[2] = c;
+    }
+
+    // =========================================================================
+    // Per-pack tier tests
+    // =========================================================================
+
+    /// @dev Helper: deposit a token into multiple packs with distinct tiers.
+    function _depositWithPerPackTiers(
+        uint256 tokenId,
+        uint256[] memory packs,
+        uint8[] memory tierArr
+    ) internal {
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = tokenId;
+        // Flat encoding: one token, packs.length entries.
+        uint256[] memory pcs = new uint256[](1); pcs[0] = packs.length;
+        vm.startPrank(operator);
+        assetNFT.setApprovalForAll(address(packMachine), true);
+        packMachine.deposit(ids, pcs, packs, tierArr, operator);
+        vm.stopPrank();
+    }
+
+    function test_PerPackTier_DifferentiatedPlacement() public {
+        // Card A: Rare (tier 3) in PACK_BASE, Common (tier 1) in packPro.
+        uint256[] memory ids = _mint(1);
+        _depositWithPerPackTiers(
+            ids[0],
+            _arr(PACK_BASE, packPro),
+            _tierArr(3, 1)
+        );
+
+        // Pack 0: row 3 has 1 token, row 1 has 0.
+        assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 3), 1);
+        assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 1), 0);
+        // Pack 1: row 1 has 1 token, row 3 has 0.
+        assertEq(packMachine.getPackTierPoolSize(packPro, 1), 1);
+        assertEq(packMachine.getPackTierPoolSize(packPro, 3), 0);
+
+        // getPackTokenTier resolves correctly.
+        assertEq(packMachine.getPackTokenTier(ids[0], PACK_BASE), 3);
+        assertEq(packMachine.getPackTokenTier(ids[0], packPro), 1);
+    }
+
+    function test_PerPackTier_WinRemovesFromCorrectRows() public {
+        // Card A: tier 3 in PACK_BASE, tier 1 in packPro.
+        uint256[] memory ids = _mint(1);
+        _depositWithPerPackTiers(
+            ids[0],
+            _arr(PACK_BASE, packPro),
+            _tierArr(3, 1)
+        );
+
+        // Open PACK_BASE — card drawn from row 3.
+        uint256 reqId = _openPack(user, PACK_BASE);
+        _fulfill(reqId, 0);
+
+        // Card no longer in custody.
+        assertFalse(packMachine.isInCustody(ids[0]));
+        // Both pack rows emptied.
+        assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 3), 0);
+        assertEq(packMachine.getPackTierPoolSize(packPro, 1), 0);
+        // Available counters decremented for the non-opening pack too.
+        assertEq(packMachine.getPackAvailable(packPro), 0);
+    }
+
+    function test_PerPackTier_DepositFromPool_RestoresPerPackTiers() public {
+        // Deposit A with tier 3 in Base, tier 1 in Pro.
+        uint256[] memory ids = _mint(1);
+        _depositWithPerPackTiers(
+            ids[0],
+            _arr(PACK_BASE, packPro),
+            _tierArr(3, 1)
+        );
+
+        // Win the card from PACK_BASE.
+        uint256 reqId = _openPack(user, PACK_BASE);
+        _fulfill(reqId, 0);
+        assertFalse(packMachine.isInCustody(ids[0]));
+
+        // Simulate buyback: user transfers to operator, operator re-deposits via depositFromPool.
+        vm.prank(user);
+        assetNFT.transferFrom(user, operator, ids[0]);
+
+        vm.prank(operator);
+        packMachine.setAuthorizedDepositor(operator, true);
+
+        uint8[] memory fallbackTiers = new uint8[](1);
+        fallbackTiers[0] = 0; // fallback tier (should not be used if dormant map exists)
+        vm.startPrank(operator);
+        assetNFT.approve(address(packMachine), ids[0]);
+        packMachine.depositFromPool(ids, fallbackTiers, operator);
+        vm.stopPrank();
+
+        // Per-pack tiers restored from dormant map.
+        assertTrue(packMachine.isInCustody(ids[0]));
+        assertEq(packMachine.getPackTokenTier(ids[0], PACK_BASE), 3);
+        assertEq(packMachine.getPackTokenTier(ids[0], packPro), 1);
+        assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 3), 1);
+        assertEq(packMachine.getPackTierPoolSize(packPro, 1), 1);
+    }
+
+    function test_PerPackTier_SetPackEligibility_NewPackUsesSuppliedTier() public {
+        // Deposit A in Base only at tier 0.
+        uint256[] memory ids = _mint(1);
+        uint8[] memory tiers = new uint8[](1);
+        uint256[] memory masks = new uint256[](1);
+        masks[0] = 1;
+        _deposit(ids, tiers, masks);
+
+        // Add A to packElite at tier 2 (Uncommon).
+        uint8[] memory eliteTiers = new uint8[](1);
+        eliteTiers[0] = 2;
+        vm.prank(operator);
+        packMachine.setPackEligibility(packElite, ids, eliteTiers, true);
+
+        assertEq(packMachine.getPackTokenTier(ids[0], packElite), 2);
+        assertEq(packMachine.getPackTierPoolSize(packElite, 2), 1);
+        // Original tier in Base unchanged.
+        assertEq(packMachine.getPackTokenTier(ids[0], PACK_BASE), 0);
+    }
+
+    function test_PerPackTier_SetPackEligibility_ReSlotsOnTierChange() public {
+        // Deposit A with tier 3 in Base.
+        uint256[] memory ids = _mint(1);
+        uint8[] memory tiers = new uint8[](1);
+        tiers[0] = 3;
+        uint256[] memory masks = new uint256[](1);
+        masks[0] = 1; // Base only
+        _deposit(ids, tiers, masks);
+
+        assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 3), 1);
+
+        // Re-slot Base to tier 1 (remove then re-add with new tier).
+        uint8[] memory baseTier1 = new uint8[](1); baseTier1[0] = 1;
+        uint8[] memory emptyT = new uint8[](0);
+        vm.startPrank(operator);
+        packMachine.setPackEligibility(PACK_BASE, ids, emptyT, false);
+        packMachine.setPackEligibility(PACK_BASE, ids, baseTier1, true);
+        // Add Pro at tier 2.
+        uint8[] memory proTier2 = new uint8[](1); proTier2[0] = 2;
+        packMachine.setPackEligibility(packPro, ids, proTier2, true);
+        vm.stopPrank();
+
+        // Re-slotted: Base row 3 empty, row 1 filled; Pro row 2 filled.
+        assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 3), 0);
+        assertEq(packMachine.getPackTierPoolSize(PACK_BASE, 1), 1);
+        assertEq(packMachine.getPackTierPoolSize(packPro, 2), 1);
+        assertEq(packMachine.getPackAvailable(PACK_BASE), 1); // stable
+        assertEq(packMachine.getPackAvailable(packPro), 1);
+    }
+
+    function test_PerPackTier_WithdrawClearsPerPackTiers() public {
+        // Deposit A with tier 3 in Base.
+        uint256[] memory ids = _mint(1);
+        uint8[] memory t3 = new uint8[](1);
+        t3[0] = 3;
+        _depositWithPerPackTiers(ids[0], _arr(PACK_BASE), t3);
+
+        vm.prank(operator);
+        packMachine.pause();
+        vm.prank(operator);
+        packMachine.withdrawCards(ids);
+
+        // After withdrawal, token is gone; a fresh re-deposit should start clean.
+        // Re-mint and deposit with tier 0 — should succeed normally.
+        uint256[] memory newIds = _mint(1);
+        uint8[] memory newTiers = new uint8[](1);
+        uint256[] memory newMasks = new uint256[](1);
+        newMasks[0] = 1;
+        vm.prank(operator);
+        packMachine.unpause();
+        _deposit(newIds, newTiers, newMasks);
+        assertEq(packMachine.getPackTokenTier(newIds[0], PACK_BASE), 0);
+    }
+
+    function test_PerPackTier_Reverts_InvalidTier() public {
+        uint256[] memory ids = _mint(1);
+        uint256[] memory pcs = new uint256[](1); pcs[0] = 1;
+        uint256[] memory pids = _arr(PACK_BASE);
+        uint8[] memory trs = new uint8[](1); trs[0] = 6; // invalid (max 5)
+        vm.startPrank(operator);
+        assetNFT.setApprovalForAll(address(packMachine), true);
+        vm.expectRevert(
+            abi.encodeWithSelector(PackMachine.PackMachine__InvalidTier.selector, uint8(6))
+        );
+        packMachine.deposit(ids, pcs, pids, trs, operator);
+        vm.stopPrank();
+    }
+
+    function test_PerPackTier_Reverts_DuplicatePackInDeposit() public {
+        uint256[] memory ids = _mint(1);
+        uint256[] memory pcs = new uint256[](1); pcs[0] = 2;
+        uint256[] memory pids = new uint256[](2);
+        pids[0] = PACK_BASE;
+        pids[1] = PACK_BASE; // duplicate
+        uint8[] memory trs = new uint8[](2);
+        vm.startPrank(operator);
+        assetNFT.setApprovalForAll(address(packMachine), true);
+        // Use full abi-encoded form since Foundry's bytes4 expectRevert does full-data comparison.
+        vm.expectRevert(
+            abi.encodeWithSelector(PackMachine.PackMachine__InvalidPackRef.selector, ids[0])
+        );
+        packMachine.deposit(ids, pcs, pids, trs, operator);
+        vm.stopPrank();
+    }
+
+    /// @dev Helper: build a uint8[] from two tier values.
+    function _tierArr(uint8 a, uint8 b) internal pure returns (uint8[] memory r) {
+        r = new uint8[](2);
+        r[0] = a;
+        r[1] = b;
     }
 }
