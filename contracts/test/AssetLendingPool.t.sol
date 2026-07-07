@@ -1991,19 +1991,19 @@ contract AssetLendingPoolTest is Test {
     }
 
     // =========================================================================
-    // $100 Default Minimum Appraisal Value
+    // $5 Default Minimum Appraisal Value
     // =========================================================================
 
     function test_Initialize_SetsDefaultMinAppraisalValue() public view {
-        // USDC has 6 decimals → default should be 100e6
-        assertEq(pool.getPoolInfo().minAppraisalValue, 100e6);
+        // USDC has 6 decimals → default should be 5e6
+        assertEq(pool.getPoolInfo().minAppraisalValue, 5e6);
     }
 
     function test_Borrow_RevertsIfBelowDefaultMinAppraisal() public {
         uint256 tokenId = _mintNFT(borrower);
-        // Appraise below the $100 default minimum
+        // Appraise below the $5 default minimum
         vm.prank(admin);
-        config.setAppraisal(tokenId, 50e6, 0, 0);
+        config.setAppraisal(tokenId, 4e6, 0, 0);
 
         vm.startPrank(borrower);
         assetNFT.approve(address(pool), tokenId);
@@ -2205,9 +2205,9 @@ contract AssetLendingPoolTest is Test {
     function test_BorrowBundle_RevertsIfBelowMinAppraisal() public {
         uint256 t1 = _mintAndAppraise(borrower, APPRAISAL_VALUE);
         uint256 t2 = _mintNFT(borrower);
-        // Appraise t2 below the $100 default minimum
+        // Appraise t2 below the $5 default minimum
         vm.prank(admin);
-        config.setAppraisal(t2, 50e6, 0, 0);
+        config.setAppraisal(t2, 4e6, 0, 0);
 
         uint256[] memory ids = new uint256[](2);
         ids[0] = t1;

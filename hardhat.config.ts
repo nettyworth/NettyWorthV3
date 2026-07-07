@@ -53,6 +53,7 @@ export default defineConfig({
       forking: {
         url: configVariable("BASE_RPC_URL"),
       },
+      chainId: 8453,
     },
     forkBaseSepolia: {
       type: "edr-simulated",

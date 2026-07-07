@@ -200,8 +200,8 @@ if (isLive) {
 // Re-read after confirmation so interactive pause doesn't matter.
 const savedDeployments = isLive ? await readDeployments(networkName) : {};
 
-// ─── [1/7] Deploy PackVRFRouter (UUPS proxy) ─────────────────────────────────
-console.log("\n[1/7] Deploying PackVRFRouter...");
+// ─── [1/8] Deploy PackVRFRouter (UUPS proxy) ─────────────────────────────────
+console.log("\n[1/8] Deploying PackVRFRouter...");
 
 let vrfRouterImplAddress = await reuseAddress(
   "PackVRFRouter",
@@ -274,8 +274,8 @@ if (isLive) {
 }
 await sleep(STEP_DELAY_MS);
 
-// ─── [2/7] Deploy PackMachine implementation (EIP-1167 clone target — no proxy)
-console.log("[2/7] Deploying PackMachine implementation (clone target)...");
+// ─── [2/8] Deploy PackMachine implementation (EIP-1167 clone target — no proxy)
+console.log("[2/8] Deploying PackMachine implementation (clone target)...");
 
 let packMachineImplAddress = await reuseAddress(
   "PackMachineImplementation",
@@ -303,8 +303,8 @@ if (isLive) {
 }
 await sleep(STEP_DELAY_MS);
 
-// ─── [3/7] Deploy PackMachineFactory (UUPS proxy) ────────────────────────────
-console.log("[3/7] Deploying PackMachineFactory...");
+// ─── [3/8] Deploy PackMachineFactory (UUPS proxy) ────────────────────────────
+console.log("[3/8] Deploying PackMachineFactory...");
 
 let factoryImplAddress = await reuseAddress(
   "PackMachineFactory",
@@ -370,10 +370,10 @@ if (isLive) {
 }
 await sleep(STEP_DELAY_MS);
 
-// ─── [4/7] Deploy PackRegistry (UUPS proxy) ──────────────────────────────────
+// ─── [4/8] Deploy PackRegistry (UUPS proxy) ──────────────────────────────────
 // Must be deployed before BuybackPool wiring so it can be set on the factory.
-// Factory is wired to the registry in step 6.
-console.log("[4/7] Deploying PackRegistry...");
+// Factory is wired to both registries in step 7.
+console.log("[4/8] Deploying PackRegistry...");
 
 let registryImplAddress = await reuseAddress(
   "PackRegistry",
@@ -433,10 +433,73 @@ if (isLive) {
 }
 await sleep(STEP_DELAY_MS);
 
-// ─── [5/7] Deploy BuybackPool (UUPS proxy) ───────────────────────────────────
+// ─── [5/8] Deploy PackTierRegistry (UUPS proxy) ──────────────────────────────
+// Stores per-(machine, tokenId, packId) tier assignments for all PackMachine clones.
+// Writes gated by onlyRegisteredMachine; factory wired in step 7.
+console.log("[5/8] Deploying PackTierRegistry...");
+
+let tierRegistryImplAddress = await reuseAddress(
+  "PackTierRegistry",
+  "implementation",
+  savedDeployments,
+);
+let tierRegistryProxyAddress = await reuseAddress(
+  "PackTierRegistry",
+  "proxy",
+  savedDeployments,
+);
+
+if (tierRegistryProxyAddress && tierRegistryImplAddress) {
+  console.log(`  ↻ reusing PackTierRegistry impl  ${tierRegistryImplAddress}`);
+  console.log(`  ↻ reusing PackTierRegistry proxy ${tierRegistryProxyAddress}`);
+} else {
+  if (!tierRegistryImplAddress) {
+    const tierRegistryImpl = await viem.deployContract("PackTierRegistry");
+    tierRegistryImplAddress = tierRegistryImpl.address;
+    console.log(`  Implementation: ${tierRegistryImplAddress}`);
+    if (isLive) {
+      await saveDeployment(networkName, "PackTierRegistry", {
+        implementation: tierRegistryImplAddress,
+        deployedAt: new Date().toISOString(),
+      });
+    }
+  } else {
+    console.log(`  ↻ reusing PackTierRegistry impl ${tierRegistryImplAddress}`);
+  }
+
+  const tierRegistryImplContract = await viem.getContractAt(
+    "PackTierRegistry",
+    tierRegistryImplAddress,
+  );
+  const tierRegistryInitData = encodeFunctionData({
+    abi: tierRegistryImplContract.abi,
+    functionName: "initialize",
+    args: [permissionManagerProxy],
+  });
+  await waitForCode(publicClient, tierRegistryImplAddress);
+  const tierRegistryProxyContract = await viem.deployContract(
+    "ERC1967ProxyHelper",
+    [tierRegistryImplAddress, tierRegistryInitData],
+  );
+  tierRegistryProxyAddress = tierRegistryProxyContract.address;
+  console.log(`  Proxy:          ${tierRegistryProxyAddress}`);
+}
+
+if (isLive) {
+  await saveDeployment(networkName, "PackTierRegistry", {
+    proxy: tierRegistryProxyAddress,
+    implementation: tierRegistryImplAddress,
+    permissionManager: permissionManagerProxy,
+    deployedAt: new Date().toISOString(),
+  });
+  console.log("  ✓ checkpoint saved");
+}
+await sleep(STEP_DELAY_MS);
+
+// ─── [6/8] Deploy BuybackPool (UUPS proxy) ───────────────────────────────────
 // BuybackPool.initialize takes the factory proxy address — deploy after factory
-// to resolve the circular dependency. factory.setBuybackPool is called in step 6.
-console.log("[5/7] Deploying BuybackPool...");
+// to resolve the circular dependency. factory.setBuybackPool is called in step 7.
+console.log("[6/8] Deploying BuybackPool...");
 
 let buybackImplAddress = await reuseAddress(
   "BuybackPool",
@@ -506,10 +569,12 @@ if (isLive) {
 }
 await sleep(STEP_DELAY_MS);
 
-// ─── [6/7] Wire PackMachineFactory and PackRegistry ──────────────────────────
+// ─── [7/8] Wire PackMachineFactory, PackRegistry, and PackTierRegistry ───────
 // All factory setters gated by DEFAULT_ADMIN_ROLE — deployer holds it via PermissionManager.initialize.
 // Each setter is skipped if the on-chain value already matches (idempotent / resume-safe).
-console.log("[6/7] Wiring PackMachineFactory and PackRegistry...");
+console.log(
+  "[7/8] Wiring PackMachineFactory, PackRegistry, and PackTierRegistry...",
+);
 const factory = await viem.getContractAt(
   "PackMachineFactory",
   factoryProxyAddress,
@@ -568,8 +633,39 @@ if (currentFactory.toLowerCase() === factoryProxyAddress.toLowerCase()) {
   await publicClient.waitForTransactionReceipt({ hash: txHash });
   console.log(`  packRegistry.setFactory(${factoryProxyAddress}) ✓`);
 }
+await sleep(STEP_DELAY_MS);
 
-// Re-save factory and registry records with final wiring addresses.
+// factory.setPackTierRegistry
+const packTierRegistry = await viem.getContractAt(
+  "PackTierRegistry",
+  tierRegistryProxyAddress,
+);
+const currentPackTierRegistry = await factory.read.packTierRegistry();
+if (
+  currentPackTierRegistry.toLowerCase() ===
+  tierRegistryProxyAddress.toLowerCase()
+) {
+  console.log(`  ↻ skipping setPackTierRegistry (already wired)`);
+} else {
+  txHash = await factory.write.setPackTierRegistry([tierRegistryProxyAddress]);
+  await publicClient.waitForTransactionReceipt({ hash: txHash });
+  console.log(`  setPackTierRegistry(${tierRegistryProxyAddress}) ✓`);
+}
+await sleep(STEP_DELAY_MS);
+
+// packTierRegistry.setFactory
+const currentTierRegistryFactory = await packTierRegistry.read.factory();
+if (
+  currentTierRegistryFactory.toLowerCase() === factoryProxyAddress.toLowerCase()
+) {
+  console.log(`  ↻ skipping packTierRegistry.setFactory (already wired)`);
+} else {
+  txHash = await packTierRegistry.write.setFactory([factoryProxyAddress]);
+  await publicClient.waitForTransactionReceipt({ hash: txHash });
+  console.log(`  packTierRegistry.setFactory(${factoryProxyAddress}) ✓`);
+}
+
+// Re-save factory, registry, and tier-registry records with final wiring addresses.
 if (isLive) {
   await saveDeployment(networkName, "PackMachineFactory", {
     proxy: factoryProxyAddress,
@@ -579,6 +675,7 @@ if (isLive) {
     packVRFRouter: vrfRouterProxyAddress,
     buybackPool: buybackProxyAddress,
     packRegistry: registryProxyAddress,
+    packTierRegistry: tierRegistryProxyAddress,
     assetNFT: assetNFTProxy,
     paymentToken,
     financeWallet,
@@ -592,12 +689,19 @@ if (isLive) {
     factory: factoryProxyAddress,
     deployedAt: new Date().toISOString(),
   });
+  await saveDeployment(networkName, "PackTierRegistry", {
+    proxy: tierRegistryProxyAddress,
+    implementation: tierRegistryImplAddress,
+    permissionManager: permissionManagerProxy,
+    factory: factoryProxyAddress,
+    deployedAt: new Date().toISOString(),
+  });
   console.log("  ✓ checkpoint saved");
 }
 await sleep(STEP_DELAY_MS);
 
-// ─── [7/7] Verify deployments ────────────────────────────────────────────────
-console.log("[7/7] Verifying deployments...");
+// ─── [8/8] Verify deployments ────────────────────────────────────────────────
+console.log("[8/8] Verifying deployments...");
 
 const router = await viem.getContractAt("PackVRFRouter", vrfRouterProxyAddress);
 const buyback = await viem.getContractAt("BuybackPool", buybackProxyAddress);
@@ -609,7 +713,9 @@ const factoryPM = await factory.read.getPermissionManager();
 const factoryVRFRouter = await factory.read.packVRFRouter();
 const factoryBuybackPool = await factory.read.buybackPool();
 const factoryPackRegistry = await factory.read.packRegistry();
+const factoryPackTierRegistry = await factory.read.packTierRegistry();
 const registryFactory = await packRegistry.read.factory();
+const tierRegistryFactory = await packTierRegistry.read.factory();
 const factoryAssetNFT = await factory.read.assetNFT();
 const factoryPaymentToken = await factory.read.paymentToken();
 const buybackPM = await buyback.read.getPermissionManager();
@@ -652,9 +758,22 @@ if (factoryPackRegistry.toLowerCase() !== registryProxyAddress.toLowerCase()) {
     `  PackMachineFactory.packRegistry: expected "${registryProxyAddress}", got "${factoryPackRegistry}"`,
   );
 }
+if (
+  factoryPackTierRegistry.toLowerCase() !==
+  tierRegistryProxyAddress.toLowerCase()
+) {
+  errors.push(
+    `  PackMachineFactory.packTierRegistry: expected "${tierRegistryProxyAddress}", got "${factoryPackTierRegistry}"`,
+  );
+}
 if (registryFactory.toLowerCase() !== factoryProxyAddress.toLowerCase()) {
   errors.push(
     `  PackRegistry.factory: expected "${factoryProxyAddress}", got "${registryFactory}"`,
+  );
+}
+if (tierRegistryFactory.toLowerCase() !== factoryProxyAddress.toLowerCase()) {
+  errors.push(
+    `  PackTierRegistry.factory: expected "${factoryProxyAddress}", got "${tierRegistryFactory}"`,
   );
 }
 if (factoryAssetNFT.toLowerCase() !== assetNFTProxy.toLowerCase()) {
@@ -714,15 +833,20 @@ console.log(`  Proxy:             ${factoryProxyAddress}`);
 console.log(`\nPackRegistry`);
 console.log(`  Implementation:    ${registryImplAddress}`);
 console.log(`  Proxy:             ${registryProxyAddress}`);
+console.log(`\nPackTierRegistry`);
+console.log(`  Implementation:    ${tierRegistryImplAddress}`);
+console.log(`  Proxy:             ${tierRegistryProxyAddress}`);
 console.log(`\nBuybackPool`);
 console.log(`  Implementation:    ${buybackImplAddress}`);
 console.log(`  Proxy:             ${buybackProxyAddress}`);
 console.log(`\nWiring`);
-console.log(`  Factory.implementation:  ${packMachineImplAddress} ✓`);
-console.log(`  Factory.packVRFRouter:   ${vrfRouterProxyAddress} ✓`);
-console.log(`  Factory.buybackPool:     ${buybackProxyAddress} ✓`);
-console.log(`  Factory.packRegistry:    ${registryProxyAddress} ✓`);
-console.log(`  Registry.factory:        ${factoryProxyAddress} ✓`);
+console.log(`  Factory.implementation:       ${packMachineImplAddress} ✓`);
+console.log(`  Factory.packVRFRouter:        ${vrfRouterProxyAddress} ✓`);
+console.log(`  Factory.buybackPool:          ${buybackProxyAddress} ✓`);
+console.log(`  Factory.packRegistry:         ${registryProxyAddress} ✓`);
+console.log(`  Factory.packTierRegistry:     ${tierRegistryProxyAddress} ✓`);
+console.log(`  Registry.factory:             ${factoryProxyAddress} ✓`);
+console.log(`  TierRegistry.factory:         ${factoryProxyAddress} ✓`);
 console.log("=============================\n");
 
 console.log("⚠️  Remaining manual steps before packs can open:");
@@ -744,10 +868,16 @@ console.log(
 console.log(`       packVRFRouter.setAuthorizedPackMachine(clone, true)`);
 console.log(`  4. Register the clone with BuybackPool (PACK_OPERATOR_ROLE):`);
 console.log(`       buybackPool.registerPackMachine(clone, true)`);
-console.log(`  5. Configure pack buyback allocation (PACK_OPERATOR_ROLE):`);
+console.log(
+  `  5. Configure pack tier FMV bounds (PACK_OPERATOR_ROLE) — required before deposit:`,
+);
+console.log(
+  `       packRegistry.setPackTierFmvBounds(clone, 0, [minFmv×6], [maxFmv×6])`,
+);
+console.log(`  6. Configure pack buyback allocation (PACK_OPERATOR_ROLE):`);
 console.log(
   `       packRegistry.setPackBuybackAllocation(clone, 0, <bps>)  // e.g. 2000 = 20%`,
 );
 console.log(
-  `  6. Deposit NFT inventory and open packs (via setup-pack-machine script).\n`,
+  `  7. Deposit NFT inventory and open packs (via setup-pack-machine script).\n`,
 );

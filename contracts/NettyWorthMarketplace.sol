@@ -210,22 +210,6 @@ contract NettyWorthMarketplace is
         _buyWithSignatureInternal(listing, sig, recipient);
     }
 
-    /// @inheritdoc INettyWorthMarketplace
-    function buyWithSignaturePushed(
-        SignedListing calldata listing,
-        bytes calldata sig,
-        address recipient
-    )
-        external
-        override
-        nonReentrant
-        whenNotPaused // Disabled for test
-        onlyProtocolRole(Roles.COINFLOW_SETTLER_ROLE)
-    {
-        if (recipient == address(0)) revert Marketplace__ZeroRecipient();
-        _buyWithSignatureInternalPushed(listing, sig, recipient);
-    }
-
     /// @dev Shared logic for buyWithSignature and buyWithSignatureFor (pull model).
     ///      msg.sender always pays; `recipient` receives the NFT.
     function _buyWithSignatureInternal(
@@ -244,33 +228,6 @@ contract NettyWorthMarketplace is
             listing.price,
             msg.sender, // payer — funds source
             recipient // NFT destination
-        );
-    }
-
-    /// @dev Push-model variant for Coinflow: validates the listing identically then calls
-    ///      _executeSalePushed (which checks that listing.price is already in the contract
-    ///      balance rather than pulling via transferFrom).
-    function _buyWithSignatureInternalPushed(
-        SignedListing calldata listing,
-        bytes calldata sig,
-        address recipient
-    ) internal {
-        MarketplaceStorage storage $ = _getMarketplaceStorage();
-        _validateListing($, listing, sig, recipient);
-        _executeSalePushed(
-            $,
-            listing.seller,
-            listing.collection,
-            listing.tokenId,
-            listing.paymentToken,
-            listing.price,
-            recipient
-        );
-        emit PushedSaleSettled(
-            listing.seller,
-            recipient,
-            listing.tokenId,
-            listing.price
         );
     }
 
@@ -858,17 +815,18 @@ contract NettyWorthMarketplace is
     // Internal: sale execution core
     // =========================================================================
 
-    /// @dev Shared sale path for both fixed-price and auction settlement.
+    /// @dev Shared sale path for fixed-price and auction settlement (pull model).
     ///      Steps (CEI respected — nonce/settled flag set before this call):
     ///        1. Detect pool-default sale (tokenId in poolDefaultLoanOf map) — waive fee+royalty.
     ///        2. Compute collectible fee from FeeController (skipped for pool-default).
     ///        3. Compute royalty from EIP-2981 (skipped for pool-default; capped otherwise).
-    ///        4. Check minPrice (gross >= collectibleFee + royalty + loanDebt).
-    ///        5. Pull gross from buyer into this contract.
+    ///        4. Loan debt lookup (H005: only for the pool's AssetNFT collection).
+    ///        5. Pull gross from payer into this contract via safeTransferFrom; balance-delta
+    ///           guard against fee-on-transfer tokens (M005 fix).
     ///        6. Distribute collectible fee → treasury.
     ///        7. Distribute royalty → royalty receiver.
     ///        8a. If active loan: approve pool + call settleLoanRepaymentOnSale (pool delivers NFT).
-    ///        8b. If no loan (incl. pool-default): transferFrom(seller, buyer).
+    ///        8b. If no loan (incl. pool-default): transferFrom(seller, recipient).
     ///        9. Pay seller net proceeds.
     ///        Note: for pool-default sales, settleAuction calls onDefaultedAssetSold afterward
     ///        (after this function returns) to resolve the default record in the pool.
@@ -881,70 +839,6 @@ contract NettyWorthMarketplace is
         uint256 gross,
         address payer,
         address recipient
-    ) internal {
-        _settleSale(
-            $,
-            seller,
-            collection,
-            tokenId,
-            paymentToken,
-            gross,
-            payer,
-            recipient,
-            false // pull: transferFrom(payer, this, gross)
-        );
-    }
-
-    /// @dev Push-model sale dispatcher used by buyWithSignaturePushed (Coinflow onramp).
-    ///      Verifies that `gross` of `paymentToken` is already in this contract's balance
-    ///      (delivered by Coinflow's settler in the same tx) then calls the shared _settleSale.
-    function _executeSalePushed(
-        MarketplaceStorage storage $,
-        address seller,
-        address collection,
-        uint256 tokenId,
-        address paymentToken,
-        uint256 gross,
-        address recipient
-    ) internal {
-        _settleSale(
-            $,
-            seller,
-            collection,
-            tokenId,
-            paymentToken,
-            gross,
-            address(0), // payer unused in push path
-            recipient,
-            true // push: funds already in contract balance
-        );
-    }
-
-    /// @dev Core sale settlement shared by both the pull path (_executeSale) and the push
-    ///      path (_executeSalePushed). Steps:
-    ///        1. Pool-default detection (waive fees/royalty for pool-owned defaulted assets).
-    ///        2. Collectible fee computation (normal path only).
-    ///        3. EIP-2981 royalty computation, try/catch, capped (normal path only).
-    ///        4. Loan debt lookup (H005: only for the pool's AssetNFT collection).
-    ///        5a. Pull path: safeTransferFrom(payer→this, gross) with fee-on-transfer guard (M005).
-    ///        5b. Push path: balance sufficiency check (Coinflow transferred before this call).
-    ///        6. Collectible fee → treasury.
-    ///        7. Royalty → receiver.
-    ///        8a. If active loan: approve pool + settleLoanRepaymentOnSale (pool delivers NFT).
-    ///        8b. If no loan (incl. pool-default): transferFrom(seller, recipient).
-    ///        9. Seller net proceeds → seller.
-    ///        Note: for pool-default sales, settleAuction calls onDefaultedAssetSold afterward
-    ///        (after this function returns) to resolve the default record in the pool.
-    function _settleSale(
-        MarketplaceStorage storage $,
-        address seller,
-        address collection,
-        uint256 tokenId,
-        address paymentToken,
-        uint256 gross,
-        address payer,
-        address recipient,
-        bool pushed
     ) internal {
         // 1. Pool-default detection: if this tokenId was listed by listDefaultedAsset, waive
         //    collectible fee and royalty so the pool receives full gross proceeds (= winning bid).
@@ -997,23 +891,14 @@ contract NettyWorthMarketplace is
 
         uint256 sellerProceeds = gross - collectibleFee - royalty - loanDebt;
 
-        if (pushed) {
-            // 5b. Push path (Coinflow): verify USDC was already delivered to this contract
-            //     by the Coinflow settler earlier in the same tx. Distribute EXACTLY `gross`;
-            //     any surplus balance beyond `gross` is intentionally left in the contract.
-            uint256 bal = IERC20(paymentToken).balanceOf(address(this));
-            if (bal < gross)
-                revert Marketplace__InsufficientPushedBalance(gross, bal);
-        } else {
-            // 5a. Pull path: safeTransferFrom(payer→this, gross); balance-delta guard against
-            //     fee-on-transfer tokens that deliver less than requested (M005 fix).
-            uint256 balBefore = IERC20(paymentToken).balanceOf(address(this));
-            IERC20(paymentToken).safeTransferFrom(payer, address(this), gross);
-            uint256 actualReceived =
-                IERC20(paymentToken).balanceOf(address(this)) - balBefore;
-            if (actualReceived < gross)
-                revert Marketplace__InsufficientReceived(gross, actualReceived);
-        }
+        // 5. Pull path: safeTransferFrom(payer→this, gross); balance-delta guard against
+        //    fee-on-transfer tokens that deliver less than requested (M005 fix).
+        uint256 balBefore = IERC20(paymentToken).balanceOf(address(this));
+        IERC20(paymentToken).safeTransferFrom(payer, address(this), gross);
+        uint256 actualReceived =
+            IERC20(paymentToken).balanceOf(address(this)) - balBefore;
+        if (actualReceived < gross)
+            revert Marketplace__InsufficientReceived(gross, actualReceived);
 
         // 6. Collectible fee → treasury
         if (collectibleFee > 0) {

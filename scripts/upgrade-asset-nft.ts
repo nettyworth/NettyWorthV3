@@ -4,6 +4,7 @@ import { createInterface } from "node:readline/promises";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sleep } from "./lib/sleep.js";
 
 // ERC-2771 trusted forwarder baked into the implementation bytecode at construction.
 // Must match the forwarder used on the current proxy's implementation to avoid
@@ -157,6 +158,7 @@ const txHash = await nft.write.upgradeToAndCall(
   { account: upgraderClient.account },
 );
 const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+await sleep(4000);
 console.log(`  Upgrade tx: ${txHash} (block ${receipt.blockNumber})`);
 
 console.log("[3/3] Verifying upgrade...");

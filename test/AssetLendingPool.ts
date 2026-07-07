@@ -142,7 +142,8 @@ describe("AssetLendingPool", async function () {
     await pool.write.deposit([POOL_SEED], { account: walletAdmin.account });
 
     // Set a fake marketplace address on config so financeMarketplacePurchase can verify listing sigs.
-    const fakeMarketplace = "0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF" as Address;
+    const fakeMarketplace =
+      "0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF" as Address;
     await config.write.setMarketplace([fakeMarketplace], {
       account: walletAdmin.account,
     });
@@ -577,10 +578,9 @@ describe("AssetLendingPool", async function () {
       });
 
       await assert.rejects(
-        pool.write.financeMarketplacePurchase(
-          [listing, sig, tooLow, 0],
-          { account: walletBorrower.account },
-        ),
+        pool.write.financeMarketplacePurchase([listing, sig, tooLow, 0], {
+          account: walletBorrower.account,
+        }),
       );
     });
 
@@ -614,10 +614,9 @@ describe("AssetLendingPool", async function () {
       });
 
       await assert.rejects(
-        pool.write.financeMarketplacePurchase(
-          [listing, badSig, MAX_LOAN, 0],
-          { account: walletBorrower.account },
-        ),
+        pool.write.financeMarketplacePurchase([listing, badSig, MAX_LOAN, 0], {
+          account: walletBorrower.account,
+        }),
       );
     });
   });
@@ -1102,16 +1101,19 @@ describe("AssetLendingPool", async function () {
   // $100 default minimum appraisal value
   // =========================================================================
 
-  describe("$100 default minimum appraisal", async function () {
+  describe("$15 default minimum appraisal", async function () {
     it("minAppraisalValue defaults to 100e6 on deployment", async function () {
       const { pool, config } = await deploy();
-      assert.equal((await pool.read.getPoolInfo()).minAppraisalValue, 100n * 10n ** 6n);
+      assert.equal(
+        (await pool.read.getPoolInfo()).minAppraisalValue,
+        5n * 10n ** 6n,
+      );
     });
 
-    it("borrow reverts if appraisal is below the $100 default", async function () {
+    it("borrow reverts if appraisal is below the $5 default", async function () {
       const { usdc: _usdc, nft, pool, config } = await deploy();
       const tokenId = await mintNFT(nft, borrowerAddress);
-      await config.write.setAppraisal([tokenId, 50n * 10n ** 6n, 0n, 0n], {
+      await config.write.setAppraisal([tokenId, 4n * 10n ** 6n, 0n, 0n], {
         account: walletAdmin.account,
       });
       await nft.write.approve([pool.address, tokenId], {
@@ -1153,9 +1155,18 @@ describe("AssetLendingPool", async function () {
       });
 
       // Pool owns all three NFTs
-      assert.equal(getAddress(await nft.read.ownerOf([t1])), getAddress(pool.address));
-      assert.equal(getAddress(await nft.read.ownerOf([t2])), getAddress(pool.address));
-      assert.equal(getAddress(await nft.read.ownerOf([t3])), getAddress(pool.address));
+      assert.equal(
+        getAddress(await nft.read.ownerOf([t1])),
+        getAddress(pool.address),
+      );
+      assert.equal(
+        getAddress(await nft.read.ownerOf([t2])),
+        getAddress(pool.address),
+      );
+      assert.equal(
+        getAddress(await nft.read.ownerOf([t3])),
+        getAddress(pool.address),
+      );
 
       // Single loan with 3 tokenIds
       const loanIds = await pool.read.getBorrowerLoans([borrowerAddress]);
@@ -1177,9 +1188,18 @@ describe("AssetLendingPool", async function () {
       await pool.write.repay([loanIds[0]], { account: walletBorrower.account });
 
       // All NFTs returned
-      assert.equal(getAddress(await nft.read.ownerOf([t1])), getAddress(borrowerAddress));
-      assert.equal(getAddress(await nft.read.ownerOf([t2])), getAddress(borrowerAddress));
-      assert.equal(getAddress(await nft.read.ownerOf([t3])), getAddress(borrowerAddress));
+      assert.equal(
+        getAddress(await nft.read.ownerOf([t1])),
+        getAddress(borrowerAddress),
+      );
+      assert.equal(
+        getAddress(await nft.read.ownerOf([t2])),
+        getAddress(borrowerAddress),
+      );
+      assert.equal(
+        getAddress(await nft.read.ownerOf([t3])),
+        getAddress(borrowerAddress),
+      );
       assert.equal((await pool.read.getLoan([loanIds[0]])).isPaid, true);
     });
 

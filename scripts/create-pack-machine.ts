@@ -7,22 +7,17 @@ import { fileURLToPath } from "node:url";
 
 // ─── Pack parameters (override via environment variables) ─────────────────────
 // PRICE_PER_PACK: USDC cost per pack in raw units (6 decimals). e.g. "10000000" = 10 USDC
-if (!process.env.PRICE_PER_PACK) {
-  console.error(
-    "PRICE_PER_PACK env var is required (USDC cost per pack in 6-decimal raw units, e.g. 10000000 = 10 USDC).",
-  );
-  process.exit(1);
-}
-const PRICE_PER_PACK = BigInt(process.env.PRICE_PER_PACK);
+// Defaults to 0 — pack 0 is created as a placeholder; configure real price via UI/PackRegistry.
+const PRICE_PER_PACK = process.env.PRICE_PER_PACK
+  ? BigInt(process.env.PRICE_PER_PACK)
+  : 0n;
 
 // CARDS_PER_PACK: number of NFT cards dispensed per pack open (uint8).
-if (!process.env.CARDS_PER_PACK) {
-  console.error(
-    "CARDS_PER_PACK env var is required (number of cards per pack open, e.g. 3).",
-  );
-  process.exit(1);
-}
-const CARDS_PER_PACK = Number(process.env.CARDS_PER_PACK);
+// Defaults to 1 — minimum valid value (factory requires cardsPerPack != 0).
+// Configure real value via UI/PackRegistry after machine creation.
+const CARDS_PER_PACK = process.env.CARDS_PER_PACK
+  ? Number(process.env.CARDS_PER_PACK)
+  : 1;
 if (CARDS_PER_PACK < 1 || CARDS_PER_PACK > 255) {
   console.error("CARDS_PER_PACK must be between 1 and 255.");
   process.exit(1);
@@ -51,8 +46,12 @@ async function confirm(
   console.log(`PackMachineFactory:  ${factoryProxy}`);
   console.log(`PackVRFRouter:       ${vrfRouterProxy}`);
   console.log(`BuybackPool:         ${buybackProxy}`);
-  console.log(`Price Per Pack:      ${PRICE_PER_PACK} (raw units)`);
-  console.log(`Cards Per Pack:      ${CARDS_PER_PACK}`);
+  console.log(
+    `Price Per Pack:      ${PRICE_PER_PACK} (raw units, placeholder — configure via UI)`,
+  );
+  console.log(
+    `Cards Per Pack:      ${CARDS_PER_PACK} (placeholder — configure via UI)`,
+  );
   console.log(`Start Time:          ${START_TIME} (unix)`);
   console.log("=====================================\n");
   const answer = await rl.question("Proceed? (yes/no): ");
@@ -219,27 +218,15 @@ console.log(
 );
 console.log(`Clone:               ${cloneAddress}`);
 console.log(`Factory:             ${factoryProxy}`);
-console.log(`Price Per Pack:      ${PRICE_PER_PACK} (raw units)`);
-console.log(`Cards Per Pack:      ${CARDS_PER_PACK}`);
+console.log(`Pack 0:              placeholder (price ${PRICE_PER_PACK}, ${CARDS_PER_PACK} card/pack)`);
 console.log(`Start Time:          ${START_TIME} (unix)`);
 console.log(`VRF authorized:      ✓`);
 console.log(`Buyback registered:  ✓`);
 console.log("===========================\n");
 
-console.log("⚠️  Remaining steps before packs can open:");
-console.log(
-  `  1. (Optional) Configure buyback on the clone (PACK_OPERATOR_ROLE):`,
-);
-console.log(`       clone.setBuybackPool(${buybackProxy})             // stays on clone`);
-console.log(
-  `       packRegistry.setPackBuybackAllocation(${cloneAddress}, 0, <bps>)  // e.g. 2000 = 20%`,
-);
-console.log(`  2. Deposit NFT inventory into the clone (PACK_OPERATOR_ROLE):`);
-console.log(
-  `       assetNFT.setApprovalForAll(${cloneAddress}, true)  // from token owner`,
-);
-console.log(`       clone.deposit(tokenIds, tiers, tokensOwner)`);
-console.log(`  3. Users can open packs once inventory >= cardsPerPack.\n`);
+console.log("ℹ️  Machine is wired and ready. Configure packs via the UI or PackRegistry:");
+console.log(`     PackRegistry.addPack / setPackPrice / setPackTierWeights / setPackTierFmvBounds`);
+console.log(`     Then deposit inventory and the machine is ready to open.\n`);
 
 // ─── Persist deployment record (live networks only) ───────────────────────────
 if (connection.networkConfig.type === "http") {

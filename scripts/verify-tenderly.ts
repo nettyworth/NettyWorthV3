@@ -95,7 +95,6 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //       args: [e.admin as `0x${string}`],
   //     }),
   // },
-
   // AssetNFT: {
   //   sourcePath: "AssetNFT.sol",
   //   contractName: "AssetNFT",
@@ -133,7 +132,6 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //       ],
   //     }),
   // },
-
   // PackVRFRouter: {
   //   sourcePath: "PackVRFRouter.sol",
   //   contractName: "PackVRFRouter",
@@ -165,7 +163,6 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //       ],
   //     }),
   // },
-
   // // PackMachineImplementation has no proxy — it is the EIP-1167 clone template.
   // PackMachineImplementation: {
   //   sourcePath: "PackMachine.sol",
@@ -176,7 +173,6 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //     ),
   //   proxyInitData: () => null, // no proxy
   // },
-
   // PackMachineFactory: {
   //   sourcePath: "PackMachineFactory.sol",
   //   contractName: "PackMachineFactory",
@@ -207,7 +203,6 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //       ],
   //     }),
   // },
-
   // PackRegistry: {
   //   sourcePath: "PackRegistry.sol",
   //   contractName: "PackRegistry",
@@ -225,7 +220,6 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //       args: [e.permissionManager as `0x${string}`],
   //     }),
   // },
-
   BuybackPool: {
     sourcePath: "BuybackPool.sol",
     contractName: "BuybackPool",
@@ -255,10 +249,9 @@ const CONTRACT_META: Record<string, ContractMeta> = {
         ],
       }),
   },
-
-  // AssetLendingPool: {
-  //   sourcePath: "AssetLendingPool.sol",
-  //   contractName: "AssetLendingPool",
+  // AssetLendingPoolConfig: {
+  //   sourcePath: "AssetLendingPoolConfig.sol",
+  //   contractName: "AssetLendingPoolConfig",
   //   implCtorArgs: () => null,
   //   proxyInitData: (e) =>
   //     encodeFunctionData({
@@ -283,16 +276,34 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //         e.owner as `0x${string}`,
   //         e.paymentToken as `0x${string}`,
   //         e.assetNFT as `0x${string}`,
-  //         BigInt(e.ltvBps),
-  //         BigInt(e.lenderShareBps),
-  //         BigInt(e.acquisitionWindow),
-  //         BigInt(e.auctionWindow),
-  //         (e.packMachineFactory ??
-  //           "0x0000000000000000000000000000000000000001") as `0x${string}`,
+  //         BigInt(e?.ltvBps ?? "5000"),
+  //         BigInt(e?.lenderShareBps ?? "8000"),
+  //         BigInt(e?.acquisitionWindow ?? String(24 * 3600)),
+  //         BigInt(e?.auctionWindow ?? String(7 * 24 * 3600)),
+  //         e.packMachineFactory as `0x${string}`,
   //       ],
   //     }),
   // },
-
+  // AssetLendingPool: {
+  //   sourcePath: "AssetLendingPool.sol",
+  //   contractName: "AssetLendingPool",
+  //   implCtorArgs: () => null,
+  //   proxyInitData: (e) =>
+  //     encodeFunctionData({
+  //       abi: [
+  //         {
+  //           type: "function",
+  //           name: "initialize",
+  //           inputs: [
+  //             { type: "address" }, // initialOwner
+  //             { type: "address" }, // config (AssetLendingPoolConfig proxy)
+  //           ],
+  //         },
+  //       ],
+  //       functionName: "initialize",
+  //       args: [e.owner as `0x${string}`, e.config as `0x${string}`],
+  //     }),
+  // },
   // FeeController: {
   //   sourcePath: "FeeController.sol",
   //   contractName: "FeeController",
@@ -316,7 +327,6 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //       ],
   //     }),
   // },
-
   // NettyWorthMarketplace: {
   //   sourcePath: "NettyWorthMarketplace.sol",
   //   contractName: "NettyWorthMarketplace",
@@ -348,7 +358,6 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //       ],
   //     }),
   // },
-
   // P2PTradeEscrow: {
   //   sourcePath: "P2PTradeEscrow.sol",
   //   contractName: "P2PTradeEscrow",
@@ -366,7 +375,6 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //       args: [e.owner as `0x${string}`],
   //     }),
   // },
-
   // PromoCodeRegistry: {
   //   sourcePath: "PromoCodeRegistry.sol",
   //   contractName: "PromoCodeRegistry",

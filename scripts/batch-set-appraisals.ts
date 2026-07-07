@@ -1,5 +1,5 @@
 import { network } from "hardhat";
-import { getAddress } from "viem";
+import { getAddress, parseUnits } from "viem";
 import { createInterface } from "node:readline/promises";
 import { readFile } from "node:fs/promises";
 import { join, dirname, resolve } from "node:path";
@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 interface AppraisalEntry {
   tokenId: number;
-  value: number;
+  value: number | string;
   grade: number;
   category: number;
 }
@@ -22,7 +22,7 @@ if (!rawFile) {
     "Missing APPRAISALS_FILE env var. Set it to the path of a JSON file containing an array of appraisal entries.",
   );
   console.error(
-    '  Example: APPRAISALS_FILE=./appraisals.json npx hardhat run scripts/batch-set-appraisals.ts --network sepolia',
+    "  Example: APPRAISALS_FILE=./appraisals.json npx hardhat run scripts/batch-set-appraisals.ts --network sepolia",
   );
   console.error(
     '  JSON format: [{ "tokenId": 1, "value": 1000, "grade": 9, "category": 0 }, ...]',
@@ -36,7 +36,9 @@ try {
   const raw = await readFile(appraisalsPath, "utf8");
   appraisals = JSON.parse(raw) as AppraisalEntry[];
 } catch (err) {
-  console.error(`Failed to read or parse APPRAISALS_FILE at "${appraisalsPath}": ${err}`);
+  console.error(
+    `Failed to read or parse APPRAISALS_FILE at "${appraisalsPath}": ${err}`,
+  );
   process.exit(1);
 }
 
@@ -58,15 +60,20 @@ for (let i = 0; i < appraisals.length; i++) {
     !Number.isInteger(entry.tokenId) ||
     entry.tokenId < 0
   ) {
-    console.error(`${ctx}: "tokenId" must be a non-negative integer. Got: ${JSON.stringify(entry.tokenId)}`);
+    console.error(
+      `${ctx}: "tokenId" must be a non-negative integer. Got: ${JSON.stringify(entry.tokenId)}`,
+    );
     process.exit(1);
   }
+  const numValue = Number(entry.value);
   if (
-    typeof entry.value !== "number" ||
-    !Number.isInteger(entry.value) ||
-    entry.value < 0
+    (typeof entry.value !== "number" && typeof entry.value !== "string") ||
+    !isFinite(numValue) ||
+    numValue < 0
   ) {
-    console.error(`${ctx}: "value" must be a non-negative integer (whole token units, e.g. 1000 for $1000). Got: ${JSON.stringify(entry.value)}`);
+    console.error(
+      `${ctx}: "value" must be a non-negative number (e.g. 59.99 for $59.99). Got: ${JSON.stringify(entry.value)}`,
+    );
     process.exit(1);
   }
   if (
@@ -74,7 +81,9 @@ for (let i = 0; i < appraisals.length; i++) {
     !Number.isInteger(entry.grade) ||
     entry.grade < 0
   ) {
-    console.error(`${ctx}: "grade" must be a non-negative integer. Got: ${JSON.stringify(entry.grade)}`);
+    console.error(
+      `${ctx}: "grade" must be a non-negative integer. Got: ${JSON.stringify(entry.grade)}`,
+    );
     process.exit(1);
   }
   if (
@@ -82,7 +91,9 @@ for (let i = 0; i < appraisals.length; i++) {
     !Number.isInteger(entry.category) ||
     entry.category < 0
   ) {
-    console.error(`${ctx}: "category" must be a non-negative integer (0 = uncategorized). Got: ${JSON.stringify(entry.category)}`);
+    console.error(
+      `${ctx}: "category" must be a non-negative integer (0 = uncategorized). Got: ${JSON.stringify(entry.category)}`,
+    );
     process.exit(1);
   }
 }
@@ -174,7 +185,10 @@ if (process.env.ASSET_LENDING_POOL_PROXY) {
 // ─── Resolve config proxy (batchSetAppraisals lives on AssetLendingPoolConfig) ──
 const pool = await viem.getContractAt("AssetLendingPool", proxyAddress);
 const configProxyAddress = await pool.read.getConfig();
-const config = await viem.getContractAt("AssetLendingPoolConfig", configProxyAddress);
+const config = await viem.getContractAt(
+  "AssetLendingPoolConfig",
+  configProxyAddress,
+);
 
 // ─── Verify caller is owner ───────────────────────────────────────────────────
 const owner = await config.read.owner();
@@ -208,10 +222,10 @@ const decimals = await publicClient.readContract({
   functionName: "decimals",
 });
 
-const scale = 10n ** BigInt(decimals);
-
 console.log(`\nPayment token: ${paymentTokenAddress} (${decimals} decimals)`);
-console.log(`Appraisals loaded: ${appraisals.length} entries from "${appraisalsPath}"`);
+console.log(
+  `Appraisals loaded: ${appraisals.length} entries from "${appraisalsPath}"`,
+);
 
 // ─── Chunk into batches of MAX_BATCH ─────────────────────────────────────────
 
@@ -252,20 +266,22 @@ const txHashes: `0x${string}`[] = [];
 for (let ci = 0; ci < chunks.length; ci++) {
   const chunk = chunks[ci];
   const tokenIds = chunk.map((e) => BigInt(e.tokenId));
-  const values = chunk.map((e) => BigInt(e.value) * scale);
+  const values = chunk.map((e) => parseUnits(String(e.value), decimals));
   const grades = chunk.map((e) => BigInt(e.grade));
   const categories = chunk.map((e) => BigInt(e.category));
 
   console.log(
     `\n[${ci + 1}/${chunks.length}] Calling batchSetAppraisals for ${chunk.length} token(s)` +
-    ` (tokenIds: ${tokenIds.slice(0, 5).map(String).join(", ")}${tokenIds.length > 5 ? ", ..." : ""})...`,
+      ` (tokenIds: ${tokenIds.slice(0, 5).map(String).join(", ")}${tokenIds.length > 5 ? ", ..." : ""})...`,
   );
 
-  const txHash = await pool.write.batchSetAppraisals(
+  const txHash = await config.write.batchSetAppraisals(
     [tokenIds, values, grades, categories],
     { account: callerClient.account },
   );
-  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+  const receipt = await publicClient.waitForTransactionReceipt({
+    hash: txHash,
+  });
   console.log(`  tx: ${txHash} (block ${receipt.blockNumber})`);
   txHashes.push(txHash);
 }
@@ -277,7 +293,7 @@ let mismatches = 0;
 
 for (const entry of appraisals) {
   const tokenId = BigInt(entry.tokenId);
-  const expectedValue = BigInt(entry.value) * scale;
+  const expectedValue = parseUnits(String(entry.value), decimals);
   const appraisal = await pool.read.getAppraisal([tokenId]);
 
   if (
@@ -288,8 +304,8 @@ for (const entry of appraisals) {
   ) {
     console.error(
       `CRITICAL: State mismatch for tokenId ${entry.tokenId}!\n` +
-      `  Expected: value=${expectedValue}, grade=${entry.grade}, category=${entry.category}\n` +
-      `  Got:      value=${appraisal.value}, grade=${appraisal.grade}, category=${appraisal.category}, updatedAt=${appraisal.updatedAt}`,
+        `  Expected: value=${expectedValue}, grade=${entry.grade}, category=${entry.category}\n` +
+        `  Got:      value=${appraisal.value}, grade=${appraisal.grade}, category=${appraisal.category}, updatedAt=${appraisal.updatedAt}`,
     );
     mismatches++;
   }
@@ -307,7 +323,9 @@ console.log(`  All ${appraisals.length} appraisal(s) verified ✓`);
 console.log("\n=== batchSetAppraisals Complete ===");
 console.log(`Network:   ${connection.networkName} (chainId: ${chainId})`);
 console.log(`Proxy:     ${proxyAddress}`);
-console.log(`Tokens:    ${appraisals.length} appraised in ${chunks.length} batch(es)`);
+console.log(
+  `Tokens:    ${appraisals.length} appraised in ${chunks.length} batch(es)`,
+);
 for (let i = 0; i < txHashes.length; i++) {
   console.log(`Tx[${i + 1}]:    ${txHashes[i]}`);
 }

@@ -1,0 +1,23 @@
+[
+  {
+    "tokenId": 1,
+    "assignments": [
+      { "packId": 0, "tier": 3 },
+      { "packId": 1, "tier": 1 }
+    ]
+  },
+  {
+    "tokenId": 2,
+    "assignments": [
+      { "packId": 0, "tier": 0 }
+    ]
+  },
+  {
+    "tokenId": 3,
+    "assignments": [
+      { "packId": 0, "tier": 2 },
+      { "packId": 1, "tier": 0 },
+      { "packId": 2, "tier": 1 }
+    ]
+  }
+]

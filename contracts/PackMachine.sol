@@ -555,16 +555,9 @@ contract PackMachine is
                 // Wrapped in try/catch: a registration failure must never revert card
                 // delivery — the user already owns the NFT at this point.
                 if (poolActive) {
-                    // Divide escrowedAmount by cardsCount for the actual discounted per-card
-                    // basis rather than the full list price (C001 fix: prevents discount+boost
-                    // arbitrage). cardsCount > 0 is guaranteed — VRF was requested for it.
-                    uint128 basisPerCard = uint128(
-                        pending.escrowedAmount / pending.cardsCount
-                    );
                     try
                         IBuybackPool(pool).registerToken(
                             tokenId,
-                            basisPerCard,
                             uint8(selectedTier),
                             address(this)
                         )
