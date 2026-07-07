@@ -366,11 +366,9 @@ contract NettyWorthMarketplace is
         MarketplaceStorage storage $ = _getMarketplaceStorage();
 
         // --- Validate auction signature ---
-        bytes32 auctionId = _hashAuction(auction);
+        bytes32 auctionId = _hashTypedDataV4(_hashAuction(auction));
         {
-            address auctionSigner = _hashTypedDataV4(auctionId).recover(
-                auctionSig
-            );
+            address auctionSigner = auctionId.recover(auctionSig);
             if (auctionSigner != auction.seller)
                 revert Marketplace__InvalidSignature();
         }
@@ -417,12 +415,17 @@ contract NettyWorthMarketplace is
         AuctionState storage state = $.auctions[auctionId];
 
         if (!state.exists) {
-            // First bid: materialise auction state from the signed auction
             if (block.timestamp > auction.endTime)
                 revert Marketplace__AuctionEnded();
             if (bid.amount < auction.reservePrice) {
                 revert Marketplace__BidTooLow(bid.amount, auction.reservePrice);
             }
+
+            if ($.usedNonces[auction.seller][auction.nonce]) {
+                revert Marketplace__NonceUsed(auction.seller, auction.nonce);
+            }
+            $.usedNonces[auction.seller][auction.nonce] = true;
+
             state.seller = auction.seller;
             state.collection = auction.collection;
             state.tokenId = auction.tokenId;
@@ -858,16 +861,15 @@ contract NettyWorthMarketplace is
                 address receiver,
                 uint256 amount
             ) {
-                royaltyReceiver = receiver;
-                royalty = amount;
+                if (receiver != address(0)) {
+                    royaltyReceiver = receiver;
+                    royalty = amount;
+                }
             } catch {} // solhint-disable-line no-empty-blocks
         }
 
         // 4. Loan debt (active loan check — always zero for pool-default since tokenIdToActiveLoan
         //    was cleared by _initiateDefault, but checked uniformly for correctness).
-        //    H005 fix: only look up loan debt when the collection is the pool's AssetNFT, so a
-        //    second allowlisted collection with a colliding tokenId cannot trigger a false-positive
-        //    loan branch that delivers AssetNFT collateral to an unintended buyer.
         (, , uint256 loanDebt) = (collection == $.lendingPool.getAssetNFT())
             ? $.lendingPool.getLoanDebt(tokenId)
             : (uint256(0), uint256(0), uint256(0));

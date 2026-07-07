@@ -202,6 +202,11 @@ contract AssetNFT is
 
     error AssetNFT__ShipmentConfigNotSet();
 
+    /// @notice Thrown by initiateShipment when the computed fee exceeds the caller's stated maximum.
+    /// @param fee        Computed fee in payment-token units.
+    /// @param maxFee     Caller-supplied upper bound.
+    error AssetNFT__FeeExceedsMax(uint256 fee, uint256 maxFee);
+
     // =========================================================================
     // Constructor & initializer
     // =========================================================================
@@ -292,7 +297,14 @@ contract AssetNFT is
     // =========================================================================
 
     /// @notice Burns multiple asset tokens in a single transaction.
-    /// @dev Only tokens in `Held` or `RemovedFromPlatform` state may be burned. Limited to 50 tokens per batch.
+    /// @dev Only tokens in `RemovedFromPlatform` state may be burned. The previous
+    ///      `Held` branch has been removed because `Held` is also the state for pool-owned
+    ///      defaulted collateral and P2PTradeEscrow-escrowed tokens; burning in that state
+    ///      permanently voids the physical collateral without adjusting the holding contract's
+    ///      ledgers. To retire a genuinely idle `Held` token, first call batchSetAssetState
+    ///      (STATE_MANAGER_ROLE) to transition it to `RemovedFromPlatform`, then call batchBurn.
+    ///      This two-step flow enforces custody boundaries by design.
+    ///      Limited to 50 tokens per batch.
     /// @param tokenIds Array of token IDs to burn.
     function batchBurn(
         uint256[] calldata tokenIds
@@ -305,10 +317,7 @@ contract AssetNFT is
             uint256 tokenId = tokenIds[i];
             if (!_exists(tokenId)) revert AssetNFT__TokenNotFound(tokenId);
             AssetState state = $.assetStates[tokenId];
-            if (
-                state != AssetState.Held &&
-                state != AssetState.RemovedFromPlatform
-            ) {
+            if (state != AssetState.RemovedFromPlatform) {
                 revert AssetNFT__TokenNotBurnable(tokenId, state);
             }
             emit MetadataUpdate(tokenId);
@@ -514,8 +523,13 @@ contract AssetNFT is
     ///      in paymentToken from the caller to the treasury. If appraisal value is 0 (not appraised),
     ///      fee is 0 and the asset ships free. Requires feeController and lendingPool to be set.
     /// @param tokenId AssetNFT token to ship.
+    /// @param maxFee   Caller-supplied upper bound on the fee (in payment-token units).
+    ///                 Reverts with AssetNFT__FeeExceedsMax if the computed fee would exceed this
+    ///                 value, protecting the caller against appraisal or fee-bps changes that occur
+    ///                 between signing and execution. Pass type(uint256).max to accept any fee.
     function initiateShipment(
-        uint256 tokenId
+        uint256 tokenId,
+        uint256 maxFee
     ) external nonReentrant whenNotPaused {
         if (!_exists(tokenId)) revert AssetNFT__TokenNotFound(tokenId);
         address caller = _msgSender();
@@ -552,6 +566,7 @@ contract AssetNFT is
             ) {
                 revert AssetNFT__ShipmentConfigNotSet();
             }
+            if (fee > maxFee) revert AssetNFT__FeeExceedsMax(fee, maxFee);
             $.paymentToken.safeTransferFrom(caller, $.treasury, fee);
         }
 

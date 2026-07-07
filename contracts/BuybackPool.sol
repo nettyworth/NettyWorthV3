@@ -128,7 +128,6 @@ contract BuybackPool is
     // =========================================================================
 
     error BuybackPool__TokenNotRegistered(uint256 tokenId);
-    error BuybackPool__TokenAlreadyRegistered(uint256 tokenId);
     error BuybackPool__TokenNotActive(uint256 tokenId);
     error BuybackPool__NotTokenOwner(uint256 tokenId, address caller);
     error BuybackPool__InsufficientBalance(uint256 available, uint256 required);
@@ -256,7 +255,10 @@ contract BuybackPool is
     function setDefaultBuybackBps(
         uint16 bps
     ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
-        if (bps > BPS_PRECISION) revert BuybackPool__InvalidBps(bps);
+        // C008 equivalent: disallow 0 so the pool cannot be configured to take NFTs
+        // for zero payment. Also cap at 100% (BPS_PRECISION).
+        if (bps == 0 || bps > BPS_PRECISION)
+            revert BuybackPool__InvalidBps(bps);
         BuybackPoolStorage storage $ = _getStorage();
         emit DefaultBuybackBpsUpdated($.defaultBuybackBps, bps);
         $.defaultBuybackBps = bps;
@@ -431,6 +433,7 @@ contract BuybackPool is
         if (appraisal == 0) revert BuybackPool__NoAppraisal(tokenId);
 
         uint256 payout = (appraisal * buybackBps) / BPS_PRECISION;
+        if (payout == 0) revert BuybackPool__ZeroAmount();
 
         IERC20 paymentToken = IERC20($.paymentToken);
         uint256 balance = paymentToken.balanceOf(address(this));
@@ -462,9 +465,6 @@ contract BuybackPool is
         uint8 tier,
         address sourceMachine
     ) private {
-        // If the source machine is no longer a valid PackMachine (e.g. deregistered),
-        // hold the NFT here — admin can rescue it later. Emit TokenStuck so off-chain
-        // tooling can flag the NFT for admin rescue (L003 fix).
         if (!IPackMachineFactory($.factory).isPackMachine(sourceMachine)) {
             emit TokenStuck(tokenId, sourceMachine);
             return;

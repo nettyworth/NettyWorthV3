@@ -126,6 +126,12 @@ contract PackMachine is
         ///      so it can be restored in fulfillRandomness on a full-refund (all-cards-failed).
         ///      Written only when the discount is applied; cleared alongside pendingOpens.
         mapping(uint256 requestId => bool) pendingFirstOpen;
+        /// @dev Running count of VRF requests that have been submitted but whose
+        ///      fulfillRandomness has not yet completed. Incremented in _requestVRF, decremented
+        ///      at the end of every fulfillRandomness invocation. resetEffectivePrizePoolSize
+        ///      reverts if this counter is non-zero to prevent double-counting reservations that
+        ///      are still in-flight but already subtracted from effectivePrizePoolSize.
+        uint256 pendingRequestCount;
         /// @dev Per-(token,pack) tier. Tier is purely a per-pack property.
         ///      Survives a win as a DORMANT map (not deleted on win) so depositFromPool
         ///      restores per-pack tiers automatically. Cleared only on withdrawCards.
@@ -140,6 +146,13 @@ contract PackMachine is
         uint256 escrowedAmount;
         /// @dev Buyback allocation portion of escrowedAmount (routed to BuybackPool on settle).
         uint256 buybackAmount;
+        /// @dev Tier weights at the moment the user paid. fulfillRandomness uses these
+        ///      instead of reading live registry values so a mid-flight operator change
+        ///      cannot alter the distribution of cards the user receives.
+        uint32[6] tierWeightsSnapshot;
+        /// @dev buybackAllocationBps at the moment the user paid. Ensures the buyback
+        ///      routing fraction cannot be changed between payment and settlement.
+        uint16 buybackAllocationBpsSnapshot;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.PackMachine")) - 1)) & ~bytes32(uint256(0xff))
@@ -224,6 +237,7 @@ contract PackMachine is
         uint256 available,
         uint32 minCards
     );
+    error PackMachine__PendingRequests(uint256 count);
 
     // =========================================================================
     // Constructor (disables initializers on the implementation)
@@ -475,7 +489,8 @@ contract PackMachine is
         delete $.pendingCodeIds[requestId];
         delete $.pendingFirstOpen[requestId];
 
-        // Fetch pack config from registry at fulfill-time.
+        // Fetch pack config from registry at fulfill-time (used for pricePerPack in the
+        // PackOpened event and any fields not snapshotted at request time).
         PackTypes.Pack memory pack = _registry().getPack(
             address(this),
             pending.packId
@@ -484,7 +499,8 @@ contract PackMachine is
         IPackMachineFactory iFactory = IPackMachineFactory($.factory);
         address assetNFT = $.assetNFT;
         address pool = $.buybackPool;
-        bool poolActive = pool != address(0) && pack.buybackAllocationBps > 0;
+        bool poolActive =
+            pool != address(0) && pending.buybackAllocationBpsSnapshot > 0;
 
         iFactory.beforeTransfer(assetNFT);
 
@@ -497,8 +513,8 @@ contract PackMachine is
             uint256 totalActiveWeight;
             for (uint256 t; t < NUM_TIERS; ++t) {
                 if ($.packTierPools[pending.packId][t].length == 0) continue;
-                activeWeights[t] = pack.tierWeights[t];
-                totalActiveWeight += pack.tierWeights[t];
+                activeWeights[t] = pending.tierWeightsSnapshot[t];
+                totalActiveWeight += pending.tierWeightsSnapshot[t];
             }
 
             if (totalActiveWeight == 0) {
@@ -628,6 +644,7 @@ contract PackMachine is
                 $.hasClaimedFirstOpenDiscount[pending.user] = false;
             }
         }
+        $.pendingRequestCount--;
 
         emit PackOpened(
             pending.user,
@@ -836,10 +853,10 @@ contract PackMachine is
     // Admin — machine-wide configuration (custody-adjacent; stays on the clone)
     // =========================================================================
 
-    /// @notice Set the BuybackPool contract address (machine-wide).
     function setBuybackPool(
         address pool
     ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
+        if (!paused()) revert PackMachine__NotPaused();
         if (pool == address(0)) revert PackMachine__ZeroAddress();
         PackMachineStorage storage $ = _getStorage();
         emit BuybackPoolUpdated($.buybackPool, pool);
@@ -851,6 +868,7 @@ contract PackMachine is
         address depositor,
         bool authorized
     ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
+        if (!paused()) revert PackMachine__NotPaused();
         if (depositor == address(0)) revert PackMachine__ZeroAddress();
         _getStorage().authorizedDepositors[depositor] = authorized;
         emit AuthorizedDepositorUpdated(depositor, authorized);
@@ -1143,13 +1161,16 @@ contract PackMachine is
             cardsCount: cards,
             packId: packId,
             escrowedAmount: escrowedAmount,
-            buybackAmount: buybackAmount
+            buybackAmount: buybackAmount,
+            tierWeightsSnapshot: pack.tierWeights,
+            buybackAllocationBpsSnapshot: pack.buybackAllocationBps
         });
         // Store the promo code separately (sparse mapping — only written when non-zero).
         if (codeId != bytes32(0)) $.pendingCodeIds[requestId] = codeId;
         // Record first-open discount usage so it can be refunded on a full-failure open.
         if (firstOpenApplied) $.pendingFirstOpen[requestId] = true;
         $.totalEscrowed += escrowedAmount;
+        $.pendingRequestCount++;
     }
 
     /// @dev Add tokenId to every pack pool indicated by mask.
@@ -1429,6 +1450,9 @@ contract PackMachine is
     {
         if (!paused()) revert PackMachine__NotPaused();
         PackMachineStorage storage $ = _getStorage();
+
+        if ($.pendingRequestCount != 0)
+            revert PackMachine__PendingRequests($.pendingRequestCount);
 
         // Recompute per-pack available from pool sizes (no pending reservations while paused).
         uint256 packCount = _registry().getPackCount(address(this));

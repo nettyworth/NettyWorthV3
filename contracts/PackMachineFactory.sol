@@ -244,12 +244,15 @@ contract PackMachineFactory is
         if (success && data.length >= 32) {
             address transferValidator = abi.decode(data, (address));
             if (transferValidator != address(0)) {
-                // beforeAuthorizedTransfer(address operator, address token)
-                (bool ok, ) = transferValidator.call(
-                    abi.encodeWithSelector(0x931820d7, _msgSender(), token)
+                (bool ok, bytes memory revertData) = transferValidator.call(
+                    abi.encodeWithSelector(0x50793315, _msgSender(), token)
                 );
-                // Ignore return value — a revert from the validator will propagate automatically.
-                ok;
+                if (!ok) {
+                    // Bubble up the validator's revert payload.
+                    assembly {
+                        revert(add(revertData, 32), mload(revertData))
+                    }
+                }
             }
         }
     }
@@ -262,11 +265,14 @@ contract PackMachineFactory is
         if (success && data.length >= 32) {
             address transferValidator = abi.decode(data, (address));
             if (transferValidator != address(0)) {
-                // afterAuthorizedTransfer(address token)
-                (bool ok, ) = transferValidator.call(
-                    abi.encodeWithSelector(0x7a31f31f, token)
+                (bool ok, bytes memory revertData) = transferValidator.call(
+                    abi.encodeWithSelector(0x0ad38899, token)
                 );
-                ok;
+                if (!ok) {
+                    assembly {
+                        revert(add(revertData, 32), mload(revertData))
+                    }
+                }
             }
         }
     }

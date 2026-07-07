@@ -47,6 +47,10 @@ interface IAssetLendingPool {
         /// @dev totalLenderDeposits captured at origination so JIT deposit sandwiches
         ///      cannot dilute honest lenders' share of a specific loan's interest (H001 fix).
         uint256 lenderDepositsSnapshot;
+        /// @dev originationFeeBps captured at origination so an admin cannot
+        ///      front-run an in-flight borrow by raising the fee after collateral is locked.
+        ///      The fee is computed and collected from this snapshot rather than live config.
+        uint256 originationFeeBpsSnapshot;
     }
 
     struct AssetAppraisal {
@@ -69,6 +73,13 @@ interface IAssetLendingPool {
         /// @dev Set true by prepareDefaultedListing once the marketplace auction is live.
         ///      Prevents double-listing; reset by onDefaultedListingCancelled to allow relist.
         bool listedOnMarketplace;
+        /// @dev acquisition and auction window durations captured at the time
+        ///      initiateDefault() is called. Phase evaluation in getDefaultPhase(),
+        ///      acquireDefaultedAsset(), and prepareDefaultedListing() uses these snapshots
+        ///      instead of live config values, so admin changes to setDefaultLifecycleConfig
+        ///      only affect future defaults — not defaults already in progress.
+        uint256 acquisitionWindow;
+        uint256 auctionWindow;
     }
 
     struct LenderInfo {
@@ -438,7 +449,9 @@ interface IAssetLendingPool {
 
     /// @notice Returns the number of collateral tokens in a loan.
     ///         Used by the marketplace to reject single-token sales of multi-NFT bundle loans (H003 fix).
-    function getLoanCollateralCount(uint256 loanId) external view returns (uint256);
+    function getLoanCollateralCount(
+        uint256 loanId
+    ) external view returns (uint256);
 
     /// @notice Returns the AssetNFT contract address used by this pool.
     ///         Used by the marketplace to guard loan lookups to the correct collection (H005 fix).

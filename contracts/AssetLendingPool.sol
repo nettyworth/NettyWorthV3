@@ -263,7 +263,8 @@ contract AssetLendingPool is
         uint8 termId
     ) external override nonReentrant whenNotPaused {
         // Guard against self-financing: the pool cannot be both seller and lender (M009 fix).
-        if (listing.seller == address(this)) revert AssetLendingPool__InvalidSeller();
+        if (listing.seller == address(this))
+            revert AssetLendingPool__InvalidSeller();
 
         PoolStorage storage $ = _getStorage();
         IAssetLendingPoolConfig cfg = $.config;
@@ -291,7 +292,7 @@ contract AssetLendingPool is
                 listing.price,
                 listing.nonce,
                 listing.expiry,
-                listing.buyer  // must match new typehash that includes buyer field (H004 fix)
+                listing.buyer
             )
         );
         bytes32 digest = keccak256(
@@ -365,7 +366,8 @@ contract AssetLendingPool is
         $.paymentToken.safeTransfer(listing.seller, loanAmount);
 
         // Origination fee pulled from buyer on top of deposit.
-        uint256 fee = cfg.calculateOriginationFee(loanAmount);
+        uint256 fee =
+            (loanAmount * $.loans[loanId].originationFeeBpsSnapshot) / BPS;
         if (fee > 0) {
             $.paymentToken.safeTransferFrom(msg.sender, cfg.feeWallet(), fee);
         }
@@ -528,12 +530,11 @@ contract AssetLendingPool is
             !IPackMachineFactory(factory).isPackMachine(targetPackMachine)
         ) revert AssetLendingPool__InvalidPackMachine();
 
-        // Enforce Phase 1 window before any state changes.
         {
             DefaultRecord storage rec = $.defaults[loanId];
             if (rec.defaultedAt == 0)
                 revert AssetLendingPool__DefaultNotFound();
-            if (block.timestamp >= rec.defaultedAt + cfg.acquisitionWindow())
+            if (block.timestamp >= rec.defaultedAt + rec.acquisitionWindow)
                 revert AssetLendingPool__NotInAcquisitionPhase();
         }
 
@@ -588,7 +589,7 @@ contract AssetLendingPool is
 
         if (rec.defaultedAt == 0) revert AssetLendingPool__DefaultNotFound();
         if (rec.resolved) revert AssetLendingPool__DefaultAlreadyResolved();
-        if (block.timestamp < rec.defaultedAt + $.config.acquisitionWindow())
+        if (block.timestamp < rec.defaultedAt + rec.acquisitionWindow)
             revert AssetLendingPool__NotInPurchasePhase();
         if (rec.listedOnMarketplace) revert AssetLendingPool__AlreadyListed();
 
@@ -757,10 +758,9 @@ contract AssetLendingPool is
         DefaultRecord storage rec = $.defaults[loanId];
         if (rec.defaultedAt == 0) return DefaultPhase.None;
         if (rec.resolved) return DefaultPhase.Resolved;
-        IAssetLendingPoolConfig cfg = $.config;
         uint256 elapsed = block.timestamp - rec.defaultedAt;
-        uint256 acqW = cfg.acquisitionWindow();
-        uint256 aucW = cfg.auctionWindow();
+        uint256 acqW = rec.acquisitionWindow;
+        uint256 aucW = rec.auctionWindow;
         if (elapsed < acqW) return DefaultPhase.Acquisition;
         if (elapsed < acqW + aucW) return DefaultPhase.Auction;
         return DefaultPhase.FixedListing;
@@ -956,7 +956,12 @@ contract AssetLendingPool is
         _clearActiveLoans($, tokenIds);
         _removeBorrowerLoan($, borrower, loanId);
 
-        _distributeInterest($, interest, lenderShareBpsSnap, lenderDepositsSnap);
+        _distributeInterest(
+            $,
+            interest,
+            lenderShareBpsSnap,
+            lenderDepositsSnap
+        );
 
         // ---- External interactions ----
         $.paymentToken.safeTransferFrom(
@@ -1019,10 +1024,11 @@ contract AssetLendingPool is
 
     function _collectOriginationFee(
         PoolStorage storage $,
-        uint256 principal
+        uint256 principal,
+        uint256 feeBpsSnapshot
     ) private returns (uint256 fee) {
         IAssetLendingPoolConfig cfg = $.config;
-        fee = cfg.calculateOriginationFee(principal);
+        fee = (principal * feeBpsSnapshot) / BPS;
         if (fee > 0) {
             $.paymentToken.safeTransfer(cfg.feeWallet(), fee);
         }
@@ -1079,9 +1085,20 @@ contract AssetLendingPool is
             }
         }
 
-        _originateLoan($, msg.sender, tokenIds, amount, termId, false);
+        uint256 loanId = _originateLoan(
+            $,
+            msg.sender,
+            tokenIds,
+            amount,
+            termId,
+            false
+        );
 
-        uint256 fee = _collectOriginationFee($, amount);
+        uint256 fee = _collectOriginationFee(
+            $,
+            amount,
+            $.loans[loanId].originationFeeBpsSnapshot
+        );
         $.paymentToken.safeTransfer(msg.sender, amount - fee);
     }
 
@@ -1098,10 +1115,9 @@ contract AssetLendingPool is
             (principal * term.aprBps * term.duration) / (YEAR * BPS);
         uint256 expireTime = block.timestamp + term.duration;
 
-        // Snapshot config values at origination so they cannot be retroactively changed
-        // by the admin between origination and repayment (H001 / M003 fix).
         uint256 lenderShareBpsSnap = $.config.lenderShareBps();
         uint256 lenderDepositsSnap = $.totalLenderDeposits;
+        uint256 originationFeeBpsSnap = $.config.originationFeeBps();
 
         loanId = $.nextLoanId++;
         $.loans[loanId] = Loan({
@@ -1117,10 +1133,11 @@ contract AssetLendingPool is
             isDefaulted: false,
             isMarketplaceFinanced: isMarketplaceFinanced,
             lenderShareBpsSnapshot: lenderShareBpsSnap,
-            lenderDepositsSnapshot: lenderDepositsSnap
+            lenderDepositsSnapshot: lenderDepositsSnap,
+            originationFeeBpsSnapshot: originationFeeBpsSnap
         });
         $.borrowerLoans[borrower].push(loanId);
-        // Record index for O(1) removal on close (M002 fix).
+
         $.borrowerLoanIndex[loanId] = $.borrowerLoans[borrower].length - 1;
 
         for (uint256 i; i < tokenIds.length; ) {
@@ -1182,7 +1199,9 @@ contract AssetLendingPool is
             defaultedAt: block.timestamp,
             resolved: false,
             interestValue: loan.interest,
-            listedOnMarketplace: false
+            listedOnMarketplace: false,
+            acquisitionWindow: $.config.acquisitionWindow(),
+            auctionWindow: $.config.auctionWindow()
         });
 
         _setAssetStateBatch($, tokenIds, IAssetNFT.AssetState.Held);
@@ -1217,7 +1236,8 @@ contract AssetLendingPool is
     ) private {
         if (interest == 0) return;
         // Fall back to live values for pre-upgrade loans (snapshot fields default to 0).
-        if (totalLenderDeposits == 0) totalLenderDeposits = $.totalLenderDeposits;
+        if (totalLenderDeposits == 0)
+            totalLenderDeposits = $.totalLenderDeposits;
         if (lenderShareBps == 0) lenderShareBps = $.config.lenderShareBps();
         uint256 lenderPortion;
         if (totalLenderDeposits > 0) {

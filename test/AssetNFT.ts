@@ -271,8 +271,12 @@ describe("AssetNFT", async function () {
 
   describe("Burning", async function () {
     it("should batchBurn a token in Held state and emit MetadataUpdate", async function () {
+      // C007 fix: Held tokens must be transitioned to RemovedFromPlatform before burning.
       const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress], [TOKEN_URI]], {
+        account: walletAdmin.account,
+      });
+      await nft.write.batchSetAssetState([[1n], [AssetState.RemovedFromPlatform]], {
         account: walletAdmin.account,
       });
       const startBlock = (await publicClient.getBlockNumber()) + 1n;
@@ -292,8 +296,12 @@ describe("AssetNFT", async function () {
     });
 
     it("batchBurn burns multiple tokens in one call", async function () {
+      // C007 fix: must transition to RemovedFromPlatform before burning.
       const { nft } = await deployAssetNFT();
       await nft.write.batchMint([[userAddress, userAddress, userAddress], [TOKEN_URI, TOKEN_URI, TOKEN_URI]], {
+        account: walletAdmin.account,
+      });
+      await nft.write.batchSetAssetState([[1n, 2n, 3n], [AssetState.RemovedFromPlatform, AssetState.RemovedFromPlatform, AssetState.RemovedFromPlatform]], {
         account: walletAdmin.account,
       });
 

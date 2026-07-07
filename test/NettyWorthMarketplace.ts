@@ -6,7 +6,7 @@ import {
   encodeFunctionData,
   toHex,
   keccak256,
-  hashStruct,
+  hashTypedData,
   getAddress,
   zeroAddress,
   type Address,
@@ -183,13 +183,23 @@ describe("NettyWorthMarketplace", async function () {
     return block.timestamp;
   }
 
-  // auctionId = bare EIP-712 struct hash (NOT the full typed-data digest)
-  // This must match what the contract stores: _hashAuction() = keccak256(abi.encode(typehash, ...))
-  function computeAuctionId(auction: SignedAuction): `0x${string}` {
-    return hashStruct({
-      primaryType: "SignedAuction",
+  // M012 fix: auctionId is now the full EIP-712 domain-separated digest so that the
+  // contract's hashAuction() view, commitBid(), and SignedBid.auctionId all agree.
+  async function computeAuctionId(
+    auction: SignedAuction,
+    marketAddress: Address,
+  ): Promise<`0x${string}`> {
+    const chainId = await publicClient.getChainId();
+    return hashTypedData({
+      domain: {
+        name: "NettyWorthMarketplace",
+        version: "1",
+        chainId: BigInt(chainId),
+        verifyingContract: marketAddress,
+      },
       types: SIGNED_AUCTION_TYPES,
-      data: auction,
+      primaryType: "SignedAuction",
+      message: auction,
     });
   }
 
@@ -483,7 +493,7 @@ describe("NettyWorthMarketplace", async function () {
         ts,
         1n,
       );
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,
@@ -523,7 +533,7 @@ describe("NettyWorthMarketplace", async function () {
         ts,
         1n,
       );
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,
@@ -562,7 +572,7 @@ describe("NettyWorthMarketplace", async function () {
         ts,
         1n,
       );
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,
@@ -628,7 +638,7 @@ describe("NettyWorthMarketplace", async function () {
         extensionDuration: EXTENSION_DURATION,
         nonce: 1n,
       };
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,
@@ -670,7 +680,7 @@ describe("NettyWorthMarketplace", async function () {
         ts,
         1n,
       );
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,
@@ -722,7 +732,7 @@ describe("NettyWorthMarketplace", async function () {
         ts,
         1n,
       );
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,
@@ -819,7 +829,7 @@ describe("NettyWorthMarketplace", async function () {
         ts,
         1n,
       );
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,

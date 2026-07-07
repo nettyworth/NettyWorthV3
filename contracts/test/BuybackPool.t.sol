@@ -493,6 +493,7 @@ contract BuybackPoolTest is Test {
     ) public {
         vm.assume(appraisal > 0 && appraisal <= 1_000_000e6); // up to 1M USDC
         vm.assume(bps > 0 && bps <= 10000);
+        vm.assume((appraisal * bps) / 10000 > 0);
 
         _depositNFTs(CARDS_PER_PACK);
         uint256[] memory wonTokens = _openPackAndFulfill();
