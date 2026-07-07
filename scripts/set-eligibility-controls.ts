@@ -4,6 +4,7 @@ import { createInterface } from "node:readline/promises";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sleep } from "./lib/sleep.js";
 
 // ─── Parse MIN_APPRAISAL_VALUE ────────────────────────────────────────────────
 
@@ -265,6 +266,7 @@ const txHash = await config.write.setEligibilityControls(
 );
 const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 console.log(`  tx: ${txHash} (block ${receipt.blockNumber})`);
+await sleep(5000);
 
 // ─── Verify ───────────────────────────────────────────────────────────────────
 

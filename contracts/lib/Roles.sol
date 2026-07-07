@@ -19,7 +19,4 @@ library Roles {
         "BUYBACK_POOL_ROLE"
     );
     bytes32 internal constant MARKETPLACE_ROLE = keccak256("MARKETPLACE_ROLE");
-    bytes32 internal constant COINFLOW_SETTLER_ROLE = keccak256(
-        "COINFLOW_SETTLER_ROLE"
-    );
 }

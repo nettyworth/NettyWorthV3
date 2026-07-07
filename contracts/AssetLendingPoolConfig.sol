@@ -32,9 +32,9 @@ contract AssetLendingPoolConfig is
 
     uint256 internal constant BPS = 10_000;
     uint256 internal constant MAX_BATCH = 50;
-    /// @dev Default minimum appraisal value in whole payment-token units ($100).
+    /// @dev Default minimum appraisal value in whole payment-token units ($5).
     ///      Scaled by paymentToken.decimals() in the initializer. Admin-adjustable afterward.
-    uint256 internal constant DEFAULT_MIN_APPRAISAL_UNITS = 100;
+    uint256 internal constant DEFAULT_MIN_APPRAISAL_UNITS = 5;
 
     // =========================================================================
     // Storage (ERC-7201 namespaced) — config fields only; no runtime state

@@ -28,7 +28,10 @@ interface IAssetNFT {
     /// @notice Pay the redemption fee and transition the caller's asset into physical shipment.
     /// @dev Fee = redemptionFeeBps * appraisalValue / BPS, pulled in payment token from caller → treasury.
     ///      Fee is 0 (free shipment) when appraisal value is 0. Token must be in Held state.
-    function initiateShipment(uint256 tokenId) external;
+    /// @param tokenId AssetNFT token to ship.
+    /// @param maxFee  Upper bound on the fee the caller is willing to pay (H007 slippage guard).
+    ///                Pass type(uint256).max to accept any fee.
+    function initiateShipment(uint256 tokenId, uint256 maxFee) external;
 
     /// @notice Returns ERC-2981 royalty info for a given sale price (implemented by AssetNFT via ERC2981).
     function royaltyInfo(

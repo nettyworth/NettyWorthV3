@@ -6,8 +6,9 @@ import {
   encodeFunctionData,
   toHex,
   keccak256,
-  hashStruct,
+  hashTypedData,
   getAddress,
+  zeroAddress,
   type Address,
   type WalletClient,
 } from "viem";
@@ -47,6 +48,19 @@ const MARKETPLACE_ROLE = roleHash("MARKETPLACE_ROLE");
 // EIP-712 type definitions (must match Solidity typehashes exactly)
 // ---------------------------------------------------------------------------
 
+const SIGNED_LISTING_TYPES = {
+  SignedListing: [
+    { name: "seller", type: "address" },
+    { name: "collection", type: "address" },
+    { name: "tokenId", type: "uint256" },
+    { name: "paymentToken", type: "address" },
+    { name: "price", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "expiry", type: "uint256" },
+    { name: "buyer", type: "address" },
+  ],
+} as const;
+
 const SIGNED_OFFER_TYPES = {
   SignedOffer: [
     { name: "buyer", type: "address" },
@@ -84,6 +98,17 @@ const SIGNED_BID_TYPES = {
     { name: "expiry", type: "uint256" },
   ],
 } as const;
+
+type SignedListing = {
+  seller: Address;
+  collection: Address;
+  tokenId: bigint;
+  paymentToken: Address;
+  price: bigint;
+  nonce: bigint;
+  expiry: bigint;
+  buyer: Address; // zeroAddress = open listing; non-zero = private/targeted
+};
 
 type SignedOffer = {
   buyer: Address;
@@ -158,13 +183,23 @@ describe("NettyWorthMarketplace", async function () {
     return block.timestamp;
   }
 
-  // auctionId = bare EIP-712 struct hash (NOT the full typed-data digest)
-  // This must match what the contract stores: _hashAuction() = keccak256(abi.encode(typehash, ...))
-  function computeAuctionId(auction: SignedAuction): `0x${string}` {
-    return hashStruct({
-      primaryType: "SignedAuction",
+  // M012 fix: auctionId is now the full EIP-712 domain-separated digest so that the
+  // contract's hashAuction() view, commitBid(), and SignedBid.auctionId all agree.
+  async function computeAuctionId(
+    auction: SignedAuction,
+    marketAddress: Address,
+  ): Promise<`0x${string}`> {
+    const chainId = await publicClient.getChainId();
+    return hashTypedData({
+      domain: {
+        name: "NettyWorthMarketplace",
+        version: "1",
+        chainId: BigInt(chainId),
+        verifyingContract: marketAddress,
+      },
       types: SIGNED_AUCTION_TYPES,
-      data: auction,
+      primaryType: "SignedAuction",
+      message: auction,
     });
   }
 
@@ -225,6 +260,26 @@ describe("NettyWorthMarketplace", async function () {
       types: SIGNED_OFFER_TYPES,
       primaryType: "SignedOffer",
       message: offer,
+    });
+  }
+
+  async function signListing(
+    wallet: WalletClient,
+    listing: SignedListing,
+    marketAddress: Address,
+  ): Promise<`0x${string}`> {
+    const chainId = await wallet.getChainId();
+    return wallet.signTypedData({
+      account: wallet.account!,
+      domain: {
+        name: "NettyWorthMarketplace",
+        version: "1",
+        chainId,
+        verifyingContract: marketAddress,
+      },
+      types: SIGNED_LISTING_TYPES,
+      primaryType: "SignedListing",
+      message: listing,
     });
   }
 
@@ -438,7 +493,7 @@ describe("NettyWorthMarketplace", async function () {
         ts,
         1n,
       );
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,
@@ -478,7 +533,7 @@ describe("NettyWorthMarketplace", async function () {
         ts,
         1n,
       );
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,
@@ -517,7 +572,7 @@ describe("NettyWorthMarketplace", async function () {
         ts,
         1n,
       );
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,
@@ -583,7 +638,7 @@ describe("NettyWorthMarketplace", async function () {
         extensionDuration: EXTENSION_DURATION,
         nonce: 1n,
       };
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,
@@ -625,7 +680,7 @@ describe("NettyWorthMarketplace", async function () {
         ts,
         1n,
       );
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,
@@ -677,7 +732,7 @@ describe("NettyWorthMarketplace", async function () {
         ts,
         1n,
       );
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,
@@ -774,7 +829,7 @@ describe("NettyWorthMarketplace", async function () {
         ts,
         1n,
       );
-      const auctionId = computeAuctionId(auction);
+      const auctionId = await computeAuctionId(auction, market.address);
       const auctionSig = await signAuction(
         walletSeller,
         auction,
@@ -1208,6 +1263,323 @@ describe("NettyWorthMarketplace", async function () {
       await assert.rejects(
         market.write.acceptOffer([offer, offerSig], {
           account: walletSeller.account,
+        }),
+        /NonceUsed/,
+      );
+    });
+  });
+
+  // =========================================================================
+  // buyWithSignatureFor / buyWithSignature — fixed-price signed listing
+  // =========================================================================
+
+  describe("buyWithSignatureFor — happy path (payer ≠ recipient), open listing", async function () {
+    it("delivers NFT to recipient and distributes funds correctly", async function () {
+      const { usdc, nft, market } = await deploy();
+      const gross = 1_000n * 10n ** 6n;
+      const tokenId = 1n;
+
+      // Seller approves the marketplace to pull the NFT
+      await nft.write.approve([market.address, tokenId], {
+        account: walletSeller.account,
+      });
+
+      const ts = await getBlockTimestamp();
+      // Open listing: buyer = zeroAddress so anyone can fill it
+      const listing: SignedListing = {
+        seller: sellerAddress,
+        collection: nft.address,
+        tokenId,
+        paymentToken: usdc.address,
+        price: gross,
+        nonce: 1n,
+        expiry: ts + 3600n,
+        buyer: zeroAddress,
+      };
+      const listingSig = await signListing(walletSeller, listing, market.address);
+
+      const buyerBefore = await usdc.read.balanceOf([buyerAddress]);
+      const treasuryBefore = await usdc.read.balanceOf([treasuryAddress]);
+      const royaltyBefore = await usdc.read.balanceOf([royaltyReceiverAddress]);
+      const sellerBefore = await usdc.read.balanceOf([sellerAddress]);
+
+      // walletBuyer pays; walletOther receives the NFT (payer ≠ recipient)
+      const otherAddress = walletOther.account.address;
+      await market.write.buyWithSignatureFor(
+        [listing, listingSig, otherAddress],
+        { account: walletBuyer.account },
+      );
+
+      // NFT landed at the recipient, not the payer
+      assert.equal(
+        getAddress(await nft.read.ownerOf([tokenId])),
+        getAddress(otherAddress),
+      );
+
+      // Payer (walletBuyer) was charged the full gross
+      assert.equal(
+        buyerBefore - (await usdc.read.balanceOf([buyerAddress])),
+        gross,
+      );
+
+      // Treasury received 5% collectible fee
+      const expectedFee = (gross * 500n) / 10_000n;
+      assert.equal(
+        await usdc.read.balanceOf([treasuryAddress]),
+        treasuryBefore + expectedFee,
+      );
+
+      // Royalty receiver received 5% royalty (500 bps set in AssetNFT.initialize)
+      const expectedRoyalty = (gross * 500n) / 10_000n;
+      assert.equal(
+        await usdc.read.balanceOf([royaltyReceiverAddress]),
+        royaltyBefore + expectedRoyalty,
+      );
+
+      // Seller received net proceeds
+      assert.equal(
+        (await usdc.read.balanceOf([sellerAddress])) - sellerBefore,
+        gross - expectedFee - expectedRoyalty,
+      );
+    });
+  });
+
+  describe("buyWithSignature — happy path (payer == recipient)", async function () {
+    it("delivers NFT to buyer and distributes funds correctly", async function () {
+      const { usdc, nft, market } = await deploy();
+      const gross = 1_000n * 10n ** 6n;
+      const tokenId = 1n;
+
+      await nft.write.approve([market.address, tokenId], {
+        account: walletSeller.account,
+      });
+
+      const ts = await getBlockTimestamp();
+      const listing: SignedListing = {
+        seller: sellerAddress,
+        collection: nft.address,
+        tokenId,
+        paymentToken: usdc.address,
+        price: gross,
+        nonce: 2n,
+        expiry: ts + 3600n,
+        buyer: zeroAddress,
+      };
+      const listingSig = await signListing(walletSeller, listing, market.address);
+
+      const buyerBefore = await usdc.read.balanceOf([buyerAddress]);
+      const treasuryBefore = await usdc.read.balanceOf([treasuryAddress]);
+      const royaltyBefore = await usdc.read.balanceOf([royaltyReceiverAddress]);
+      const sellerBefore = await usdc.read.balanceOf([sellerAddress]);
+
+      await market.write.buyWithSignature([listing, listingSig], {
+        account: walletBuyer.account,
+      });
+
+      // NFT delivered to the caller/buyer
+      assert.equal(
+        getAddress(await nft.read.ownerOf([tokenId])),
+        getAddress(buyerAddress),
+      );
+
+      // Buyer paid gross
+      assert.equal(
+        buyerBefore - (await usdc.read.balanceOf([buyerAddress])),
+        gross,
+      );
+
+      const expectedFee = (gross * 500n) / 10_000n;
+      assert.equal(
+        await usdc.read.balanceOf([treasuryAddress]),
+        treasuryBefore + expectedFee,
+      );
+
+      const expectedRoyalty = (gross * 500n) / 10_000n;
+      assert.equal(
+        await usdc.read.balanceOf([royaltyReceiverAddress]),
+        royaltyBefore + expectedRoyalty,
+      );
+
+      assert.equal(
+        (await usdc.read.balanceOf([sellerAddress])) - sellerBefore,
+        gross - expectedFee - expectedRoyalty,
+      );
+    });
+  });
+
+  describe("buyWithSignatureFor — private listing enforces intended recipient", async function () {
+    it("succeeds when recipient matches listing.buyer, reverts otherwise", async function () {
+      const { usdc, nft, market } = await deploy();
+      const gross = 1_000n * 10n ** 6n;
+      const tokenId = 1n;
+      const otherAddress = walletOther.account.address;
+
+      await nft.write.approve([market.address, tokenId], {
+        account: walletSeller.account,
+      });
+
+      const ts = await getBlockTimestamp();
+      // Private listing: only walletOther may receive the NFT
+      const listing: SignedListing = {
+        seller: sellerAddress,
+        collection: nft.address,
+        tokenId,
+        paymentToken: usdc.address,
+        price: gross,
+        nonce: 3n,
+        expiry: ts + 3600n,
+        buyer: otherAddress,
+      };
+      const listingSig = await signListing(walletSeller, listing, market.address);
+
+      // Calling with the wrong recipient should revert
+      await assert.rejects(
+        market.write.buyWithSignatureFor(
+          [listing, listingSig, buyerAddress],
+          { account: walletBuyer.account },
+        ),
+        /NotIntendedBuyer/,
+      );
+
+      // Calling with the correct recipient (walletBuyer pays, walletOther receives) succeeds
+      await market.write.buyWithSignatureFor(
+        [listing, listingSig, otherAddress],
+        { account: walletBuyer.account },
+      );
+
+      assert.equal(
+        getAddress(await nft.read.ownerOf([tokenId])),
+        getAddress(otherAddress),
+      );
+    });
+  });
+
+  describe("buyWithSignatureFor — zero recipient reverts", async function () {
+    it("reverts ZeroRecipient when recipient is address(0)", async function () {
+      const { usdc, nft, market } = await deploy();
+      const gross = 1_000n * 10n ** 6n;
+      const tokenId = 1n;
+
+      await nft.write.approve([market.address, tokenId], {
+        account: walletSeller.account,
+      });
+
+      const ts = await getBlockTimestamp();
+      const listing: SignedListing = {
+        seller: sellerAddress,
+        collection: nft.address,
+        tokenId,
+        paymentToken: usdc.address,
+        price: gross,
+        nonce: 4n,
+        expiry: ts + 3600n,
+        buyer: zeroAddress,
+      };
+      const listingSig = await signListing(walletSeller, listing, market.address);
+
+      await assert.rejects(
+        market.write.buyWithSignatureFor(
+          [listing, listingSig, zeroAddress],
+          { account: walletBuyer.account },
+        ),
+        /ZeroRecipient/,
+      );
+    });
+  });
+
+  describe("buyWithSignature — bad signature reverts", async function () {
+    it("reverts InvalidSignature when sig was not made by listing.seller", async function () {
+      const { usdc, nft, market } = await deploy();
+
+      await nft.write.approve([market.address, 1n], {
+        account: walletSeller.account,
+      });
+
+      const ts = await getBlockTimestamp();
+      const listing: SignedListing = {
+        seller: sellerAddress,
+        collection: nft.address,
+        tokenId: 1n,
+        paymentToken: usdc.address,
+        price: 1_000n * 10n ** 6n,
+        nonce: 5n,
+        expiry: ts + 3600n,
+        buyer: zeroAddress,
+      };
+      // Sign with walletBidder (not the seller)
+      const badSig = await signListing(walletBidder, listing, market.address);
+
+      await assert.rejects(
+        market.write.buyWithSignature([listing, badSig], {
+          account: walletBuyer.account,
+        }),
+        /InvalidSignature/,
+      );
+    });
+  });
+
+  describe("buyWithSignature — expired listing reverts", async function () {
+    it("reverts Expired when block.timestamp > listing.expiry", async function () {
+      const { usdc, nft, market } = await deploy();
+
+      await nft.write.approve([market.address, 1n], {
+        account: walletSeller.account,
+      });
+
+      const ts = await getBlockTimestamp();
+      const listing: SignedListing = {
+        seller: sellerAddress,
+        collection: nft.address,
+        tokenId: 1n,
+        paymentToken: usdc.address,
+        price: 1_000n * 10n ** 6n,
+        nonce: 6n,
+        expiry: ts - 1n, // already expired
+        buyer: zeroAddress,
+      };
+      const listingSig = await signListing(walletSeller, listing, market.address);
+
+      await assert.rejects(
+        market.write.buyWithSignature([listing, listingSig], {
+          account: walletBuyer.account,
+        }),
+        /Expired/,
+      );
+    });
+  });
+
+  describe("buyWithSignature — nonce replay reverts", async function () {
+    it("reverts NonceUsed on a second fill of the same signed listing", async function () {
+      const { usdc, nft, market } = await deploy();
+      const gross = 1_000n * 10n ** 6n;
+
+      // Token 2 for the first fill; token 1 for the re-use attempt (same nonce)
+      await nft.write.approve([market.address, 2n], {
+        account: walletSeller.account,
+      });
+
+      const ts = await getBlockTimestamp();
+      const listing: SignedListing = {
+        seller: sellerAddress,
+        collection: nft.address,
+        tokenId: 2n,
+        paymentToken: usdc.address,
+        price: gross,
+        nonce: 7n,
+        expiry: ts + 3600n,
+        buyer: zeroAddress,
+      };
+      const listingSig = await signListing(walletSeller, listing, market.address);
+
+      // First fill succeeds
+      await market.write.buyWithSignature([listing, listingSig], {
+        account: walletBuyer.account,
+      });
+
+      // Attempting to use the same signature again must revert (nonce is now consumed)
+      await assert.rejects(
+        market.write.buyWithSignature([listing, listingSig], {
+          account: walletBuyer.account,
         }),
         /NonceUsed/,
       );

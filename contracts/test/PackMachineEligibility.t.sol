@@ -559,8 +559,13 @@ contract PackMachineEligibilityTest is Test {
         assertEq(assetNFT.ownerOf(ids[0]), user);
 
         // Authorize operator to call depositFromPool (simulating BuybackPool).
+        // L001 fix: setBuybackPool/setAuthorizedDepositor now require paused.
+        vm.prank(operator);
+        packMachine.pause();
         vm.prank(operator);
         packMachine.setAuthorizedDepositor(operator, true);
+        vm.prank(operator);
+        packMachine.unpause();
 
         // User sends token to operator (simulate buyback payment → operator now holds it).
         vm.prank(user);
@@ -838,8 +843,13 @@ contract PackMachineEligibilityTest is Test {
         vm.prank(user);
         assetNFT.transferFrom(user, operator, ids[0]);
 
+        // L001 fix: setAuthorizedDepositor now requires paused.
+        vm.prank(operator);
+        packMachine.pause();
         vm.prank(operator);
         packMachine.setAuthorizedDepositor(operator, true);
+        vm.prank(operator);
+        packMachine.unpause();
 
         uint8[] memory fallbackTiers = new uint8[](1);
         fallbackTiers[0] = 0; // fallback tier (should not be used if dormant map exists)

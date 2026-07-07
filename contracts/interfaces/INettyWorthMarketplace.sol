@@ -125,16 +125,6 @@ interface INettyWorthMarketplace {
         address indexed cancelledBy
     );
 
-    /// @notice Emitted on every push-based purchase (Coinflow onramp path).
-    ///         SaleExecuted is also emitted with the full fee breakdown for the same sale;
-    ///         this marker event allows indexers to distinguish onramp sales without parsing calldata.
-    event PushedSaleSettled(
-        address indexed seller,
-        address indexed recipient,
-        uint256 indexed tokenId,
-        uint256 gross
-    );
-
     /// @notice Emitted when a signer invalidates a nonce off-chain.
     event NonceCancelled(address indexed signer, uint256 nonce);
 
@@ -193,12 +183,6 @@ interface INettyWorthMarketplace {
     error Marketplace__ZeroRecipient();
     /// @notice Thrown when a non-admin seller tries to cancel an auction that already has a committed bid (M007 fix).
     error Marketplace__CannotCancelWithActiveBid(address currentBidder);
-    /// @notice Thrown when buyWithSignaturePushed is called but the contract balance is less than listing.price.
-    ///         Indicates Coinflow's settlement transfer did not arrive before the call (or was insufficient).
-    error Marketplace__InsufficientPushedBalance(
-        uint256 expected,
-        uint256 actual
-    );
 
     // =========================================================================
     // Core functions
@@ -235,38 +219,6 @@ interface INettyWorthMarketplace {
     /// @param sig       Seller's signature over `listing`.
     /// @param recipient Address that will receive the NFT (must not be address(0)).
     function buyWithSignatureFor(
-        SignedListing calldata listing,
-        bytes calldata sig,
-        address recipient
-    ) external;
-
-    /// @notice Coinflow onramp entry point: execute a fixed-price purchase where USDC has already
-    ///         been transferred to this contract by Coinflow's settlement contract in the same
-    ///         atomic transaction ("transfer-then-call" / push model).
-    ///
-    /// @dev Unlike buyWithSignature/buyWithSignatureFor (pull model), this function does NOT call
-    ///      transferFrom — it verifies that `listing.price` of `listing.paymentToken` is already
-    ///      present in the contract's balance before distributing fees, royalties, loan repayment,
-    ///      and seller proceeds. Exactly `listing.price` is distributed; any surplus balance is
-    ///      intentionally left in the contract.
-    ///
-    ///      SECURITY: Callable ONLY by an address holding COINFLOW_SETTLER_ROLE. This gate is
-    ///      critical because the function consumes the contract's existing balance — an ungated
-    ///      push entry point would allow any caller with a valid seller-signed listing to drain
-    ///      residual USDC. Unauthorized calls revert with PermissionConsumer__Unauthorized.
-    ///
-    ///      Seller EIP-712 signature validation, nonce replay protection, expiry, collection
-    ///      and payment-token allowlisting, and private-listing buyer enforcement are all
-    ///      identical to buyWithSignature/buyWithSignatureFor.
-    ///
-    ///      Emits both SaleExecuted (full fee breakdown) and PushedSaleSettled (onramp marker).
-    ///
-    /// @param listing   Seller's EIP-712 signed fixed-price listing.
-    /// @param sig       Seller's signature over `listing`.
-    /// @param recipient End-user wallet that receives the NFT. Coinflow passes the buyer's
-    ///                  wallet here. Must not be address(0). For a private listing
-    ///                  (listing.buyer != address(0)), `recipient` must equal `listing.buyer`.
-    function buyWithSignaturePushed(
         SignedListing calldata listing,
         bytes calldata sig,
         address recipient

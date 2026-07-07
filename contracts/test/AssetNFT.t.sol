@@ -312,10 +312,14 @@ contract AssetNFTTest is Test {
         ids[0] = tokenId;
 
         vm.prank(burner);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AssetNFT.AssetNFT__TokenNotBurnable.selector,
+                tokenId,
+                uint8(AssetNFT.AssetState.Held)
+            )
+        );
         nft.batchBurn(ids);
-
-        vm.expectRevert();
-        nft.ownerOf(tokenId);
     }
 
     function test_BatchBurn_FromRemovedFromPlatform() public {
@@ -337,6 +341,11 @@ contract AssetNFTTest is Test {
         uint256 id1 = _mintToken();
         uint256 id2 = _mintToken();
 
+        vm.startPrank(stateManager);
+        _setAssetState(id1, AssetNFT.AssetState.RemovedFromPlatform);
+        _setAssetState(id2, AssetNFT.AssetState.RemovedFromPlatform);
+        vm.stopPrank();
+
         uint256[] memory ids = new uint256[](2);
         ids[0] = id1;
         ids[1] = id2;
@@ -354,6 +363,12 @@ contract AssetNFTTest is Test {
         uint256 id1 = _mintToken();
         uint256 id2 = _mintToken();
         uint256 id3 = _mintToken();
+
+        vm.startPrank(stateManager);
+        _setAssetState(id1, AssetNFT.AssetState.RemovedFromPlatform);
+        _setAssetState(id2, AssetNFT.AssetState.RemovedFromPlatform);
+        _setAssetState(id3, AssetNFT.AssetState.RemovedFromPlatform);
+        vm.stopPrank();
 
         uint256[] memory ids = new uint256[](3);
         ids[0] = id1;
@@ -1432,6 +1447,10 @@ contract AssetNFTTest is Test {
         validator.setShouldRevert(true);
         vm.prank(admin);
         nft.setTransferValidator(address(validator));
+
+        // C007 fix: must transition to RemovedFromPlatform before burning.
+        vm.prank(stateManager);
+        _setAssetState(tokenId, AssetNFT.AssetState.RemovedFromPlatform);
 
         uint256[] memory ids = new uint256[](1);
         ids[0] = tokenId;
