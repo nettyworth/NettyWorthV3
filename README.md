@@ -83,8 +83,10 @@ scripts/
   deploy-p2p-trade-escrow.ts      # Deploy P2PTradeEscrow + ERC1967 proxy; standalone (no protocol deps)
   seed-asset-nft.ts               # Dev helper: mint sample AssetNFT cards and seed appraisals
   send-op-tx.ts                   # OP chain transaction example
+  set-finance-wallet.ts           # Set the finance wallet address on AssetLendingPoolConfig (owner)
   set-marketplace-allowlist.ts    # Toggle allowed collections / payment tokens on the marketplace (DEFAULT_ADMIN_ROLE)
   set-marketplace-lending-pool.ts # Point the marketplace at the lending pool via setLendingPool (DEFAULT_ADMIN_ROLE)
+  set-term-config.ts              # Create or update a loan term slot on AssetLendingPoolConfig (owner)
   set-pack-machine-implementation.ts  # Deploy new PackMachine logic + call factory.setImplementation; new clones use the new logic
   relink-buyback-pool.ts          # Deploy a fresh BuybackPool proxy + relink every PackMachine clone to it (idempotent)
   check-buyback-registration.ts   # Read-only: report BuybackPool registration status and buyback config for PackMachine clones
@@ -1051,7 +1053,9 @@ Deploys the `P2PTradeEscrow` implementation and ERC1967 proxy. `initialize(owner
 | `seed-asset-nft.ts` | Dev/test helper — mint sample AssetNFT cards and set appraisals | `MINTER_ROLE` |
 | `batch-set-appraisals.ts` | Bulk-write NFT appraisal data (value, grade, category) to `AssetLendingPool` for collateral valuation; batches of ≤ 50; value in whole token units | Pool owner |
 | `set-eligibility-controls.ts` | Set minimum appraisal value, minimum grade, and allowed-category add/remove lists on `AssetLendingPool` | Pool owner |
+| `set-finance-wallet.ts` | Set the finance wallet address on `AssetLendingPoolConfig`; env: `FINANCE_WALLET` (required), `CONFIG_PROXY` (opt), `ASSET_LENDING_POOL_PROXY` (opt) | Config owner |
 | `set-lender-config.ts` | Set lender revenue-share bps and toggle lender deposits open/closed on `AssetLendingPool` | Pool owner |
+| `set-term-config.ts` | Create or update a loan term slot (duration, APR, active flag) on `AssetLendingPoolConfig`; env: `TERM_ID` (default 3), `DURATION_SECONDS`, `APR_BPS`, `ACTIVE`, `CONFIG_PROXY` (opt), `ASSET_LENDING_POOL_PROXY` (opt) | Config owner |
 | `set-marketplace-allowlist.ts` | Toggle allowed collections / payment tokens on `NettyWorthMarketplace` via `setAllowedCollection` / `setAllowedPaymentToken`; env: `COLLECTIONS` and/or `PAYMENT_TOKENS` (≥1 required), `ALLOWED` (default `true`), `MARKETPLACE_PROXY` (opt), `SKIP_CONFIRM` (opt) | `DEFAULT_ADMIN_ROLE` |
 | `set-marketplace-lending-pool.ts` | Point the marketplace at the lending pool via `setLendingPool`; env: `MARKETPLACE_PROXY` (opt), `LENDING_POOL` (opt), `SKIP_CONFIRM` (opt) | `DEFAULT_ADMIN_ROLE` |
 | `set-pack-machine-implementation.ts` | Deploy new `PackMachine` logic + call `factory.setImplementation`; only new clones use the new logic — existing clones are unaffected | `DEFAULT_ADMIN_ROLE` |
@@ -1230,6 +1234,58 @@ SHARE_BPS=8000 ENABLED=true \
 ```
 
 On live networks the script verifies the changes and persists `lenderShareBps`, `lenderDepositsEnabled`, and `lenderConfigUpdatedAt` to `deployments/<network>.json`.
+
+---
+
+### `set-finance-wallet.ts` — Set the finance wallet
+
+Sets the finance wallet address on `AssetLendingPoolConfig`. The finance wallet is used in the Phase-1 defaulted-asset acquisition path; the lending pool reverts `AssetLendingPool__FinanceWalletNotSet` if it is `address(0)`. The caller must be the config contract **owner**.
+
+**Environment variables:**
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `FINANCE_WALLET` | Yes | New finance wallet address (non-zero) |
+| `ASSET_LENDING_POOL_PROXY` | No | Override AssetLendingPool proxy; falls back to `deployments/<network>.json` |
+| `CONFIG_PROXY` | No | Override `AssetLendingPoolConfig` proxy directly (takes precedence over pool proxy resolution) |
+
+```bash
+FINANCE_WALLET=0x<addr> npx hardhat run scripts/set-finance-wallet.ts --network base
+```
+
+On live networks the script prints the old → new wallet, prompts for confirmation, verifies the on-chain state after the transaction, and persists `financeWallet` and `financeWalletUpdatedAt` to `deployments/<network>.json`.
+
+---
+
+### `set-term-config.ts` — Configure a loan term slot
+
+Creates or updates a loan term slot (duration, APR, active flag) on `AssetLendingPoolConfig`. The three production terms are slots 0 (7 days), 1 (15 days), and 2 (30 days); slot 3 is conventionally used for short-duration test terms. The caller must be the config contract **owner**.
+
+**Environment variables:**
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `TERM_ID` | No | Term slot index (uint8, default: `3`) |
+| `DURATION_SECONDS` | No | Term duration in seconds (default: `300` = 5 min) |
+| `APR_BPS` | No | Annual interest rate in basis points (default: `1000` = 10%) |
+| `ACTIVE` | No | `true`/`false` or `1`/`0` (default: `true`) |
+| `ASSET_LENDING_POOL_PROXY` | No | Override AssetLendingPool proxy; falls back to `deployments/<network>.json` |
+| `CONFIG_PROXY` | No | Override `AssetLendingPoolConfig` proxy directly (takes precedence) |
+
+```bash
+# Add a 5-minute test term at slot 3 with 10% APR:
+npx hardhat run scripts/set-term-config.ts --network base
+
+# Fully parameterised:
+TERM_ID=3 DURATION_SECONDS=300 APR_BPS=1000 ACTIVE=true \
+  npx hardhat run scripts/set-term-config.ts --network base
+
+# Deactivate the test term after testing:
+TERM_ID=3 DURATION_SECONDS=300 APR_BPS=1000 ACTIVE=false \
+  npx hardhat run scripts/set-term-config.ts --network base
+```
+
+On live networks the script shows current vs new values, prompts for confirmation, verifies the on-chain state after the transaction, and persists the term record and `termCount` to `deployments/<network>.json`.
 
 ---
 

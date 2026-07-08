@@ -303,6 +303,10 @@ contract AssetLendingPool is
         }
 
         // --- Validate listing parameters (use cached pool-local refs for the comparison) ---
+        // Private listings are bound to a specific buyer (H009 fix, mirrors marketplace H004).
+        if (listing.buyer != address(0) && listing.buyer != msg.sender) {
+            revert AssetLendingPool__NotIntendedBuyer();
+        }
         if (block.timestamp > listing.expiry) {
             revert AssetLendingPool__ListingExpired();
         }

@@ -1108,6 +1108,78 @@ contract AssetLendingPoolTest is Test {
         vm.stopPrank();
     }
 
+    function test_FinanceMarketplace_RevertWhen_NotIntendedBuyer() public {
+        // Seller signs a private listing intended for `borrower` only.
+        uint256 tokenId = _mintNFT(seller);
+        _appraise(tokenId);
+
+        vm.prank(seller);
+        assetNFT.setApprovalForAll(address(pool), true);
+
+        // Build listing with buyer = borrower, but Bob (a different address) tries to use it.
+        address bob = makeAddr("bob");
+        INettyWorthMarketplace.SignedListing memory listing = INettyWorthMarketplace.SignedListing({
+            seller: seller,
+            collection: address(assetNFT),
+            tokenId: tokenId,
+            paymentToken: address(usdc),
+            price: APPRAISAL_VALUE,
+            nonce: 99,
+            expiry: block.timestamp + 1 days,
+            buyer: borrower // private — intended only for `borrower`
+        });
+        bytes memory sig = _signListing(listing, sellerPk);
+
+        usdc.mint(bob, APPRAISAL_VALUE);
+        vm.startPrank(bob);
+        usdc.approve(address(pool), APPRAISAL_VALUE);
+        vm.expectRevert(IAssetLendingPool.AssetLendingPool__NotIntendedBuyer.selector);
+        pool.financeMarketplacePurchase(listing, sig, 500e6, 0);
+        vm.stopPrank();
+
+        // Crucially: nonce must NOT be consumed — seller's slot is not burned by the failed attempt.
+        // We verify this by having the intended buyer succeed with the same listing+sig.
+        usdc.mint(borrower, APPRAISAL_VALUE);
+        vm.startPrank(borrower);
+        usdc.approve(address(pool), APPRAISAL_VALUE);
+        pool.financeMarketplacePurchase(listing, sig, 500e6, 0);
+        vm.stopPrank();
+
+        uint256[] memory loanIds = pool.getBorrowerLoans(borrower);
+        assertEq(loanIds.length, 1);
+    }
+
+    function test_FinanceMarketplace_IntendedBuyerSucceeds() public {
+        // A private listing with buyer == msg.sender must succeed normally.
+        uint256 tokenId = _mintNFT(seller);
+        _appraise(tokenId);
+
+        vm.prank(seller);
+        assetNFT.setApprovalForAll(address(pool), true);
+
+        INettyWorthMarketplace.SignedListing memory listing = INettyWorthMarketplace.SignedListing({
+            seller: seller,
+            collection: address(assetNFT),
+            tokenId: tokenId,
+            paymentToken: address(usdc),
+            price: APPRAISAL_VALUE,
+            nonce: 100,
+            expiry: block.timestamp + 1 days,
+            buyer: borrower // private — intended for `borrower`
+        });
+        bytes memory sig = _signListing(listing, sellerPk);
+
+        usdc.mint(borrower, APPRAISAL_VALUE);
+        vm.startPrank(borrower);
+        usdc.approve(address(pool), APPRAISAL_VALUE);
+        pool.financeMarketplacePurchase(listing, sig, 500e6, 0); // borrower == listing.buyer → ok
+        vm.stopPrank();
+
+        uint256[] memory loanIds = pool.getBorrowerLoans(borrower);
+        assertEq(loanIds.length, 1);
+        assertEq(pool.getLoan(loanIds[0]).principal, APPRAISAL_VALUE - 500e6);
+    }
+
     // =========================================================================
     // Interest withdrawal
     // =========================================================================
