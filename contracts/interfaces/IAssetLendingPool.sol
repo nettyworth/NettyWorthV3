@@ -266,6 +266,8 @@ interface IAssetLendingPool {
     error AssetLendingPool__Deprecated();
     /// @dev Thrown by financeMarketplacePurchase when seller == address(this) (M009 fix).
     error AssetLendingPool__InvalidSeller();
+    /// @dev Thrown by financeMarketplacePurchase when listing.buyer is set and != msg.sender (H009 fix).
+    error AssetLendingPool__NotIntendedBuyer();
 
     // =========================================================================
     // Borrower functions

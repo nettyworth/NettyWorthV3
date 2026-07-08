@@ -384,6 +384,23 @@ contract BuybackPoolTest is Test {
         assertTrue(active);
     }
 
+    function test_RegisterToken_LegacyFourArgOverload() public {
+        // Already-deployed clones call the 4-arg selector registerToken(uint256,uint128,uint8,address).
+        // Verify that the legacy overload stores the same data as the 3-arg form and that the
+        // ignored pricePerCard parameter does not affect the stored record.
+        uint256 tokenId = 42;
+        uint128 ignoredPrice = 1e6; // 1 USDC — must be ignored
+        uint8 expectedTier = 3;
+
+        vm.prank(address(packMachine));
+        pool.registerToken(tokenId, ignoredPrice, expectedTier, address(packMachine));
+
+        (uint8 tier, address src, bool active) = pool.getTokenInfo(tokenId);
+        assertEq(tier, expectedTier, "tier stored correctly via 4-arg overload");
+        assertEq(src, address(packMachine), "source machine stored correctly");
+        assertTrue(active, "isActive set to true");
+    }
+
     // =========================================================================
     // buyback — error cases
     // =========================================================================
@@ -936,5 +953,262 @@ contract BuybackPoolTest is Test {
         vm.prank(admin);
         pool.rescueNFT(ids[0], admin);
         assertEq(assetNFT.ownerOf(ids[0]), admin);
+    }
+
+    // =========================================================================
+    // Spend mode — registerToken (new 4-arg overload with amountPaidPerCard)
+    // =========================================================================
+
+    function test_RegisterToken_WithPaidAmount_StoresAmount() public {
+        _depositNFTs(CARDS_PER_PACK);
+        uint256[] memory wonTokens = _openPackAndFulfill();
+        uint256 tokenId = wonTokens[0];
+
+        // After a real pack open, amountPaidPerCard should equal PRICE / CARDS_PER_PACK
+        uint128 expectedPaid = uint128(PRICE / CARDS_PER_PACK);
+        assertEq(pool.getTokenPaidAmount(tokenId), expectedPaid);
+    }
+
+    function test_RegisterToken_LegacyOverload_ZeroPaidAmount() public {
+        // Manually register via the legacy 3-arg overload — simulates old clones.
+        vm.prank(address(packMachine));
+        pool.registerToken(999, 0, address(packMachine));
+        assertEq(pool.getTokenPaidAmount(999), 0);
+    }
+
+    // =========================================================================
+    // Spend mode — setDefaultBuybackMode / setPackMachineBuybackMode
+    // =========================================================================
+
+    function test_SetDefaultBuybackMode_StoresAndEmits() public {
+        vm.expectEmit(true, true, true, true);
+        emit BuybackPool.DefaultBuybackModeUpdated(
+            BuybackPool.BuybackMode.FMV,
+            BuybackPool.BuybackMode.Spend
+        );
+        vm.prank(operator);
+        pool.setDefaultBuybackMode(1); // 1 = Spend
+
+        assertEq(
+            uint8(pool.getDefaultBuybackMode()),
+            uint8(BuybackPool.BuybackMode.Spend)
+        );
+    }
+
+    function test_SetDefaultBuybackMode_InvalidReverts() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BuybackPool.BuybackPool__InvalidMode.selector,
+                uint8(5)
+            )
+        );
+        vm.prank(operator);
+        pool.setDefaultBuybackMode(5);
+    }
+
+    function test_SetDefaultBuybackMode_UnauthorizedReverts() public {
+        vm.expectRevert();
+        vm.prank(unauthorized);
+        pool.setDefaultBuybackMode(1);
+    }
+
+    function test_SetPackMachineBuybackMode_StoresAndEmits() public {
+        vm.expectEmit(true, true, true, true);
+        emit BuybackPool.PackMachineBuybackModeUpdated(
+            address(packMachine),
+            BuybackPool.BuybackMode.FMV,
+            BuybackPool.BuybackMode.Spend
+        );
+        vm.prank(operator);
+        pool.setPackMachineBuybackMode(address(packMachine), 2); // 2 = Spend
+
+        assertEq(pool.getPackMachineBuybackMode(address(packMachine)), 2);
+    }
+
+    function test_SetPackMachineBuybackMode_ZeroClearsOverride() public {
+        vm.prank(operator);
+        pool.setPackMachineBuybackMode(address(packMachine), 2);
+        assertEq(pool.getPackMachineBuybackMode(address(packMachine)), 2);
+
+        vm.prank(operator);
+        pool.setPackMachineBuybackMode(address(packMachine), 0); // clear
+        assertEq(pool.getPackMachineBuybackMode(address(packMachine)), 0);
+    }
+
+    function test_SetPackMachineBuybackMode_InvalidReverts() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BuybackPool.BuybackPool__InvalidMode.selector,
+                uint8(9)
+            )
+        );
+        vm.prank(operator);
+        pool.setPackMachineBuybackMode(address(packMachine), 9);
+    }
+
+    function test_SetPackMachineBuybackMode_ZeroAddressReverts() public {
+        vm.expectRevert(BuybackPool.BuybackPool__ZeroAddress.selector);
+        vm.prank(operator);
+        pool.setPackMachineBuybackMode(address(0), 1);
+    }
+
+    // =========================================================================
+    // Spend mode — buyback payout
+    // =========================================================================
+
+    function test_Buyback_SpendMode_PayoutBasedOnAmountPaid() public {
+        _depositNFTs(CARDS_PER_PACK);
+        uint256[] memory wonTokens = _openPackAndFulfill();
+        uint256 tokenId = wonTokens[0];
+
+        // paidPerCard = PRICE / CARDS_PER_PACK = 10e6 / 2 = 5e6
+        uint128 paidPerCard = uint128(PRICE / CARDS_PER_PACK);
+        uint16 bps = pool.getDefaultBuybackBps(); // 8000
+
+        uint256 expectedPayout = (uint256(paidPerCard) * bps) / 10000;
+
+        _seedPool(expectedPayout);
+
+        // Switch global mode to Spend
+        vm.prank(operator);
+        pool.setDefaultBuybackMode(1);
+
+        uint256 userBefore = usdc.balanceOf(user);
+        vm.prank(user);
+        assetNFT.approve(address(pool), tokenId);
+        vm.prank(user);
+        pool.buyback(tokenId);
+
+        assertEq(usdc.balanceOf(user) - userBefore, expectedPayout);
+    }
+
+    function test_Buyback_SpendMode_IgnoresAppraisal() public {
+        _depositNFTs(CARDS_PER_PACK);
+        uint256[] memory wonTokens = _openPackAndFulfill();
+        uint256 tokenId = wonTokens[0];
+
+        uint128 paidPerCard = uint128(PRICE / CARDS_PER_PACK);
+        uint16 bps = pool.getDefaultBuybackBps();
+        uint256 expectedPayout = (uint256(paidPerCard) * bps) / 10000;
+
+        // Set a very different appraisal — Spend mode should NOT use it
+        _appraise(tokenId, 999e6);
+        _seedPool(expectedPayout + 1e6); // extra so balance isn't the constraint
+
+        vm.prank(operator);
+        pool.setDefaultBuybackMode(1); // Spend
+
+        uint256 userBefore = usdc.balanceOf(user);
+        vm.prank(user);
+        assetNFT.approve(address(pool), tokenId);
+        vm.prank(user);
+        pool.buyback(tokenId);
+
+        // Payout must equal paidPerCard × bps, NOT appraisal × bps
+        assertEq(usdc.balanceOf(user) - userBefore, expectedPayout);
+    }
+
+    function test_Buyback_FMVMode_StillWorksAfterSpendModeAdded() public {
+        _depositNFTs(CARDS_PER_PACK);
+        uint256[] memory wonTokens = _openPackAndFulfill();
+        uint256 tokenId = wonTokens[0];
+
+        _appraiseAndSeed(tokenId);
+        // Default mode is still FMV — no mode change needed
+
+        uint256 expectedPayout =
+            (DEFAULT_APPRAISAL * pool.getDefaultBuybackBps()) / 10000;
+        uint256 userBefore = usdc.balanceOf(user);
+
+        vm.prank(user);
+        assetNFT.approve(address(pool), tokenId);
+        vm.prank(user);
+        pool.buyback(tokenId);
+
+        assertEq(usdc.balanceOf(user) - userBefore, expectedPayout);
+    }
+
+    function test_Buyback_PerMachineSpendMode_OverridesGlobalFMV() public {
+        _depositNFTs(CARDS_PER_PACK);
+        uint256[] memory wonTokens = _openPackAndFulfill();
+        uint256 tokenId = wonTokens[0];
+
+        uint128 paidPerCard = uint128(PRICE / CARDS_PER_PACK);
+        uint16 bps = pool.getDefaultBuybackBps();
+        uint256 expectedPayout = (uint256(paidPerCard) * bps) / 10000;
+
+        // Set a different appraisal so FMV payout would differ
+        _appraise(tokenId, 999e6);
+        _seedPool(expectedPayout + 1e6);
+
+        // Global stays FMV; override THIS machine to Spend
+        vm.prank(operator);
+        pool.setPackMachineBuybackMode(address(packMachine), 2); // Spend
+
+        uint256 userBefore = usdc.balanceOf(user);
+        vm.prank(user);
+        assetNFT.approve(address(pool), tokenId);
+        vm.prank(user);
+        pool.buyback(tokenId);
+
+        assertEq(usdc.balanceOf(user) - userBefore, expectedPayout);
+    }
+
+    function test_Buyback_PerMachineFMVMode_OverridesGlobalSpend() public {
+        _depositNFTs(CARDS_PER_PACK);
+        uint256[] memory wonTokens = _openPackAndFulfill();
+        uint256 tokenId = wonTokens[0];
+
+        _appraiseAndSeed(tokenId);
+
+        // Set global to Spend but pin this machine to FMV
+        vm.prank(operator);
+        pool.setDefaultBuybackMode(1); // Spend globally
+        vm.prank(operator);
+        pool.setPackMachineBuybackMode(address(packMachine), 1); // FMV override
+
+        uint256 expectedPayout =
+            (DEFAULT_APPRAISAL * pool.getDefaultBuybackBps()) / 10000;
+        uint256 userBefore = usdc.balanceOf(user);
+
+        vm.prank(user);
+        assetNFT.approve(address(pool), tokenId);
+        vm.prank(user);
+        pool.buyback(tokenId);
+
+        assertEq(usdc.balanceOf(user) - userBefore, expectedPayout);
+    }
+
+    function test_Buyback_SpendMode_NoPaidAmount_Reverts() public {
+        // Register manually via legacy 3-arg overload → amountPaidPerCard = 0
+        uint256 tokenId = 777;
+        address[] memory recipients = new address[](1);
+        string[] memory uris = new string[](1);
+        recipients[0] = user;
+        uris[0] = "";
+        vm.prank(operator);
+        assetNFT.batchMint(recipients, uris);
+        // token id is assetNFT.totalSupply() after minting
+        tokenId = assetNFT.totalSupply();
+
+        vm.prank(address(packMachine)); // registered machine
+        pool.registerToken(tokenId, 0, address(packMachine));
+
+        vm.prank(operator);
+        pool.setDefaultBuybackMode(1); // Spend
+
+        _seedPool(1000e6);
+
+        vm.prank(user);
+        assetNFT.approve(address(pool), tokenId);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BuybackPool.BuybackPool__NoPaidAmount.selector,
+                tokenId
+            )
+        );
+        vm.prank(user);
+        pool.buyback(tokenId);
     }
 }

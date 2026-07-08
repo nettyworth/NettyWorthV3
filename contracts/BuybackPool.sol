@@ -20,12 +20,20 @@ import {IBuybackPool} from "./interfaces/IBuybackPool.sol";
 /// @title BuybackPool
 /// @author NettyWorth
 /// @notice Holds USDC allocations from pack purchases and lets token holders sell cards back
-///         at a guaranteed percentage of the card's on-chain appraised fair-market value.
-///         Payout = appraisalValue × buybackBps / 10000.
+///         at a guaranteed percentage of either (a) the card's on-chain appraised fair-market
+///         value (FMV mode) or (b) the amount the buyer actually paid per card at open time
+///         (Spend mode).
+///
+///         FMV mode:   Payout = appraisalValue      × buybackBps / 10000
+///         Spend mode: Payout = amountPaidPerCard   × buybackBps / 10000
+///
 ///         Bought-back NFTs are automatically re-deposited into their source PackMachine clone.
 ///
 /// @dev    Buyback rate can be set globally (defaultBuybackBps) or per-PackMachine
 ///         (packMachineBuybackBps); per-machine override takes precedence.
+///         Buyback mode (FMV vs Spend) can be set globally (defaultBuybackMode) or
+///         per-PackMachine (packMachineBuybackMode); per-machine override takes precedence.
+///         Mode override encoding: 0 = unset (inherit global default), 1 = FMV, 2 = Spend.
 ///         Promo-code boosts (via PromoCodeRegistry) are supported on top of the base rate.
 ///
 /// @custom:security-contact security@nettyworth.io
@@ -42,10 +50,23 @@ contract BuybackPool is
     // Storage (ERC-7201)
     // =========================================================================
 
+    /// @dev Buyback mode stored as a uint8.
+    ///      0 = FMV (payout based on on-chain appraisal value)
+    ///      1 = Spend (payout based on amount paid per card at open time)
+    enum BuybackMode {
+        FMV,
+        Spend
+    }
+
     struct TokenBuybackInfo {
         uint8 tier;
         address sourcePackMachine;
         bool isActive;
+        /// @dev Amount the buyer actually paid per card (net of discounts), in payment-token
+        ///      units. Set to 0 for tokens registered via legacy overloads that predate this
+        ///      field. A Spend-mode buyback on a token with amountPaidPerCard == 0 reverts
+        ///      BuybackPool__NoPaidAmount.
+        uint128 amountPaidPerCard;
     }
 
     /// @custom:storage-location erc7201:nettyworth.storage.BuybackPool
@@ -64,6 +85,12 @@ contract BuybackPool is
         mapping(address packMachine => uint16) packMachineBuybackBps;
         /// @dev PromoCodeRegistry proxy address for buyback-boost code redemption.
         address promoCodeRegistry;
+        /// @dev Global default buyback mode. 0 = FMV, 1 = Spend.
+        BuybackMode defaultBuybackMode;
+        /// @dev Per-PackMachine mode override using a +1 offset so that 0 means "unset,
+        ///      inherit defaultBuybackMode", 1 means FMV, and 2 means Spend.
+        ///      Decode: if value == 0 → use defaultBuybackMode; else mode = BuybackMode(value - 1).
+        mapping(address packMachine => uint8) packMachineBuybackMode;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.BuybackPool")) - 1)) & ~bytes32(uint256(0xff))
@@ -86,12 +113,13 @@ contract BuybackPool is
         uint8 tier
     );
     /// @notice Emitted on every successful buyback.
-    /// @param appraisal The on-chain appraisal value the payout was computed against.
+    /// @param basis The value the payout was computed against: the on-chain appraisal in FMV
+    ///              mode, or the amount paid per card in Spend mode.
     event BuybackExecuted(
         uint256 indexed tokenId,
         address indexed seller,
         uint256 payout,
-        uint256 appraisal
+        uint256 basis
     );
     event TokenRedeposited(
         uint256 indexed tokenId,
@@ -106,6 +134,12 @@ contract BuybackPool is
         address indexed machine,
         uint16 oldBps,
         uint16 newBps
+    );
+    event DefaultBuybackModeUpdated(BuybackMode oldMode, BuybackMode newMode);
+    event PackMachineBuybackModeUpdated(
+        address indexed machine,
+        BuybackMode oldMode,
+        BuybackMode newMode
     );
     event EmergencyWithdrawal(address indexed to, uint256 amount);
     event PackMachineRegistered(address indexed packMachine, bool registered);
@@ -139,6 +173,11 @@ contract BuybackPool is
     error BuybackPool__PromoRegistryNotSet();
     /// @notice The token has no on-chain appraisal — buyback cannot be priced.
     error BuybackPool__NoAppraisal(uint256 tokenId);
+    /// @notice The token was registered without a paid amount (via a legacy overload) but
+    ///         its source machine is configured for Spend mode.
+    error BuybackPool__NoPaidAmount(uint256 tokenId);
+    /// @notice The supplied mode value is not a valid BuybackMode.
+    error BuybackPool__InvalidMode(uint8 mode);
 
     uint16 private constant BPS_PRECISION = 10000;
 
@@ -183,18 +222,56 @@ contract BuybackPool is
     // =========================================================================
 
     /// @notice Called by PackMachine during fulfillRandomness to record a won token's buyback data.
+    ///         Passes `amountPaidPerCard` (net-of-discount USDC the buyer paid per card) for
+    ///         use when the machine is in Spend mode.
     /// @dev Only callable by registered PackMachines.
     ///      If the token already has an active registration (stale flag from a prior win/recycle
     ///      cycle that bypassed buyback), the record is silently overwritten with the current
-    ///      tier/source. This prevents a stale `isActive` from permanently bricking a
+    ///      tier/source/amount. This prevents a stale `isActive` from permanently bricking a
     ///      pack's VRF fulfillment — an authorized machine re-registering its own token is safe
     ///      because the token physically left the machine before the next win, making any prior
     ///      record obsolete.
     function registerToken(
         uint256 tokenId,
         uint8 tier,
+        address sourcePackMachine,
+        uint128 amountPaidPerCard
+    ) external whenNotPaused {
+        _registerToken(tokenId, tier, sourcePackMachine, amountPaidPerCard);
+    }
+
+    /// @notice Compat overload for PackMachine clones that call the 3-arg selector
+    ///         (deployed before the amountPaidPerCard field was added).
+    ///         amountPaidPerCard is recorded as 0; these tokens can only be bought back
+    ///         in FMV mode.
+    function registerToken(
+        uint256 tokenId,
+        uint8 tier,
         address sourcePackMachine
     ) external whenNotPaused {
+        _registerToken(tokenId, tier, sourcePackMachine, 0);
+    }
+
+    /// @notice Legacy 4-arg overload for already-deployed PackMachine clones that were
+    ///         created before the price-based buyback model was removed. `pricePerCard`
+    ///         is ignored — payout is now driven by on-chain appraisal (FMV mode) or
+    ///         the separately tracked amountPaidPerCard (Spend mode) — but the selector
+    ///         must be present so immutable clones can still register won cards.
+    function registerToken(
+        uint256 tokenId,
+        uint128 /* pricePerCard */,
+        uint8 tier,
+        address sourcePackMachine
+    ) external whenNotPaused {
+        _registerToken(tokenId, tier, sourcePackMachine, 0);
+    }
+
+    function _registerToken(
+        uint256 tokenId,
+        uint8 tier,
+        address sourcePackMachine,
+        uint128 amountPaidPerCard
+    ) private {
         BuybackPoolStorage storage $ = _getStorage();
         if (!$.registeredPackMachines[msg.sender])
             revert BuybackPool__UnauthorizedSource(msg.sender);
@@ -202,7 +279,8 @@ contract BuybackPool is
         $.tokenInfo[tokenId] = TokenBuybackInfo({
             tier: tier,
             sourcePackMachine: sourcePackMachine,
-            isActive: true
+            isActive: true,
+            amountPaidPerCard: amountPaidPerCard
         });
 
         emit TokenRegistered(tokenId, sourcePackMachine, tier);
@@ -278,6 +356,41 @@ contract BuybackPool is
             bps
         );
         $.packMachineBuybackBps[machine] = bps;
+    }
+
+    /// @notice Set the global default buyback mode (FMV or Spend).
+    /// @param mode 0 = FMV (payout based on on-chain appraisal), 1 = Spend (payout based on amount paid per card).
+    function setDefaultBuybackMode(
+        uint8 mode
+    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
+        if (mode > uint8(type(BuybackMode).max))
+            revert BuybackPool__InvalidMode(mode);
+        BuybackPoolStorage storage $ = _getStorage();
+        BuybackMode newMode = BuybackMode(mode);
+        emit DefaultBuybackModeUpdated($.defaultBuybackMode, newMode);
+        $.defaultBuybackMode = newMode;
+    }
+
+    /// @notice Set a per-PackMachine buyback mode override.
+    /// @param mode 0 = clear override (inherit global default),
+    ///             1 = FMV (appraisal-based),
+    ///             2 = Spend (amount-paid-based).
+    function setPackMachineBuybackMode(
+        address machine,
+        uint8 mode
+    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
+        if (machine == address(0)) revert BuybackPool__ZeroAddress();
+        // Valid values: 0 (unset), 1 (FMV), 2 (Spend). Max = BuybackMode count + 1.
+        if (mode > uint8(type(BuybackMode).max) + 1)
+            revert BuybackPool__InvalidMode(mode);
+        BuybackPoolStorage storage $ = _getStorage();
+        uint8 old = $.packMachineBuybackMode[machine];
+        BuybackMode oldDecoded =
+            old == 0 ? $.defaultBuybackMode : BuybackMode(old - 1);
+        BuybackMode newDecoded =
+            mode == 0 ? $.defaultBuybackMode : BuybackMode(mode - 1);
+        $.packMachineBuybackMode[machine] = mode;
+        emit PackMachineBuybackModeUpdated(machine, oldDecoded, newDecoded);
     }
 
     /// @notice Set the PromoCodeRegistry proxy address for buyback-boost code redemption.
@@ -373,6 +486,27 @@ contract BuybackPool is
         return _getStorage().promoCodeRegistry;
     }
 
+    /// @notice Returns the global default buyback mode (FMV=0, Spend=1).
+    function getDefaultBuybackMode() external view returns (BuybackMode) {
+        return _getStorage().defaultBuybackMode;
+    }
+
+    /// @notice Returns the per-machine mode override encoded with the +1 offset
+    ///         (0 = unset/inherit global, 1 = FMV, 2 = Spend).
+    function getPackMachineBuybackMode(
+        address machine
+    ) external view returns (uint8) {
+        return _getStorage().packMachineBuybackMode[machine];
+    }
+
+    /// @notice Returns the amount paid per card recorded for a token (0 if registered
+    ///         via a legacy overload that predates this field).
+    function getTokenPaidAmount(
+        uint256 tokenId
+    ) external view returns (uint128) {
+        return _getStorage().tokenInfo[tokenId].amountPaidPerCard;
+    }
+
     // =========================================================================
     // UUPS
     // =========================================================================
@@ -428,11 +562,22 @@ contract BuybackPool is
             emit BuybackBoosted(tokenId, caller, codeId, boostedBps);
         }
 
-        // ── Payout basis = on-chain appraisal value ────────────────────────
-        uint256 appraisal = IAssetNFT($.assetNFT).getAppraisalValue(tokenId);
-        if (appraisal == 0) revert BuybackPool__NoAppraisal(tokenId);
+        // ── Resolve buyback mode: per-machine override (+1 encoded), fallback to global ──
+        uint8 modeRaw = $.packMachineBuybackMode[info.sourcePackMachine];
+        BuybackMode mode =
+            modeRaw == 0 ? $.defaultBuybackMode : BuybackMode(modeRaw - 1);
 
-        uint256 payout = (appraisal * buybackBps) / BPS_PRECISION;
+        // ── Payout basis = appraisal (FMV mode) or amount paid per card (Spend mode) ──
+        uint256 basis;
+        if (mode == BuybackMode.Spend) {
+            basis = info.amountPaidPerCard;
+            if (basis == 0) revert BuybackPool__NoPaidAmount(tokenId);
+        } else {
+            basis = IAssetNFT($.assetNFT).getAppraisalValue(tokenId);
+            if (basis == 0) revert BuybackPool__NoAppraisal(tokenId);
+        }
+
+        uint256 payout = (basis * buybackBps) / BPS_PRECISION;
         if (payout == 0) revert BuybackPool__ZeroAmount();
 
         IERC20 paymentToken = IERC20($.paymentToken);
@@ -453,7 +598,8 @@ contract BuybackPool is
         // Pay user.
         paymentToken.safeTransfer(caller, payout);
 
-        emit BuybackExecuted(tokenId, caller, payout, appraisal);
+        // Emit with the basis value used (appraisal for FMV mode, amountPaidPerCard for Spend mode).
+        emit BuybackExecuted(tokenId, caller, payout, basis);
 
         // Auto re-deposit the NFT back into its source PackMachine.
         _redeposit($, tokenId, tier, sourceMachine);

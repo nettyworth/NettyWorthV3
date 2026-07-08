@@ -502,6 +502,15 @@ contract PackMachine is
         bool poolActive =
             pool != address(0) && pending.buybackAllocationBpsSnapshot > 0;
 
+        // Compute the per-card paid amount (net of any promo / first-open discount)
+        // once before the card loop. escrowedAmount is the actual USDC the buyer paid
+        // for the entire open, divided equally across the requested card count.
+        // Stored so the BuybackPool can price Spend-mode buybacks correctly.
+        uint128 paidPerCard =
+            pending.cardsCount > 0
+                ? uint128(pending.escrowedAmount / pending.cardsCount)
+                : 0;
+
         iFactory.beforeTransfer(assetNFT);
 
         uint256 wonCards;
@@ -568,6 +577,8 @@ contract PackMachine is
                 ++wonCards;
                 emit CardWon(pending.user, tokenId, requestId);
                 // Register with BuybackPool so the user can sell the card back.
+                // paidPerCard is the net USDC the buyer paid per card — used by
+                // BuybackPool when the machine is in Spend mode.
                 // Wrapped in try/catch: a registration failure must never revert card
                 // delivery — the user already owns the NFT at this point.
                 if (poolActive) {
@@ -575,7 +586,8 @@ contract PackMachine is
                         IBuybackPool(pool).registerToken(
                             tokenId,
                             uint8(selectedTier),
-                            address(this)
+                            address(this),
+                            paidPerCard
                         )
                     {} catch {
                         emit BuybackRegistrationFailed(tokenId, requestId);

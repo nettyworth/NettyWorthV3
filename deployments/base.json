@@ -38,14 +38,24 @@
   },
   "BuybackPool": {
     "proxy": "0x778e60808a37faabd61446a4ed29c11ff6d64698",
-    "implementation": "0x5b2f269426359471ca9ade59166cec63302f99ca",
+    "implementation": "0x591fb8f6377f4f629e41a132692a8931be1619e7",
     "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
     "assetNFT": "0x27b125fB73094e53741b850ad779a746a59B089A",
     "paymentToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     "financeWallet": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
     "factory": "0x2Dd68af36e7001690d2c815B68103d7FA81E20D1",
     "defaultBuybackBps": 8000,
-    "deployedAt": "2026-07-06T16:52:58.858Z"
+    "deployedAt": "2026-07-06T16:52:58.858Z",
+    "upgradedAt": "2026-07-08T03:23:43.944Z",
+    "upgradeHistory": [
+      {
+        "previousImplementation": "0x5B2f269426359471CA9AdE59166CeC63302F99CA",
+        "newImplementation": "0x591fb8f6377f4f629e41a132692a8931be1619e7",
+        "upgradedAt": "2026-07-08T03:23:43.943Z",
+        "txHash": "0x21f76610d32bb9a941e1c18e18a3f8dac4ec25afb0a2ddaefd9f799fc1caf883",
+        "upgradeCalldata": "0x"
+      }
+    ]
   },
   "AssetLendingPoolConfig": {
     "proxy": "0x73E18959f780d51D601321F5A7817a353748bFB0",
