@@ -15,9 +15,9 @@ import {Roles} from "./lib/Roles.sol";
 /// @notice Central registry for all promotional codes (discount and buyback boosts).
 ///
 ///         Two kinds of code:
-///           • Discount — reduces a PackMachine pack price by 10/15/20/25%.
+///           • Discount — reduces a PackMachine pack price by 1–100% (100–10000 bps).
 ///             Consumed by registered PackMachine clones via `redeemDiscount`.
-///           • Buyback — raises BuybackPool payout rate from 80% to 90/95/98%.
+///           • Buyback — overrides BuybackPool payout rate to any value 1–100% (100–10000 bps).
 ///             Consumed by the BuybackPool singleton via `redeemBuyback`.
 ///
 ///         Both kinds support:
@@ -169,7 +169,7 @@ contract PromoCodeRegistry is
     /// @notice Create a new promo code.
     /// @param codeId         keccak256(bytes(codeString)) computed off-chain.
     /// @param kind           Discount or Buyback.
-    /// @param bps            Discount: 1000/1500/2000/2500.  Buyback: 9000/9500/9800.
+    /// @param bps            Discount or Buyback: any value in [100, 10000] (1%–100%).
     /// @param expiry         Unix seconds after which the code is expired; 0 = never.
     /// @param maxRedemptions Maximum total redemptions; 0 = uncapped.
     /// @param restricted     true = only addresses on the allowlist may redeem.
@@ -188,11 +188,13 @@ contract PromoCodeRegistry is
         address machine
     ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
         PromoCodeRegistryStorage storage $ = _getStorage();
-        if ($.codes[codeId].exists) revert PromoCodeRegistry__CodeExists(codeId);
+        if ($.codes[codeId].exists)
+            revert PromoCodeRegistry__CodeExists(codeId);
         _validateBps(kind, bps);
 
         // Machine binding is only meaningful for Discount codes.
-        address boundMachine = (kind == PromoKind.Discount) ? machine : address(0);
+        address boundMachine =
+            (kind == PromoKind.Discount) ? machine : address(0);
 
         $.codes[codeId] = PromoCode({
             kind: kind,
@@ -431,18 +433,11 @@ contract PromoCodeRegistry is
     // Internal helpers
     // =========================================================================
 
-    /// @dev Validate bps against the allowed set for the given kind.
+    /// @dev Validate bps is within the allowed range [100, 10000] (1%–100%).
+    ///      Applies to both Discount and Buyback kinds.
     function _validateBps(PromoKind kind, uint16 bps) private pure {
-        if (kind == PromoKind.Discount) {
-            if (
-                bps != 1000 && bps != 1500 && bps != 2000 && bps != 2500
-            ) revert PromoCodeRegistry__InvalidBps(kind, bps);
-        } else {
-            // Buyback
-            if (
-                bps != 9000 && bps != 9500 && bps != 9800
-            ) revert PromoCodeRegistry__InvalidBps(kind, bps);
-        }
+        if (bps < 100 || bps > BPS)
+            revert PromoCodeRegistry__InvalidBps(kind, bps);
     }
 
     /// @dev Revert if codeId does not exist; return storage ref otherwise.

@@ -79,6 +79,7 @@ scripts/
   upgrade-pack-vrf-router.ts      # UUPS upgrade for PackVRFRouter proxy
   deploy-asset-lending-pool.ts    # Deploy AssetLendingPool + ERC1967 proxy; grant STATE_MANAGER_ROLE
   deploy-fee-controller.ts        # Deploy FeeController + ERC1967 proxy
+  set-collectible-fee.ts          # Set collectible sale fee bps and enable it on FeeController (DEFAULT_ADMIN_ROLE)
   deploy-marketplace.ts           # Deploy NettyWorthMarketplace + ERC1967 proxy; wire pool + AssetNFT
   deploy-p2p-trade-escrow.ts      # Deploy P2PTradeEscrow + ERC1967 proxy; standalone (no protocol deps)
   seed-asset-nft.ts               # Dev helper: mint sample AssetNFT cards and seed appraisals
@@ -686,6 +687,11 @@ LENDER_SHARE_BPS=                 # Lender share of interest in bps (default 800
 # --- deploy-fee-controller.ts (required) ---
 TREASURY=                         # Platform fee recipient address
 
+# --- set-collectible-fee.ts ---
+COLLECTIBLE_FEES_BPS=             # Required. New collectible sale fee in basis points (0–1000; e.g. 300 = 3%)
+FEE_CONTROLLER_PROXY=             # (optional) Override FeeController proxy; falls back to deployments/<network>.json
+SKIP_ENABLE=                      # (optional) Set truthy to skip setCollectibleFeesEnabled(true) — only updates the bps
+
 # --- deploy-marketplace.ts (required) ---
 # PAYMENT_TOKEN and TREASURY reused from above
 FEE_CONTROLLER_PROXY=             # (optional) Override FeeController proxy; falls back to deployments/<network>.json
@@ -1056,6 +1062,7 @@ Deploys the `P2PTradeEscrow` implementation and ERC1967 proxy. `initialize(owner
 | `set-finance-wallet.ts` | Set the finance wallet address on `AssetLendingPoolConfig`; env: `FINANCE_WALLET` (required), `CONFIG_PROXY` (opt), `ASSET_LENDING_POOL_PROXY` (opt) | Config owner |
 | `set-lender-config.ts` | Set lender revenue-share bps and toggle lender deposits open/closed on `AssetLendingPool` | Pool owner |
 | `set-term-config.ts` | Create or update a loan term slot (duration, APR, active flag) on `AssetLendingPoolConfig`; env: `TERM_ID` (default 3), `DURATION_SECONDS`, `APR_BPS`, `ACTIVE`, `CONFIG_PROXY` (opt), `ASSET_LENDING_POOL_PROXY` (opt) | Config owner |
+| `set-collectible-fee.ts` | Set `collectibleFeesBps` on `FeeController` and optionally enable it; env: `COLLECTIBLE_FEES_BPS` (required, 0–1000), `FEE_CONTROLLER_PROXY` (opt), `SKIP_ENABLE` (opt) | `DEFAULT_ADMIN_ROLE` |
 | `set-marketplace-allowlist.ts` | Toggle allowed collections / payment tokens on `NettyWorthMarketplace` via `setAllowedCollection` / `setAllowedPaymentToken`; env: `COLLECTIONS` and/or `PAYMENT_TOKENS` (≥1 required), `ALLOWED` (default `true`), `MARKETPLACE_PROXY` (opt), `SKIP_CONFIRM` (opt) | `DEFAULT_ADMIN_ROLE` |
 | `set-marketplace-lending-pool.ts` | Point the marketplace at the lending pool via `setLendingPool`; env: `MARKETPLACE_PROXY` (opt), `LENDING_POOL` (opt), `SKIP_CONFIRM` (opt) | `DEFAULT_ADMIN_ROLE` |
 | `set-pack-machine-implementation.ts` | Deploy new `PackMachine` logic + call `factory.setImplementation`; only new clones use the new logic — existing clones are unaffected | `DEFAULT_ADMIN_ROLE` |
@@ -1254,6 +1261,33 @@ FINANCE_WALLET=0x<addr> npx hardhat run scripts/set-finance-wallet.ts --network 
 ```
 
 On live networks the script prints the old → new wallet, prompts for confirmation, verifies the on-chain state after the transaction, and persists `financeWallet` and `financeWalletUpdatedAt` to `deployments/<network>.json`.
+
+---
+
+### `set-collectible-fee.ts` — Update collectible sale fee
+
+Sets the collectible sale fee rate on `FeeController` and ensures the fee type is enabled. Caller must hold `DEFAULT_ADMIN_ROLE` on `PermissionManager`.
+
+**Environment variables:**
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `COLLECTIBLE_FEES_BPS` | Yes | New fee rate in basis points (0–1000; e.g. `300` = 3%). Validated client-side — script exits before sending if the value exceeds the on-chain maximum of `1000` (10%). |
+| `FEE_CONTROLLER_PROXY` | No | Override FeeController proxy; falls back to `deployments/<network>.json` |
+| `SKIP_ENABLE` | No | Set to any truthy value to skip the `setCollectibleFeesEnabled(true)` call — only the bps value is updated |
+
+```bash
+# Set fee to 3% and ensure enabled:
+COLLECTIBLE_FEES_BPS=300 npx hardhat run scripts/set-collectible-fee.ts --network base
+
+# Dry-run on a fork (no prompt, no JSON write):
+COLLECTIBLE_FEES_BPS=250 npx hardhat run scripts/set-collectible-fee.ts --network forkBase
+
+# Update rate only, don't touch the enabled flag:
+COLLECTIBLE_FEES_BPS=300 SKIP_ENABLE=1 npx hardhat run scripts/set-collectible-fee.ts --network base
+```
+
+On live networks the script prints a confirmation summary (current vs new rate, enable action) and requires `yes` before sending. After the transaction(s) it re-reads both `collectibleFeesBps` and `collectibleFeesEnabled` and exits with code 1 on any mismatch. Persists `collectibleFeesBps`, `collectibleFeesEnabled`, and `collectibleFeesUpdatedAt` to `deployments/<network>.json`.
 
 ---
 

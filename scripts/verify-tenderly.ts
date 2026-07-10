@@ -327,37 +327,37 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //       ],
   //     }),
   // },
-  // NettyWorthMarketplace: {
-  //   sourcePath: "NettyWorthMarketplace.sol",
-  //   contractName: "NettyWorthMarketplace",
-  //   implCtorArgs: () => null,
-  //   proxyInitData: (e) =>
-  //     encodeFunctionData({
-  //       abi: [
-  //         {
-  //           type: "function",
-  //           name: "initialize",
-  //           inputs: [
-  //             { type: "address" }, // permissionManager
-  //             { type: "address" }, // feeController
-  //             { type: "address" }, // lendingPool
-  //             { type: "address" }, // assetNFT
-  //             { type: "address" }, // paymentToken
-  //             { type: "address" }, // treasury
-  //           ],
-  //         },
-  //       ],
-  //       functionName: "initialize",
-  //       args: [
-  //         e.permissionManager as `0x${string}`,
-  //         e.feeController as `0x${string}`,
-  //         e.lendingPool as `0x${string}`,
-  //         e.assetNFT as `0x${string}`,
-  //         e.paymentToken as `0x${string}`,
-  //         e.treasury as `0x${string}`,
-  //       ],
-  //     }),
-  // },
+  NettyWorthMarketplace: {
+    sourcePath: "NettyWorthMarketplace.sol",
+    contractName: "NettyWorthMarketplace",
+    implCtorArgs: () => null,
+    proxyInitData: (e) =>
+      encodeFunctionData({
+        abi: [
+          {
+            type: "function",
+            name: "initialize",
+            inputs: [
+              { type: "address" }, // permissionManager
+              { type: "address" }, // feeController
+              { type: "address" }, // lendingPool
+              { type: "address" }, // assetNFT
+              { type: "address" }, // paymentToken
+              { type: "address" }, // treasury
+            ],
+          },
+        ],
+        functionName: "initialize",
+        args: [
+          e.permissionManager as `0x${string}`,
+          e.feeController as `0x${string}`,
+          e.lendingPool as `0x${string}`,
+          e.assetNFT as `0x${string}`,
+          e.paymentToken as `0x${string}`,
+          e.treasury as `0x${string}`,
+        ],
+      }),
+  },
   // P2PTradeEscrow: {
   //   sourcePath: "P2PTradeEscrow.sol",
   //   contractName: "P2PTradeEscrow",

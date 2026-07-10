@@ -17,7 +17,7 @@ interface IPromoCodeRegistry {
 
     struct PromoCode {
         PromoKind kind;
-        uint16 bps; // Discount: 1000/1500/2000/2500 ; Buyback: 9000/9500/9800
+        uint16 bps; // Any value in [100, 10000] (1%–100%) for both Discount and Buyback
         uint64 expiry; // Unix seconds; 0 = never expires
         uint32 maxRedemptions; // 0 = uncapped
         uint32 redeemedCount;
@@ -107,7 +107,7 @@ interface IPromoCodeRegistry {
     ///      or the caller is not an authorized PackMachine.
     /// @param codeId keccak256 hash of the off-chain promo-code string.
     /// @param user  Economic beneficiary (pack buyer). Used for allowlist and oncePerUser checks.
-    /// @return bps  Discount in basis points (1000/1500/2000/2500 = 10/15/20/25%).
+    /// @return bps  Discount in basis points ([100, 10000] = 1%–100%).
     function redeemDiscount(
         bytes32 codeId,
         address user
@@ -118,7 +118,7 @@ interface IPromoCodeRegistry {
     ///      Reverts under the same conditions as redeemDiscount plus caller-not-pool check.
     /// @param codeId keccak256 hash of the off-chain promo-code string.
     /// @param user  Economic beneficiary (token seller). Used for allowlist and oncePerUser checks.
-    /// @return bps  Boosted buyback rate in basis points (9000/9500/9800 = 90/95/98%).
+    /// @return bps  Buyback rate override in basis points ([100, 10000] = 1%–100%).
     function redeemBuyback(
         bytes32 codeId,
         address user
