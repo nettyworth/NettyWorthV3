@@ -1,37 +1,45 @@
 /**
  * set-term-config.ts
  *
- * Create or update a loan term configuration on AssetLendingPoolConfig.
- * Useful for adding a short-duration test term (e.g. 5 min) without touching
- * the three production terms (0=7d, 1=15d, 2=30d).
+ * Create or update loan term configuration(s) on AssetLendingPoolConfig.
  *
- * Usage
- * -----
- * # Add a 5-minute test term at slot 3 (all defaults):
- * npx hardhat run scripts/set-term-config.ts --network base
+ * BATCH MODE (default — no TERM_ID set)
+ * ──────────────────────────────────────
+ * Writes the three production terms (ids 0/1/2) in one run:
  *
- * # Fully parameterised:
- * TERM_ID=3 DURATION_SECONDS=300 APR_BPS=1000 ACTIVE=true \
+ *   id 0 →  7 days, aprBps 52143  (~10% flat: borrow 100 USDC, repay ~110)
+ *   id 1 → 15 days, aprBps 36500  (15% flat: borrow 100 USDC, repay 115)
+ *   id 2 → 30 days, aprBps 24333  (~20% flat: borrow 100 USDC, repay ~119.9997)
+ *
  *   npx hardhat run scripts/set-term-config.ts --network base
  *
- * # Deactivate the term after testing:
- * TERM_ID=3 DURATION_SECONDS=300 APR_BPS=1000 ACTIVE=false \
- *   npx hardhat run scripts/set-term-config.ts --network base
+ * NOTE on rate encoding: the contract stores an ANNUAL rate (APR) and pro-rates
+ * it over the loan duration:  interest = principal × aprBps × duration / (365d × 10000)
+ * The high aprBps values above are NOT errors — they are the annualized equivalents of
+ * the desired flat-over-term percentages (10%/15%/20%).
  *
- * # Override proxy directly instead of reading from deployments JSON:
- * ASSET_LENDING_POOL_PROXY=0x<addr> \
- *   npx hardhat run scripts/set-term-config.ts --network base
+ * SINGLE-TERM MODE (TERM_ID is set)
+ * ───────────────────────────────────
+ * Writes exactly one slot from env vars:
  *
- * # Or override the config proxy directly:
- * CONFIG_PROXY=0x<addr> \
- *   npx hardhat run scripts/set-term-config.ts --network base
+ *   TERM_ID=3 DURATION_SECONDS=300 APR_BPS=1000 ACTIVE=true \
+ *     npx hardhat run scripts/set-term-config.ts --network base
+ *
+ *   # Deactivate a term after testing:
+ *   TERM_ID=3 DURATION_SECONDS=300 APR_BPS=1000 ACTIVE=false \
+ *     npx hardhat run scripts/set-term-config.ts --network base
+ *
+ * PROXY OVERRIDES (both modes)
+ * ─────────────────────────────
+ *   ASSET_LENDING_POOL_PROXY=0x<addr>   override pool proxy
+ *   CONFIG_PROXY=0x<addr>               override config proxy directly (takes precedence)
  *
  * Environment variables
  * ---------------------
- * TERM_ID            uint8 slot to write (default: 3)
- * DURATION_SECONDS   term duration in seconds (default: 300 = 5 min)
- * APR_BPS            annual interest rate in basis points (default: 1000 = 10%)
- * ACTIVE             "true"/"1" or "false"/"0" (default: true)
+ * TERM_ID            uint8 slot to write; if unset → batch mode
+ * DURATION_SECONDS   term duration in seconds (single mode only; default: 300 = 5 min)
+ * APR_BPS            annual interest rate in bps (single mode only; default: 1000 = 10% APR)
+ * ACTIVE             "true"/"1" or "false"/"0" (single mode only; default: true)
  * ASSET_LENDING_POOL_PROXY  override pool proxy (optional)
  * CONFIG_PROXY       override config proxy directly (optional; takes precedence)
  */
@@ -40,64 +48,90 @@ import { network } from "hardhat";
 import { getAddress } from "viem";
 import { createInterface } from "node:readline/promises";
 import { readDeployments, saveDeployment } from "./lib/deployments.js";
+import { sleep } from "./lib/sleep.js";
 
-// ─── Parse TERM_ID ────────────────────────────────────────────────────────────
+// ─── Production term constants (batch mode) ───────────────────────────────────
+//
+// aprBps is an ANNUAL rate. These values are the annualized equivalents of the
+// desired flat-over-term fees: interest = principal × aprBps × duration / (365d × 10000).
+//
+//   id 0:  7d, aprBps=52143 → ~10% flat (100 USDC → repay ~110)
+//   id 1: 15d, aprBps=36500 →  15% flat (100 USDC → repay  115)
+//   id 2: 30d, aprBps=24333 → ~20% flat (100 USDC → repay ~119.9997)
 
-const rawTermId = process.env.TERM_ID ?? "3";
-const termIdNum = Number(rawTermId);
-if (
-  !Number.isInteger(termIdNum) ||
-  termIdNum < 0 ||
-  termIdNum > 255
-) {
-  console.error(
-    `Invalid TERM_ID: "${rawTermId}". Must be an integer between 0 and 255 (uint8).`,
-  );
-  process.exit(1);
-}
-const termId = termIdNum as number; // passed as BigInt to the ABI below
+const PRODUCTION_TERMS = [
+  { termId: 0, durationSeconds: 7 * 86400, aprBps: 52143, active: true },
+  { termId: 1, durationSeconds: 15 * 86400, aprBps: 36500, active: true },
+  { termId: 2, durationSeconds: 30 * 86400, aprBps: 24333, active: true },
+] as const;
 
-// ─── Parse DURATION_SECONDS ───────────────────────────────────────────────────
+// ─── Detect mode ──────────────────────────────────────────────────────────────
 
-const rawDuration = process.env.DURATION_SECONDS ?? "300";
-const durationNum = Number(rawDuration);
-if (!Number.isInteger(durationNum) || durationNum <= 0) {
-  console.error(
-    `Invalid DURATION_SECONDS: "${rawDuration}". Must be a positive integer (seconds). Got 0? The contract rejects duration == 0.`,
-  );
-  process.exit(1);
-}
-const newDuration = BigInt(durationNum);
+const isBatchMode = process.env.TERM_ID === undefined;
 
-// ─── Parse APR_BPS ────────────────────────────────────────────────────────────
+// ─── Parse TERM_ID (single mode only) ────────────────────────────────────────
 
-const rawAprBps = process.env.APR_BPS ?? "1000";
-const aprBpsNum = Number(rawAprBps);
-if (
-  !Number.isInteger(aprBpsNum) ||
-  aprBpsNum < 0 ||
-  aprBpsNum > 10_000
-) {
-  console.error(
-    `Invalid APR_BPS: "${rawAprBps}". Must be an integer between 0 and 10000 (basis points).`,
-  );
-  process.exit(1);
-}
-const newAprBps = BigInt(aprBpsNum);
-
-// ─── Parse ACTIVE ─────────────────────────────────────────────────────────────
-
-const rawActive = process.env.ACTIVE ?? "true";
+let termId: number;
+let durationNum: number;
+let newDuration: bigint;
+let newAprBps: bigint;
 let newActive: boolean;
-if (rawActive === "true" || rawActive === "1") {
-  newActive = true;
-} else if (rawActive === "false" || rawActive === "0") {
-  newActive = false;
+
+if (!isBatchMode) {
+  const rawTermId = process.env.TERM_ID!;
+  const termIdNum = Number(rawTermId);
+  if (!Number.isInteger(termIdNum) || termIdNum < 0 || termIdNum > 255) {
+    console.error(
+      `Invalid TERM_ID: "${rawTermId}". Must be an integer between 0 and 255 (uint8).`,
+    );
+    process.exit(1);
+  }
+  termId = termIdNum;
+
+  // ─── Parse DURATION_SECONDS ─────────────────────────────────────────────────
+
+  const rawDuration = process.env.DURATION_SECONDS ?? "300";
+  durationNum = Number(rawDuration);
+  if (!Number.isInteger(durationNum) || durationNum <= 0) {
+    console.error(
+      `Invalid DURATION_SECONDS: "${rawDuration}". Must be a positive integer (seconds). Got 0? The contract rejects duration == 0.`,
+    );
+    process.exit(1);
+  }
+  newDuration = BigInt(durationNum);
+
+  // ─── Parse APR_BPS ──────────────────────────────────────────────────────────
+
+  const rawAprBps = process.env.APR_BPS ?? "1000";
+  const aprBpsNum = Number(rawAprBps);
+  if (!Number.isInteger(aprBpsNum) || aprBpsNum < 0 || aprBpsNum > 1_000_000) {
+    console.error(
+      `Invalid APR_BPS: "${rawAprBps}". Must be an integer between 0 and 1000000 (basis points).`,
+    );
+    process.exit(1);
+  }
+  newAprBps = BigInt(aprBpsNum);
+
+  // ─── Parse ACTIVE ───────────────────────────────────────────────────────────
+
+  const rawActive = process.env.ACTIVE ?? "true";
+  if (rawActive === "true" || rawActive === "1") {
+    newActive = true;
+  } else if (rawActive === "false" || rawActive === "0") {
+    newActive = false;
+  } else {
+    console.error(
+      `Invalid ACTIVE: "${rawActive}". Must be "true", "false", "1", or "0".`,
+    );
+    process.exit(1);
+  }
 } else {
-  console.error(
-    `Invalid ACTIVE: "${rawActive}". Must be "true", "false", "1", or "0".`,
-  );
-  process.exit(1);
+  // Satisfy TypeScript — these are only read in single mode
+  termId = 0;
+  durationNum = 0;
+  newDuration = 0n;
+  newAprBps = 0n;
+  newActive = false;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -143,9 +177,7 @@ async function confirmUpdate(
   console.log(`  aprBps:    ${bps(newAprBps)}`);
   console.log(`  active:    ${newActive}`);
   if (termId >= termCount) {
-    console.log(
-      `\n⚠  termCount will grow from ${termCount} → ${termId + 1}`,
-    );
+    console.log(`\n⚠  termCount will grow from ${termCount} → ${termId + 1}`);
   }
   console.log("================================\n");
   const answer = await rl.question("Proceed? (yes/no): ");
@@ -217,145 +249,212 @@ if (owner.toLowerCase() !== callerAddress.toLowerCase()) {
   process.exit(1);
 }
 
-// ─── Read current term config and termCount ───────────────────────────────────
+// ─── applyTerm helper ─────────────────────────────────────────────────────────
+//
+// Writes (and verifies) a single term slot, then persists to the deployments
+// JSON on live networks. Called by both batch and single mode.
 
-const [currentTerm, currentTermCount] = await Promise.all([
-  config.read.getTermConfig([termId]),
-  config.read.termCount(),
-]);
+type TermInput = {
+  termId: number;
+  durationSeconds: number;
+  aprBps: number;
+  active: boolean;
+};
+
+async function applyTerm(
+  term: TermInput,
+  step: { current: number; total: number },
+): Promise<void> {
+  const { termId: id, durationSeconds, aprBps: aprBpsVal, active } = term;
+  const dur = BigInt(durationSeconds);
+  const apr = BigInt(aprBpsVal);
+  const prefix = step.total > 1 ? `[${step.current}/${step.total}] ` : "";
+
+  // Read current on-chain state
+  const [currentTerm, currentTermCount] = await Promise.all([
+    config.read.getTermConfig([id]),
+    config.read.termCount(),
+  ]);
+
+  console.log(`\n${prefix}term[${id}] — current state:`);
+  console.log(
+    `  duration:  ${seconds(currentTerm.duration)}${currentTerm.duration === 0n ? "  (slot empty)" : ""}`,
+  );
+  console.log(`  aprBps:    ${bps(currentTerm.aprBps)}`);
+  console.log(`  active:    ${currentTerm.active}`);
+  console.log(`  termCount: ${currentTermCount}`);
+
+  // No-op check
+  if (
+    currentTerm.duration === dur &&
+    currentTerm.aprBps === apr &&
+    currentTerm.active === active
+  ) {
+    console.log(`  → already up to date, skipping.`);
+    return;
+  }
+
+  console.log(
+    `  → setting: duration=${seconds(dur)}, aprBps=${bps(apr)}, active=${active}`,
+  );
+  if (id >= Number(currentTermCount)) {
+    console.log(
+      `  ⚠  termCount will grow from ${currentTermCount} → ${id + 1}`,
+    );
+  }
+
+  // Send transaction
+  const txHash = await config.write.setTermConfig([id, dur, apr, active], {
+    account: callerClient.account,
+  });
+  const receipt = await publicClient.waitForTransactionReceipt({
+    hash: txHash,
+  });
+  console.log(`  tx: ${txHash} (block ${receipt.blockNumber})`);
+  await sleep(2000);
+  // Verify
+  const [termAfter, termCountAfter] = await Promise.all([
+    config.read.getTermConfig([id]),
+    config.read.termCount(),
+  ]);
+  if (
+    termAfter.duration !== dur ||
+    termAfter.aprBps !== apr ||
+    termAfter.active !== active
+  ) {
+    console.error(
+      `CRITICAL: State mismatch after update! Expected duration=${dur} aprBps=${apr} active=${active}, got duration=${termAfter.duration} aprBps=${termAfter.aprBps} active=${termAfter.active}`,
+    );
+    process.exit(1);
+  }
+  console.log(
+    `  term[${id}].duration  confirmed: ${seconds(termAfter.duration)} ✓`,
+  );
+  console.log(`  term[${id}].aprBps    confirmed: ${bps(termAfter.aprBps)} ✓`);
+  console.log(`  term[${id}].active    confirmed: ${termAfter.active} ✓`);
+  console.log(`  termCount            confirmed: ${termCountAfter} ✓`);
+
+  // Persist to deployments/<network>.json (live networks only)
+  if (connection.networkConfig.type === "http") {
+    try {
+      const deploymentData = await readDeployments(connection.networkName);
+      const configEntry =
+        (deploymentData["AssetLendingPoolConfig"] as Record<string, unknown>) ??
+        {};
+      const existingTerms = Array.isArray(configEntry.terms)
+        ? (configEntry.terms as Record<string, unknown>[])
+        : [];
+      const termRecord = {
+        termId: id,
+        durationSeconds,
+        aprBps: aprBpsVal,
+        active,
+        updatedAt: new Date().toISOString(),
+      };
+      // Replace entry for this termId if present, otherwise append
+      const termIdx = existingTerms.findIndex((t) => t.termId === id);
+      if (termIdx >= 0) {
+        existingTerms[termIdx] = termRecord;
+      } else {
+        existingTerms.push(termRecord);
+      }
+      await saveDeployment(connection.networkName, "AssetLendingPoolConfig", {
+        ...configEntry,
+        proxy: configProxyAddress,
+        terms: existingTerms,
+      });
+      console.log(
+        `  Deployment info updated at deployments/${connection.networkName}.json`,
+      );
+    } catch (err) {
+      // Non-fatal — on-chain state is confirmed; just warn.
+      console.warn(`  Warning: could not persist to deployments JSON: ${err}`);
+    }
+  }
+}
+
+// ─── Dispatch: batch vs single ────────────────────────────────────────────────
 
 console.log(`\nConfig proxy:  ${configProxyAddress}`);
 console.log(`Owner:         ${owner}`);
-console.log(
-  `Current termCount: ${currentTermCount}  (slots 0–${Number(currentTermCount) - 1} are defined)`,
-);
-console.log(`\nCurrent term[${termId}]:`);
-console.log(
-  `  duration:  ${seconds(currentTerm.duration)}${currentTerm.duration === 0n ? "  (slot empty)" : ""}`,
-);
-console.log(`  aprBps:    ${bps(currentTerm.aprBps)}`);
-console.log(`  active:    ${currentTerm.active}`);
 
-// ─── No-op check ─────────────────────────────────────────────────────────────
-
-if (
-  currentTerm.duration === newDuration &&
-  currentTerm.aprBps === newAprBps &&
-  currentTerm.active === newActive
-) {
-  console.log(
-    `\nterm[${termId}] is already set to duration=${newDuration}s, aprBps=${newAprBps}, active=${newActive}. Nothing to do.`,
-  );
-  process.exit(0);
-}
-
-// ─── Confirmation on live networks ────────────────────────────────────────────
-
-if (connection.networkConfig.type === "http") {
-  const ok = await confirmUpdate(
-    connection.networkName,
-    chainId,
-    callerAddress,
-    configProxyAddress,
-    currentTerm,
-    Number(currentTermCount),
-  );
-  if (!ok) {
-    console.log("Cancelled.");
-    process.exit(0);
+if (isBatchMode) {
+  // ── Batch confirmation (live networks only) ─────────────────────────────────
+  if (connection.networkConfig.type === "http") {
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    console.log("\n=== setTermConfig Batch Summary ===");
+    console.log(`Network:   ${connection.networkName} (chainId: ${chainId})`);
+    console.log(`Caller:    ${callerAddress}`);
+    console.log(`Config:    ${configProxyAddress}`);
+    console.log(`\nWill write ${PRODUCTION_TERMS.length} production terms:`);
+    for (const t of PRODUCTION_TERMS) {
+      console.log(
+        `  id ${t.termId}: ${t.durationSeconds / 86400}d, aprBps=${t.aprBps} (${(t.aprBps / 100).toFixed(2)}% APR), active=${t.active}`,
+      );
+    }
+    console.log("===================================\n");
+    const answer = await rl.question("Proceed? (yes/no): ");
+    rl.close();
+    if (answer.toLowerCase() !== "yes") {
+      console.log("Cancelled.");
+      process.exit(0);
+    }
   }
-}
 
-// ─── Send transaction ─────────────────────────────────────────────────────────
+  // Apply each term sequentially (preserves nonce order)
+  for (let i = 0; i < PRODUCTION_TERMS.length; i++) {
+    await applyTerm(
+      { ...PRODUCTION_TERMS[i] },
+      { current: i + 1, total: PRODUCTION_TERMS.length },
+    );
+  }
 
-console.log(
-  `\n[1/2] Calling setTermConfig(termId=${termId}, duration=${newDuration}, aprBps=${newAprBps}, active=${newActive})…`,
-);
-const txHash = await config.write.setTermConfig(
-  [termId, newDuration, newAprBps, newActive],
-  { account: callerClient.account },
-);
-const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-console.log(`  tx: ${txHash} (block ${receipt.blockNumber})`);
+  console.log("\n=== Batch setTermConfig Complete ===");
+  console.log(`Network:  ${connection.networkName} (chainId: ${chainId})`);
+  console.log(`Config:   ${configProxyAddress}`);
+  console.log(`Wrote ${PRODUCTION_TERMS.length} terms (ids 0/1/2).`);
+  console.log("====================================\n");
+} else {
+  // ── Single-term mode ────────────────────────────────────────────────────────
+  const [currentTerm, currentTermCount] = await Promise.all([
+    config.read.getTermConfig([termId]),
+    config.read.termCount(),
+  ]);
 
-// ─── Verify ───────────────────────────────────────────────────────────────────
-
-console.log("[2/2] Verifying…");
-const [termAfter, termCountAfter] = await Promise.all([
-  config.read.getTermConfig([termId]),
-  config.read.termCount(),
-]);
-
-if (
-  termAfter.duration !== newDuration ||
-  termAfter.aprBps !== newAprBps ||
-  termAfter.active !== newActive
-) {
-  console.error(
-    `CRITICAL: State mismatch after update! Expected duration=${newDuration} aprBps=${newAprBps} active=${newActive}, got duration=${termAfter.duration} aprBps=${termAfter.aprBps} active=${termAfter.active}`,
+  console.log(
+    `Current termCount: ${currentTermCount}  (slots 0–${Number(currentTermCount) - 1} are defined)`,
   );
-  process.exit(1);
-}
-console.log(`  term[${termId}].duration  confirmed: ${seconds(termAfter.duration)} ✓`);
-console.log(`  term[${termId}].aprBps    confirmed: ${bps(termAfter.aprBps)} ✓`);
-console.log(`  term[${termId}].active    confirmed: ${termAfter.active} ✓`);
-console.log(`  termCount                confirmed: ${termCountAfter} ✓`);
 
-// ─── Summary ──────────────────────────────────────────────────────────────────
+  if (connection.networkConfig.type === "http") {
+    const ok = await confirmUpdate(
+      connection.networkName,
+      chainId,
+      callerAddress,
+      configProxyAddress,
+      currentTerm,
+      Number(currentTermCount),
+    );
+    if (!ok) {
+      console.log("Cancelled.");
+      process.exit(0);
+    }
+  }
 
-console.log("\n=== setTermConfig Complete ===");
-console.log(`Network:      ${connection.networkName} (chainId: ${chainId})`);
-console.log(`Config proxy: ${configProxyAddress}`);
-console.log(
-  `Old term[${termId}]:  duration=${seconds(currentTerm.duration)}, aprBps=${bps(currentTerm.aprBps)}, active=${currentTerm.active}`,
-);
-console.log(
-  `New term[${termId}]:  duration=${seconds(termAfter.duration)}, aprBps=${bps(termAfter.aprBps)}, active=${termAfter.active}`,
-);
-console.log(`termCount:    ${currentTermCount} → ${termCountAfter}`);
-console.log(`Tx:           ${txHash}`);
-console.log("================================\n");
-
-// ─── Persist to deployments/<network>.json (live networks only) ───────────────
-
-if (connection.networkConfig.type === "http") {
-  try {
-    const deploymentData = await readDeployments(connection.networkName);
-    const configEntry =
-      (deploymentData["AssetLendingPoolConfig"] as Record<string, unknown>) ??
-      {};
-
-    // Merge into the existing "terms" array (or create it fresh)
-    const existingTerms = Array.isArray(configEntry.terms)
-      ? (configEntry.terms as Record<string, unknown>[])
-      : [];
-    const termRecord = {
+  await applyTerm(
+    {
       termId,
       durationSeconds: durationNum,
-      aprBps: aprBpsNum,
+      aprBps: Number(newAprBps),
       active: newActive,
-      updatedAt: new Date().toISOString(),
-    };
-    // Replace the entry for this termId if it exists, otherwise append
-    const termIdx = existingTerms.findIndex(
-      (t) => t.termId === termId,
-    );
-    if (termIdx >= 0) {
-      existingTerms[termIdx] = termRecord;
-    } else {
-      existingTerms.push(termRecord);
-    }
+    },
+    { current: 1, total: 1 },
+  );
 
-    await saveDeployment(connection.networkName, "AssetLendingPoolConfig", {
-      ...configEntry,
-      proxy: configProxyAddress,
-      terms: existingTerms,
-    });
-    console.log(
-      `Deployment info updated at deployments/${connection.networkName}.json`,
-    );
-  } catch (err) {
-    // Non-fatal — the on-chain state is already confirmed; just warn.
-    console.warn(`Warning: could not persist to deployments JSON: ${err}`);
-  }
+  console.log("\n=== setTermConfig Complete ===");
+  console.log(`Network:      ${connection.networkName} (chainId: ${chainId})`);
+  console.log(`Config proxy: ${configProxyAddress}`);
+  console.log("================================\n");
 }

@@ -13,7 +13,7 @@ const NFT_NAME = process.env.ASSET_NFT_NAME ?? "NettyWorth Assets";
 const NFT_SYMBOL = process.env.ASSET_NFT_SYMBOL ?? "NWA";
 const CONTRACT_URI =
   process.env.ASSET_NFT_CONTRACT_URI ??
-  "https://staging-v2-api.nettyworth.io/asset-nfts";
+  "https://app-api.nettyworth.io:3005/api/v2/trading-cards/metadata/";
 const ROYALTY_RECEIVER = process.env.ASSET_NFT_ROYALTY_RECEIVER;
 const ROYALTY_FEE = BigInt(process.env.ASSET_NFT_ROYALTY_FEE ?? "0");
 
@@ -124,8 +124,31 @@ const proxy = await viem.deployContract("ERC1967ProxyHelper", [
 console.log(`  Proxy: ${proxy.address}`);
 await sleep(5000);
 
-console.log("[4/4] Verifying deployment...");
+console.log("[4/5] Setting base URI...");
 const nft = await viem.getContractAt("AssetNFT", proxy.address);
+let setBaseTxHash: `0x${string}`;
+try {
+  setBaseTxHash = await nft.write.setBaseURI([CONTRACT_URI], {
+    account: deployerClient.account,
+  });
+} catch (err) {
+  console.error(
+    "setBaseURI failed — ensure the deployer holds URI_SETTER_ROLE on the PermissionManager.\n" +
+      "Grant it first using scripts/grant-role.ts.",
+  );
+  throw err;
+}
+const setBaseReceipt = await publicClient.waitForTransactionReceipt({
+  hash: setBaseTxHash,
+});
+if (setBaseReceipt.status !== "success") {
+  console.error(`setBaseURI tx reverted: ${setBaseTxHash}`);
+  process.exit(1);
+}
+console.log(`  tx: ${setBaseTxHash} (block ${setBaseReceipt.blockNumber}) ✓`);
+await sleep(2000);
+
+console.log("[5/5] Verifying deployment...");
 const actualName = await nft.read.name();
 const actualSymbol = await nft.read.symbol();
 const actualContractURI = await nft.read.contractURI();
@@ -163,6 +186,7 @@ console.log(`PermissionManager:  ${actualPM}`);
 console.log(`Name:               ${actualName}`);
 console.log(`Symbol:             ${actualSymbol}`);
 console.log(`Contract URI:       ${actualContractURI}`);
+console.log(`Base URI:           ${CONTRACT_URI}`);
 console.log("=============================\n");
 
 if (connection.networkConfig.type === "http") {
@@ -187,6 +211,7 @@ if (connection.networkConfig.type === "http") {
     name: actualName,
     symbol: actualSymbol,
     contractURI: actualContractURI,
+    baseURI: CONTRACT_URI,
     deployedAt: new Date().toISOString(),
   };
 

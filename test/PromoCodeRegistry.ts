@@ -149,11 +149,11 @@ describe("PromoCodeRegistry", async function () {
         assert.equal(code.kind, PromoKind.Buyback);
     });
 
-    it("reverts when creating a code with invalid bps for discount kind", async () => {
+    it("reverts when creating a code with invalid bps (below 100)", async () => {
         const { registry } = await deploy();
         await assert.rejects(
             registry.write.createCode(
-                [DISCOUNT_CODE_ID, PromoKind.Discount, 9000, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
+                [DISCOUNT_CODE_ID, PromoKind.Discount, 99, 0n, 0, false, false, '0x0000000000000000000000000000000000000000'],
                 { account: walletOperator.account },
             ),
             /InvalidBps|revert/i,

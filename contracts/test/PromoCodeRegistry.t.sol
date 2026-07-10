@@ -141,28 +141,28 @@ contract PromoCodeRegistryTest is Test {
     // createCode — invalid bps
     // =========================================================================
 
-    function test_createCode_revertInvalidBps_discount_buybackValue() public {
+    function test_createCode_revertInvalidBps_discount_tooLow() public {
         vm.prank(operator);
         vm.expectRevert(
             abi.encodeWithSelector(
                 IPromoCodeRegistry.PromoCodeRegistry__InvalidBps.selector,
                 IPromoCodeRegistry.PromoKind.Discount,
-                uint16(9000)
+                uint16(99)
             )
         );
-        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, 9000, 0, 0, false, false, address(0));
+        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, 99, 0, 0, false, false, address(0));
     }
 
-    function test_createCode_revertInvalidBps_buyback_discountValue() public {
+    function test_createCode_revertInvalidBps_buyback_tooHigh() public {
         vm.prank(operator);
         vm.expectRevert(
             abi.encodeWithSelector(
                 IPromoCodeRegistry.PromoCodeRegistry__InvalidBps.selector,
                 IPromoCodeRegistry.PromoKind.Buyback,
-                uint16(2000)
+                uint16(10001)
             )
         );
-        registry.createCode(BUYBACK_CODE, IPromoCodeRegistry.PromoKind.Buyback, 2000, 0, 0, false, false, address(0));
+        registry.createCode(BUYBACK_CODE, IPromoCodeRegistry.PromoKind.Buyback, 10001, 0, 0, false, false, address(0));
     }
 
     function test_createCode_revertInvalidBps_discount_arbitrary() public {
@@ -171,10 +171,10 @@ contract PromoCodeRegistryTest is Test {
             abi.encodeWithSelector(
                 IPromoCodeRegistry.PromoCodeRegistry__InvalidBps.selector,
                 IPromoCodeRegistry.PromoKind.Discount,
-                uint16(500)
+                uint16(0)
             )
         );
-        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, 500, 0, 0, false, false, address(0));
+        registry.createCode(DISCOUNT_CODE, IPromoCodeRegistry.PromoKind.Discount, 0, 0, 0, false, false, address(0));
     }
 
     // =========================================================================
