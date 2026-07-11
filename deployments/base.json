@@ -163,5 +163,15 @@
     "packFulfillLib": "0x9b455b2f46a6c66a4b04124db906f050ccd98463",
     "trustedForwarder": "0x0000000000000000000000000000000000000000",
     "deployedAt": "2026-07-11T07:05:42.357Z"
-  }
+  },
+  "PackMachines": [
+    {
+      "address": "0x8a021c02Ac5233164D7c44d87a344623A49197c5",
+      "pricePerPack": "0",
+      "cardsPerPack": 1,
+      "startTime": "1783756735",
+      "factory": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
+      "createdAt": "2026-07-11T07:59:36.759Z"
+    }
+  ]
 }

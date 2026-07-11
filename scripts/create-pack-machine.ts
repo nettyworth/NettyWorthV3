@@ -4,6 +4,7 @@ import { createInterface } from "node:readline/promises";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sleep } from "./lib/sleep.js";
 
 // ─── Pack parameters (override via environment variables) ─────────────────────
 // PRICE_PER_PACK: USDC cost per pack in raw units (6 decimals). e.g. "10000000" = 10 USDC
@@ -175,6 +176,8 @@ const createReceipt = await publicClient.waitForTransactionReceipt({
   hash: createHash,
 });
 
+await sleep(3000);
+
 const [createLog] = parseEventLogs({
   abi: factory.abi,
   eventName: "PackMachineCreated",
@@ -209,6 +212,7 @@ const buybackHash = await buyback.write.registerPackMachine([
   true,
 ]);
 await publicClient.waitForTransactionReceipt({ hash: buybackHash });
+await sleep(3000);
 console.log(`  registerPackMachine(${cloneAddress}, true) ✓`);
 
 // ─── Summary ──────────────────────────────────────────────────────────────────
@@ -218,14 +222,20 @@ console.log(
 );
 console.log(`Clone:               ${cloneAddress}`);
 console.log(`Factory:             ${factoryProxy}`);
-console.log(`Pack 0:              placeholder (price ${PRICE_PER_PACK}, ${CARDS_PER_PACK} card/pack)`);
+console.log(
+  `Pack 0:              placeholder (price ${PRICE_PER_PACK}, ${CARDS_PER_PACK} card/pack)`,
+);
 console.log(`Start Time:          ${START_TIME} (unix)`);
 console.log(`VRF authorized:      ✓`);
 console.log(`Buyback registered:  ✓`);
 console.log("===========================\n");
 
-console.log("ℹ️  Machine is wired and ready. Configure packs via the UI or PackRegistry:");
-console.log(`     PackRegistry.addPack / setPackPrice / setPackTierWeights / setPackTierFmvBounds`);
+console.log(
+  "ℹ️  Machine is wired and ready. Configure packs via the UI or PackRegistry:",
+);
+console.log(
+  `     PackRegistry.addPack / setPackPrice / setPackTierWeights / setPackTierFmvBounds`,
+);
 console.log(`     Then deposit inventory and the machine is ready to open.\n`);
 
 // ─── Persist deployment record (live networks only) ───────────────────────────
