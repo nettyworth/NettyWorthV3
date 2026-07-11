@@ -111,8 +111,13 @@ describe("AssetLendingPool", async function () {
       configProxy.address,
     );
 
-    // AssetLendingPool — takes only initialOwner + config address
-    const poolImpl = await viem.deployContract("AssetLendingPool");
+    // AssetLendingPool — deploy linked libraries first, then the impl
+    const lendingLib = await viem.deployContract("LendingLib");
+    const poolImpl = await viem.deployContract("AssetLendingPool", [], {
+      libraries: {
+        "project/contracts/lib/LendingLib.sol:LendingLib": lendingLib.address,
+      },
+    });
     const poolProxy = await viem.deployContract("ERC1967ProxyHelper", [
       poolImpl.address,
       encodeFunctionData({

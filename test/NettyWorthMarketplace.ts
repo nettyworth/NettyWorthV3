@@ -373,7 +373,12 @@ describe("NettyWorthMarketplace", async function () {
       configProxy.address,
     );
 
-    const poolImpl = await viem.deployContract("AssetLendingPool");
+    const lendingLib = await viem.deployContract("LendingLib");
+    const poolImpl = await viem.deployContract("AssetLendingPool", [], {
+      libraries: {
+        "project/contracts/lib/LendingLib.sol:LendingLib": lendingLib.address,
+      },
+    });
     const poolProxy = await viem.deployContract("ERC1967ProxyHelper", [
       poolImpl.address,
       encodeFunctionData({

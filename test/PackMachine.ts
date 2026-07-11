@@ -129,8 +129,21 @@ describe("PackMachine Integration", async function () {
       routerProxy.address,
     );
 
+    // Deploy linked libraries first (PackMachine implementation depends on them)
+    const packPoolLib = await viem.deployContract("PackPoolLib");
+    const packFulfillLib = await viem.deployContract("PackFulfillLib", [], {
+      libraries: {
+        "project/contracts/lib/PackPoolLib.sol:PackPoolLib": packPoolLib.address,
+      },
+    });
+
     // PackMachine implementation
-    const machineImpl = await viem.deployContract("PackMachine", [FORWARDER]);
+    const machineImpl = await viem.deployContract("PackMachine", [FORWARDER], {
+      libraries: {
+        "project/contracts/lib/PackPoolLib.sol:PackPoolLib": packPoolLib.address,
+        "project/contracts/lib/PackFulfillLib.sol:PackFulfillLib": packFulfillLib.address,
+      },
+    });
 
     // PackMachineFactory
     const factoryImpl = await viem.deployContract("PackMachineFactory", [
@@ -268,6 +281,7 @@ describe("PackMachine Integration", async function () {
       packRegistry,
       packTierRegistry,
       mockLendingPool,
+      packFulfillLib,
     };
   }
 
@@ -351,7 +365,7 @@ describe("PackMachine Integration", async function () {
 
   describe("Full openPackWithPermit2 flow", async function () {
     it("should deposit NFTs, open pack via Permit2, deliver cards via VRF callback", async function () {
-      const { usdc, assetNFT, coordinator, vrfRouter, packMachine } =
+      const { usdc, assetNFT, coordinator, vrfRouter, packMachine, packFulfillLib } =
         await deployFullStack();
 
       // Deposit NFTs
@@ -435,10 +449,10 @@ describe("PackMachine Integration", async function () {
       // Pool should be empty
       assert.equal(await getTotalPoolSize(packMachine), 0n);
 
-      // CardWon events emitted
+      // CardWon events emitted (declared in PackFulfillLib, attributed to packMachine address)
       const cardWonEvents = await publicClient.getContractEvents({
         address: packMachine.address,
-        abi: packMachine.abi,
+        abi: packFulfillLib.abi,
         eventName: "CardWon",
         fromBlock: openBlock,
         strict: true,

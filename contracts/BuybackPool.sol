@@ -142,6 +142,8 @@ contract BuybackPool is
         BuybackMode newMode
     );
     event EmergencyWithdrawal(address indexed to, uint256 amount);
+    /// @notice Emitted on a partial admin withdrawal to a chosen destination.
+    event Withdrawal(address indexed to, uint256 amount);
     event PackMachineRegistered(address indexed packMachine, bool registered);
     /// @notice Emitted when a buyback-boost promo code is applied.
     event BuybackBoosted(
@@ -225,6 +227,11 @@ contract BuybackPool is
     ///         Passes `amountPaidPerCard` (net-of-discount USDC the buyer paid per card) for
     ///         use when the machine is in Spend mode.
     /// @dev Only callable by registered PackMachines.
+    ///      Registration is intentionally NOT gated by `whenNotPaused`: it is a pure bookkeeping
+    ///      write that moves no funds, and blocking it while paused would silently strip buyback
+    ///      rights from cards won during the pause window (the user already paid the buyback
+    ///      allocation but the VRF callback's try/catch swallows the revert). Redemptions via
+    ///      `buyback` remain paused independently to freeze fund flows during incidents.
     ///      If the token already has an active registration (stale flag from a prior win/recycle
     ///      cycle that bypassed buyback), the record is silently overwritten with the current
     ///      tier/source/amount. This prevents a stale `isActive` from permanently bricking a
@@ -236,7 +243,7 @@ contract BuybackPool is
         uint8 tier,
         address sourcePackMachine,
         uint128 amountPaidPerCard
-    ) external whenNotPaused {
+    ) external {
         _registerToken(tokenId, tier, sourcePackMachine, amountPaidPerCard);
     }
 
@@ -248,7 +255,7 @@ contract BuybackPool is
         uint256 tokenId,
         uint8 tier,
         address sourcePackMachine
-    ) external whenNotPaused {
+    ) external {
         _registerToken(tokenId, tier, sourcePackMachine, 0);
     }
 
@@ -262,7 +269,7 @@ contract BuybackPool is
         uint128 /* pricePerCard */,
         uint8 tier,
         address sourcePackMachine
-    ) external whenNotPaused {
+    ) external {
         _registerToken(tokenId, tier, sourcePackMachine, 0);
     }
 
@@ -432,6 +439,26 @@ contract BuybackPool is
         uint256 balance = token.balanceOf(address(this));
         token.safeTransfer($.financeWallet, balance);
         emit EmergencyWithdrawal($.financeWallet, balance);
+    }
+
+    /// @notice Withdraw a specific amount of the payment token to a chosen destination.
+    /// @dev    Admin-only operational withdrawal; callable at any time (not gated by pause).
+    ///         For a full drain-to-financeWallet during an incident, use emergencyWithdraw.
+    /// @param to     Recipient of the funds (must be non-zero).
+    /// @param amount Amount of payment token to withdraw (must be > 0 and <= pool balance).
+    function withdraw(
+        address to,
+        uint256 amount
+    ) external onlyProtocolRole(Roles.DEFAULT_ADMIN_ROLE) {
+        if (to == address(0)) revert BuybackPool__ZeroAddress();
+        if (amount == 0) revert BuybackPool__ZeroAmount();
+        BuybackPoolStorage storage $ = _getStorage();
+        IERC20 token = IERC20($.paymentToken);
+        uint256 balance = token.balanceOf(address(this));
+        if (balance < amount)
+            revert BuybackPool__InsufficientBalance(balance, amount);
+        token.safeTransfer(to, amount);
+        emit Withdrawal(to, amount);
     }
 
     /// @notice Rescue a stuck NFT held by the pool (e.g. after a failed re-deposit).
