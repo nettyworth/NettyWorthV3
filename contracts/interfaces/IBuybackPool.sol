@@ -98,6 +98,13 @@ interface IBuybackPool {
     /// @param amount Amount of payment token to deposit (must be > 0).
     function depositFunds(uint256 amount) external;
 
+    /// @notice Withdraw a specific amount of the payment token to a chosen destination.
+    /// @dev    Caller must hold DEFAULT_ADMIN_ROLE. Callable at any time (not gated by pause).
+    ///         Reverts BuybackPool__InsufficientBalance if amount exceeds the pool balance.
+    /// @param to     Recipient (must be non-zero).
+    /// @param amount Amount of payment token to withdraw (must be > 0).
+    function withdraw(address to, uint256 amount) external;
+
     // =========================================================================
     // Admin — rate configuration
     // =========================================================================

@@ -304,12 +304,37 @@ if (poolImplAddress && poolProxyAddress) {
   console.log(`  ↻ reusing AssetLendingPool proxy ${poolProxyAddress}`);
 } else {
   if (!poolImplAddress) {
-    const impl = await viem.deployContract("AssetLendingPool");
+    // Deploy LendingLib (linked library — bytecode lives separately to keep impl under 24 KiB)
+    let lendingLibAddress = await reuseAddress(
+      "AssetLendingPool",
+      "lendingLib",
+      savedDeployments,
+    );
+    if (!lendingLibAddress) {
+      const lendingLib = await viem.deployContract("LendingLib");
+      lendingLibAddress = lendingLib.address;
+      console.log(`  LendingLib: ${lendingLibAddress}`);
+      if (isLive) {
+        await saveDeployment(networkName, "AssetLendingPool", {
+          lendingLib: lendingLibAddress,
+          deployedAt: new Date().toISOString(),
+        });
+      }
+    } else {
+      console.log(`  ↻ reusing LendingLib ${lendingLibAddress}`);
+    }
+
+    const impl = await viem.deployContract("AssetLendingPool", [], {
+      libraries: {
+        "project/contracts/lib/LendingLib.sol:LendingLib": lendingLibAddress,
+      },
+    });
     poolImplAddress = impl.address;
     console.log(`  Pool Implementation: ${poolImplAddress}`);
     // Checkpoint impl immediately so a proxy-deploy failure doesn't lose it.
     if (isLive) {
       await saveDeployment(networkName, "AssetLendingPool", {
+        lendingLib: lendingLibAddress,
         implementation: poolImplAddress,
         deployedAt: new Date().toISOString(),
       });
@@ -426,10 +451,14 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
+const finalSavedPool = savedDeployments["AssetLendingPool"] as
+  | Record<string, unknown>
+  | undefined;
 console.log("\n=== Deployment Successful ===");
 console.log(`Network:              ${networkName} (chainId: ${chainId})`);
 console.log(`Config Implementation: ${configImplAddress}`);
 console.log(`Config Proxy:          ${configProxyAddress}`);
+console.log(`LendingLib:            ${finalSavedPool?.lendingLib ?? poolImplAddress}`);
 console.log(`Pool Implementation:   ${poolImplAddress}`);
 console.log(`Pool Proxy:            ${poolProxyAddress}`);
 console.log(`Owner:                 ${actualOwner}`);
@@ -464,9 +493,13 @@ if (isLive) {
     auctionWindow: AUCTION_WINDOW.toString(),
     deployedAt: new Date().toISOString(),
   });
+  const savedPool = savedDeployments["AssetLendingPool"] as
+    | Record<string, unknown>
+    | undefined;
   await saveDeployment(networkName, "AssetLendingPool", {
     proxy: poolProxyAddress,
     implementation: poolImplAddress,
+    lendingLib: savedPool?.lendingLib ?? "",
     owner: actualOwner,
     config: configProxyAddress,
     permissionManager: permissionManagerProxy,

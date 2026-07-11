@@ -275,8 +275,61 @@ if (isLive) {
 await sleep(STEP_DELAY_MS);
 
 // ─── [2/8] Deploy PackMachine implementation (EIP-1167 clone target — no proxy)
+// PackMachine calls PackPoolLib and PackFulfillLib public functions — both are
+// deployed as separate contracts and linked into the implementation via delegatecall.
+// Deploy order: PackPoolLib (no deps) → PackFulfillLib (links PackPoolLib) → PackMachine.
+// Every clone created by PackMachineFactory.createPackMachine() DELEGATECALLs into this
+// implementation, so it MUST be deployed with the libraries correctly linked.
 console.log("[2/8] Deploying PackMachine implementation (clone target)...");
 
+// ── PackPoolLib ───────────────────────────────────────────────────────────────
+let packPoolLibAddress = await reuseAddress(
+  "PackMachineImplementation",
+  "packPoolLib",
+  savedDeployments,
+);
+if (packPoolLibAddress) {
+  console.log(`  ↻ reusing PackPoolLib ${packPoolLibAddress}`);
+} else {
+  const packPoolLib = await viem.deployContract("PackPoolLib");
+  packPoolLibAddress = packPoolLib.address;
+  console.log(`  PackPoolLib: ${packPoolLibAddress}`);
+  if (isLive) {
+    await saveDeployment(networkName, "PackMachineImplementation", {
+      packPoolLib: packPoolLibAddress,
+      deployedAt: new Date().toISOString(),
+    });
+  }
+}
+await waitForCode(publicClient, packPoolLibAddress);
+
+// ── PackFulfillLib (links PackPoolLib) ────────────────────────────────────────
+let packFulfillLibAddress = await reuseAddress(
+  "PackMachineImplementation",
+  "packFulfillLib",
+  savedDeployments,
+);
+if (packFulfillLibAddress) {
+  console.log(`  ↻ reusing PackFulfillLib ${packFulfillLibAddress}`);
+} else {
+  const packFulfillLib = await viem.deployContract("PackFulfillLib", [], {
+    libraries: {
+      "project/contracts/lib/PackPoolLib.sol:PackPoolLib": packPoolLibAddress,
+    },
+  });
+  packFulfillLibAddress = packFulfillLib.address;
+  console.log(`  PackFulfillLib: ${packFulfillLibAddress}`);
+  if (isLive) {
+    await saveDeployment(networkName, "PackMachineImplementation", {
+      packPoolLib: packPoolLibAddress,
+      packFulfillLib: packFulfillLibAddress,
+      deployedAt: new Date().toISOString(),
+    });
+  }
+}
+await waitForCode(publicClient, packFulfillLibAddress);
+
+// ── PackMachine implementation (linked to both libraries) ─────────────────────
 let packMachineImplAddress = await reuseAddress(
   "PackMachineImplementation",
   "implementation",
@@ -286,9 +339,17 @@ let packMachineImplAddress = await reuseAddress(
 if (packMachineImplAddress) {
   console.log(`  ↻ reusing PackMachine impl ${packMachineImplAddress}`);
 } else {
-  const packMachineImpl = await viem.deployContract("PackMachine", [
-    TRUSTED_FORWARDER,
-  ]);
+  const packMachineImpl = await viem.deployContract(
+    "PackMachine",
+    [TRUSTED_FORWARDER],
+    {
+      libraries: {
+        "project/contracts/lib/PackPoolLib.sol:PackPoolLib": packPoolLibAddress,
+        "project/contracts/lib/PackFulfillLib.sol:PackFulfillLib":
+          packFulfillLibAddress,
+      },
+    },
+  );
   packMachineImplAddress = packMachineImpl.address;
   console.log(`  Implementation: ${packMachineImplAddress}`);
 }
@@ -296,6 +357,8 @@ if (packMachineImplAddress) {
 if (isLive) {
   await saveDeployment(networkName, "PackMachineImplementation", {
     implementation: packMachineImplAddress,
+    packPoolLib: packPoolLibAddress,
+    packFulfillLib: packFulfillLibAddress,
     trustedForwarder: TRUSTED_FORWARDER,
     deployedAt: new Date().toISOString(),
   });
@@ -826,6 +889,8 @@ console.log(`\nPackVRFRouter`);
 console.log(`  Implementation:    ${vrfRouterImplAddress}`);
 console.log(`  Proxy:             ${vrfRouterProxyAddress}`);
 console.log(`\nPackMachine (clone target)`);
+console.log(`  PackPoolLib:       ${packPoolLibAddress}`);
+console.log(`  PackFulfillLib:    ${packFulfillLibAddress}`);
 console.log(`  Implementation:    ${packMachineImplAddress}`);
 console.log(`\nPackMachineFactory`);
 console.log(`  Implementation:    ${factoryImplAddress}`);

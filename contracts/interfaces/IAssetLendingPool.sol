@@ -160,6 +160,9 @@ interface IAssetLendingPool {
         uint256 loanAmount
     );
 
+    /// @notice Emitted when a seller revokes an unused marketplace-finance nonce (H010 fix).
+    event FinanceNonceCancelled(address indexed seller, uint256 indexed nonce);
+
     event PoolFunded(uint256 amount, uint256 newTotalDeposited);
     event PoolWithdrawn(uint256 amount, uint256 newTotalDeposited);
     event InterestWithdrawn(uint256 amount);
@@ -304,6 +307,22 @@ interface IAssetLendingPool {
         uint256 depositAmount,
         uint8 termId
     ) external;
+
+    /// @notice Seller-side revocation of a marketplace-finance listing nonce (H010 fix).
+    ///         Mirrors NettyWorthMarketplace.cancelNonce but for the pool's independent
+    ///         financeNonces namespace. A leaked open-listing signature must be cancelled
+    ///         at BOTH contracts to be fully dead; this closes the pool-side gap.
+    ///         Reverts AssetLendingPool__ListingNonceUsed if nonce is already consumed or
+    ///         previously cancelled. No role gate — self-service only (msg.sender = seller).
+    ///         Intentionally omits whenNotPaused so revocation remains available while paused.
+    function cancelFinanceNonce(uint256 nonce) external;
+
+    /// @notice Returns true if a seller's finance nonce has been consumed (by a successful
+    ///         financeMarketplacePurchase) or cancelled (by cancelFinanceNonce).
+    function isFinanceNonceUsed(address seller, uint256 nonce)
+        external
+        view
+        returns (bool);
 
     function repay(uint256 loanId) external;
 

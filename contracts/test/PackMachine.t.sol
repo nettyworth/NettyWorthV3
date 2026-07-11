@@ -3222,6 +3222,254 @@ contract PackMachineTest is Test {
     }
 
     // =========================================================================
+    // M013 — adminForceRefundPendingOpen escape hatch
+    // =========================================================================
+
+    /// @dev Deploy a fresh machine, deposit cards, open a pack, and then make
+    ///      fulfillRandomness permanently revert by wiring a blocking transfer
+    ///      validator (Creator Token Standard). Returns the requestId and the
+    ///      pre-open user USDC balance.
+    function _openAndStick(
+        address machine_,
+        MockCreatorTokenValidator validator
+    ) internal returns (uint256 requestId, uint256 userUsdcBefore) {
+        PackMachine machine = PackMachine(machine_);
+        // Deposit cards.
+        uint256[] memory tokenIds = new uint256[](CARDS_PER_PACK);
+        uint256 startId = assetNFT.totalSupply() + 1;
+        address[] memory recipients = new address[](CARDS_PER_PACK);
+        string[] memory uris = new string[](CARDS_PER_PACK);
+        for (uint256 i; i < CARDS_PER_PACK; i++) {
+            recipients[i] = operator;
+            uris[i] = "";
+            tokenIds[i] = startId + i;
+        }
+        vm.prank(operator);
+        assetNFT.batchMint(recipients, uris);
+        uint8[] memory tiers = new uint8[](CARDS_PER_PACK);
+        uint256[] memory _pcs = new uint256[](CARDS_PER_PACK);
+        uint256[] memory _pids = new uint256[](CARDS_PER_PACK);
+        for (uint256 i; i < CARDS_PER_PACK; i++) _pcs[i] = 1;
+        vm.startPrank(operator);
+        assetNFT.setApprovalForAll(address(machine), true);
+        machine.deposit(tokenIds, _pcs, _pids, tiers, operator);
+        vm.stopPrank();
+
+        // Open the pack.
+        usdc.mint(user, PRICE);
+        userUsdcBefore = usdc.balanceOf(user);
+        vm.prank(user);
+        usdc.approve(address(machine), PRICE);
+        bytes memory sig = _signOpenPackFor(machine_, user, machine.getUserInfo(user).openNonce);
+        vm.prank(user);
+        machine.openPack(user, 0, sig);
+
+        requestId = 1; // MockVRF assigns sequential IDs starting at 1
+
+        // Wire the blocking validator AFTER the open so it only affects fulfillment.
+        vm.prank(admin);
+        assetNFT.setTransferValidator(address(validator));
+        validator.setShouldRevert(true);
+    }
+
+    /// @dev Fulfill the pending request and assert the transaction reverts (stuck state).
+    function _assertFulfillReverts(uint256 requestId_) internal {
+        uint256[] memory words = new uint256[](CARDS_PER_PACK);
+        for (uint256 i; i < CARDS_PER_PACK; i++) {
+            words[i] = uint256(keccak256(abi.encodePacked(requestId_, i)));
+        }
+        vm.expectRevert();
+        coordinator.fulfillRandomWords(address(vrfRouter), requestId_, words);
+    }
+
+    function test_M013_StuckReproduction_TotalEscrowedStaysElevated() public {
+        MockCreatorTokenValidator validator = new MockCreatorTokenValidator();
+        address machineAddr = address(packMachine);
+        (uint256 requestId,) = _openAndStick(machineAddr, validator);
+
+        uint256 escrowedAfterOpen = usdc.balanceOf(address(packMachine));
+        // fulfillRandomness reverts because the validator blocks beforeTransfer.
+        _assertFulfillReverts(requestId);
+
+        // USDC on the machine stays elevated — user's funds locked.
+        assertEq(
+            usdc.balanceOf(address(packMachine)),
+            escrowedAfterOpen,
+            "totalEscrowed stays inflated after stuck fulfill"
+        );
+    }
+
+    function test_M013_StuckReproduction_ResetEffectivePoolSizeBlocked() public {
+        MockCreatorTokenValidator validator = new MockCreatorTokenValidator();
+        (uint256 requestId,) = _openAndStick(address(packMachine), validator);
+        _assertFulfillReverts(requestId);
+
+        // Pause and try resetEffectivePrizePoolSize — must revert (pendingRequestCount > 0).
+        vm.prank(pauser);
+        packMachine.pause();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                PackMachine.PackMachine__PendingRequests.selector,
+                uint256(1)
+            )
+        );
+        vm.prank(operator);
+        packMachine.resetEffectivePrizePoolSize();
+    }
+
+    function test_M013_ForceRefund_ReturnsUsdcToUser() public {
+        MockCreatorTokenValidator validator = new MockCreatorTokenValidator();
+        (uint256 requestId, uint256 userUsdcBefore) = _openAndStick(address(packMachine), validator);
+        _assertFulfillReverts(requestId);
+
+        // Pause and warp past staleness gate.
+        vm.prank(pauser);
+        packMachine.pause();
+        vm.warp(block.timestamp + 24 hours + 1);
+
+        uint256 userBefore = usdc.balanceOf(user);
+        vm.expectEmit(true, true, true, true, address(packMachine));
+        emit PendingOpenRefunded(requestId, user, PRICE);
+        vm.prank(admin);
+        packMachine.adminForceRefundPendingOpen(requestId);
+
+        assertEq(
+            usdc.balanceOf(user) - userBefore,
+            PRICE,
+            "user should be fully refunded"
+        );
+    }
+
+    function test_M013_ForceRefund_ClearsEscrowAndCounters() public {
+        MockCreatorTokenValidator validator = new MockCreatorTokenValidator();
+        // _openAndStick deposits CARDS_PER_PACK tokens then opens (reserving all of them).
+        // After the open, effectivePrizePoolSize == 0 (all reserved). After force-refund
+        // the hatch must restore +CARDS_PER_PACK, matching what _requestVRF decremented.
+        (uint256 requestId,) = _openAndStick(address(packMachine), validator);
+        _assertFulfillReverts(requestId);
+
+        vm.prank(pauser);
+        packMachine.pause();
+        vm.warp(block.timestamp + 24 hours + 1);
+
+        vm.prank(admin);
+        packMachine.adminForceRefundPendingOpen(requestId);
+
+        // After force-refund: contract holds no USDC (escrow cleared).
+        assertEq(
+            usdc.balanceOf(address(packMachine)),
+            0,
+            "machine USDC balance should be 0 after refund"
+        );
+
+        // Reservation counters restored to the pre-open state (CARDS_PER_PACK cards back in pool).
+        assertEq(
+            packMachine.getMachineInfo().effectivePrizePoolSize,
+            CARDS_PER_PACK,
+            "effectivePrizePoolSize restored to CARDS_PER_PACK"
+        );
+        assertEq(
+            packMachine.getPackAvailable(0),
+            CARDS_PER_PACK,
+            "availablePerPack restored to CARDS_PER_PACK"
+        );
+
+        // resetEffectivePrizePoolSize now succeeds (pendingRequestCount == 0).
+        vm.prank(operator);
+        packMachine.resetEffectivePrizePoolSize();
+    }
+
+    function test_M013_ForceRefund_RevertsIfUnknownRequest() public {
+        vm.prank(pauser);
+        packMachine.pause();
+
+        vm.expectRevert(PackMachine.PackMachine__UnknownRequest.selector);
+        vm.prank(admin);
+        packMachine.adminForceRefundPendingOpen(999);
+    }
+
+    function test_M013_ForceRefund_RevertsIfNotStuckYet() public {
+        MockCreatorTokenValidator validator = new MockCreatorTokenValidator();
+        (uint256 requestId,) = _openAndStick(address(packMachine), validator);
+        _assertFulfillReverts(requestId);
+
+        vm.prank(pauser);
+        packMachine.pause();
+        // Warp only 12 h — below the 24 h MIN_STUCK_AGE.
+        vm.warp(block.timestamp + 12 hours);
+
+        vm.expectRevert(PackMachine.PackMachine__RequestNotStuck.selector);
+        vm.prank(admin);
+        packMachine.adminForceRefundPendingOpen(requestId);
+    }
+
+    function test_M013_ForceRefund_RevertsIfNotPaused() public {
+        MockCreatorTokenValidator validator = new MockCreatorTokenValidator();
+        (uint256 requestId,) = _openAndStick(address(packMachine), validator);
+        _assertFulfillReverts(requestId);
+
+        // Do NOT pause.
+        vm.warp(block.timestamp + 24 hours + 1);
+
+        vm.expectRevert(PackMachine.PackMachine__NotPaused.selector);
+        vm.prank(admin);
+        packMachine.adminForceRefundPendingOpen(requestId);
+    }
+
+    function test_M013_ForceRefund_RevertsForNonAdmin() public {
+        MockCreatorTokenValidator validator = new MockCreatorTokenValidator();
+        (uint256 requestId,) = _openAndStick(address(packMachine), validator);
+        _assertFulfillReverts(requestId);
+
+        vm.prank(pauser);
+        packMachine.pause();
+        vm.warp(block.timestamp + 24 hours + 1);
+
+        vm.expectRevert();
+        vm.prank(operator); // PACK_OPERATOR_ROLE, not DEFAULT_ADMIN_ROLE
+        packMachine.adminForceRefundPendingOpen(requestId);
+    }
+
+    /// @dev After a force-refund, a late Chainlink fulfillment for the same requestId
+    ///      must revert with PackMachine__UnknownRequest and NOT double-decrement
+    ///      pendingRequestCount (which would corrupt accounting for other live requests).
+    ///
+    ///      Note: this test calls `vrfRouter.rawFulfillRandomWords` directly (pranked
+    ///      as the coordinator) to observe the exact inner revert from PackMachine.
+    ///      Going through coordinator.fulfillRandomWords() would swallow the inner
+    ///      reason with "MockVRFCoordinator: fulfill failed".
+    function test_M013_LateFulfillment_RevertsWithUnknownRequestAfterForceRefund() public {
+        MockCreatorTokenValidator validator = new MockCreatorTokenValidator();
+        (uint256 requestId,) = _openAndStick(address(packMachine), validator);
+        _assertFulfillReverts(requestId);
+
+        vm.prank(pauser);
+        packMachine.pause();
+        vm.warp(block.timestamp + 24 hours + 1);
+
+        // Force-refund.
+        vm.prank(admin);
+        packMachine.adminForceRefundPendingOpen(requestId);
+
+        // Unpause so fulfillRandomness is reachable.
+        vm.prank(pauser);
+        packMachine.unpause();
+        // Disable the blocking validator so fulfillment doesn't revert on before/afterTransfer.
+        validator.setShouldRevert(false);
+
+        // Simulate a late Chainlink callback by calling rawFulfillRandomWords directly
+        // (pranked as the coordinator) so we see PackMachine's exact revert rather than
+        // the coordinator's generic "fulfill failed" wrapper.
+        uint256[] memory words = new uint256[](CARDS_PER_PACK);
+        for (uint256 i; i < CARDS_PER_PACK; i++) {
+            words[i] = uint256(keccak256(abi.encodePacked(requestId, i)));
+        }
+        vm.expectRevert(PackMachine.PackMachine__UnknownRequest.selector);
+        vm.prank(address(coordinator));
+        vrfRouter.rawFulfillRandomWords(requestId, words);
+    }
+
+    // =========================================================================
     // Event declarations
     // =========================================================================
 
@@ -3250,4 +3498,42 @@ contract PackMachineTest is Test {
         uint256 indexed packId,
         uint32[6] weights
     );
+    event PendingOpenRefunded(
+        uint256 indexed requestId,
+        address indexed user,
+        uint256 amount
+    );
+}
+
+// =============================================================================
+// MockCreatorTokenValidator — for M013 tests
+// =============================================================================
+
+/// @dev Simulates a Creator Token Standard (CTS) transfer validator that can be
+///      configured to block transfers. The factory's beforeTransfer/afterTransfer
+///      functions call the validator at selectors:
+///        0x50793315 = beforeAuthorizedTransfer(address operator, address token)
+///        0x0ad38899 = afterAuthorizedTransfer(address token)
+///      These are hard-coded raw selectors in PackMachineFactory — there is no
+///      Solidity interface for them in the repo — so we implement them as fallback
+///      dispatch inside a single `fallback()` function.
+///
+///      AssetNFT.getTransferValidator() (selector 0x098144d4) is NOT implemented
+///      here — the factory staticcalls that selector on the *token* (AssetNFT),
+///      which already implements it. This contract is used purely as the *validator*
+///      returned by getTransferValidator(), not as the token.
+contract MockCreatorTokenValidator {
+    bool public shouldRevert;
+
+    function setShouldRevert(bool value) external {
+        shouldRevert = value;
+    }
+
+    // Catch beforeAuthorizedTransfer (0x50793315) and afterAuthorizedTransfer (0x0ad38899).
+    fallback() external {
+        if (shouldRevert) {
+            revert("MockCreatorTokenValidator: blocked");
+        }
+        // Otherwise return success (empty returndata — the factory only checks `ok`).
+    }
 }

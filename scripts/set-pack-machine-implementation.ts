@@ -162,6 +162,9 @@ const resolvedForwarder =
 // ─── Skip-deploy shortcut (NEW_PACK_MACHINE_IMPL env override) ────────────────
 const skipDeploy = !!process.env.NEW_PACK_MACHINE_IMPL;
 let newImplAddress: `0x${string}`;
+// Library addresses are only populated when we deploy — not needed for skipDeploy.
+let newPackPoolLibAddress: `0x${string}` | undefined;
+let newPackFulfillLibAddress: `0x${string}` | undefined;
 
 if (skipDeploy) {
   newImplAddress = getAddress(
@@ -202,14 +205,46 @@ try {
 }
 
 // ─── [1/3] Deploy new PackMachine implementation ─────────────────────────────
+// PackMachine has two public linked libraries that must be deployed first:
+//   PackPoolLib (no deps) → PackFulfillLib (links PackPoolLib) → PackMachine (links both)
+// Under the EIP-1167 clone pattern every clone DELEGATECALLs into this implementation,
+// so the libraries MUST be correctly linked here.
 console.log("\n[1/3] Deploy new PackMachine implementation...");
 if (skipDeploy) {
   console.log(`  ↻ skipping deploy — using ${newImplAddress}`);
 } else {
   console.log(`  Trusted forwarder: ${resolvedForwarder}`);
-  const implContract = await viem.deployContract("PackMachine", [
-    resolvedForwarder as `0x${string}`,
-  ]);
+
+  // ── PackPoolLib ─────────────────────────────────────────────────────────────
+  const packPoolLib = await viem.deployContract("PackPoolLib");
+  newPackPoolLibAddress = packPoolLib.address;
+  console.log(`  PackPoolLib: ${newPackPoolLibAddress}`);
+  await waitForCode(publicClient, newPackPoolLibAddress);
+
+  // ── PackFulfillLib (links PackPoolLib) ──────────────────────────────────────
+  const packFulfillLib = await viem.deployContract("PackFulfillLib", [], {
+    libraries: {
+      "project/contracts/lib/PackPoolLib.sol:PackPoolLib":
+        newPackPoolLibAddress,
+    },
+  });
+  newPackFulfillLibAddress = packFulfillLib.address;
+  console.log(`  PackFulfillLib: ${newPackFulfillLibAddress}`);
+  await waitForCode(publicClient, newPackFulfillLibAddress);
+
+  // ── PackMachine implementation (linked to both) ─────────────────────────────
+  const implContract = await viem.deployContract(
+    "PackMachine",
+    [resolvedForwarder as `0x${string}`],
+    {
+      libraries: {
+        "project/contracts/lib/PackPoolLib.sol:PackPoolLib":
+          newPackPoolLibAddress,
+        "project/contracts/lib/PackFulfillLib.sol:PackFulfillLib":
+          newPackFulfillLibAddress,
+      },
+    },
+  );
   newImplAddress = implContract.address;
   console.log(`  New implementation: ${newImplAddress}`);
   await waitForCode(publicClient, newImplAddress);
@@ -281,10 +316,14 @@ console.log("\n=== Set PackMachine Implementation Complete ===");
 console.log(`Network:       ${networkName} (chainId: ${chainId})`);
 console.log(`Factory:       ${factoryProxy}`);
 console.log(`Old Impl:      ${oldImpl}`);
+if (newPackPoolLibAddress) {
+  console.log(`PackPoolLib:   ${newPackPoolLibAddress}`);
+}
+if (newPackFulfillLibAddress) {
+  console.log(`PackFulfillLib: ${newPackFulfillLibAddress}`);
+}
 console.log(`New Impl:      ${newImplAddress}`);
-console.log(
-  "==============================================",
-);
+console.log("==============================================");
 
 // ─── Persist deployment records ───────────────────────────────────────────────
 if (isLive) {
@@ -292,14 +331,19 @@ if (isLive) {
   await saveDeployment(networkName, "PackMachineImplementation", {
     ...(implEntry ?? {}),
     implementation: newImplAddress,
+    ...(newPackPoolLibAddress ? { packPoolLib: newPackPoolLibAddress } : {}),
+    ...(newPackFulfillLibAddress
+      ? { packFulfillLib: newPackFulfillLibAddress }
+      : {}),
     trustedForwarder: resolvedForwarder,
     deployedAt: new Date().toISOString(),
   });
 
   // Merge packMachineImplementation + append history into PackMachineFactory entry
   const factoryEntry =
-    (deployments["PackMachineFactory"] as Record<string, unknown> | undefined) ??
-    {};
+    (deployments["PackMachineFactory"] as
+      | Record<string, unknown>
+      | undefined) ?? {};
   const implHistory = (
     (factoryEntry.implementationHistory as unknown[]) ?? []
   ).concat({

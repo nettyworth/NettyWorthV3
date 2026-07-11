@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {PackMachine} from "../PackMachine.sol";
 import {PackMachineFactory} from "../PackMachineFactory.sol";
@@ -1210,5 +1210,207 @@ contract BuybackPoolTest is Test {
         );
         vm.prank(user);
         pool.buyback(tokenId);
+    }
+
+    // =========================================================================
+    // M014 — registerToken must succeed while BuybackPool is paused
+    // =========================================================================
+
+    /// @dev Directly calling registerToken while the pool is paused must succeed.
+    ///      Registration is a bookkeeping write that moves no funds; blocking it
+    ///      during a pause silently strips buyback rights from cards won during the
+    ///      pause window (the VRF callback's try/catch swallows the revert).
+    function test_M014_RegisterToken_SucceedsWhilePaused() public {
+        // Mint and identify a token id (not deposited — direct registration test).
+        address[] memory recipients = new address[](1);
+        string[] memory uris = new string[](1);
+        recipients[0] = user;
+        uris[0] = "";
+        vm.prank(operator);
+        assetNFT.batchMint(recipients, uris);
+        uint256 tokenId = assetNFT.totalSupply();
+
+        // Pause the pool.
+        vm.prank(pauser);
+        pool.pause();
+        assertTrue(pool.paused(), "pool should be paused");
+
+        // registerToken from a registered machine must succeed even while paused.
+        vm.expectEmit(true, true, true, true, address(pool));
+        emit BuybackPool.TokenRegistered(tokenId, address(packMachine), 0);
+        vm.prank(address(packMachine));
+        pool.registerToken(tokenId, 0, address(packMachine), 100e6);
+
+        // Verify the record was written correctly.
+        (uint8 infoTier, address infoSource, bool infoActive) = pool.getTokenInfo(tokenId);
+        assertTrue(infoActive, "token should be registered as active");
+        assertEq(infoTier, 0, "tier should be 0");
+        assertEq(infoSource, address(packMachine), "source machine");
+    }
+
+    /// @dev An end-to-end pack open+fulfill cycle while BuybackPool is paused must
+    ///      deliver the NFT to the winner AND register the token in the pool (no
+    ///      BuybackRegistrationFailed event emitted), because registerToken is now
+    ///      callable while paused.
+    function test_M014_FulfillmentRegistersTokenWhilePoolPaused() public {
+        _depositNFTs(CARDS_PER_PACK);
+        _seedPool(1000e6);
+
+        // Pause the pool before fulfillment.
+        vm.prank(pauser);
+        pool.pause();
+        assertTrue(pool.paused(), "pool should be paused before fulfill");
+
+        // Open a pack (openPack is on PackMachine which is NOT paused).
+        usdc.mint(user, PRICE);
+        vm.prank(user);
+        usdc.approve(address(packMachine), PRICE);
+        bytes memory sig = _signOpenPack(user, packMachine.getUserInfo(user).openNonce);
+        vm.prank(user);
+        packMachine.openPack(user, 0, sig);
+
+        // Fulfill — must NOT emit BuybackRegistrationFailed (registration now allowed while paused).
+        uint256 requestId = 1;
+        uint256[] memory words = new uint256[](CARDS_PER_PACK);
+        for (uint256 i; i < CARDS_PER_PACK; i++) {
+            words[i] = uint256(keccak256(abi.encodePacked(requestId, i)));
+        }
+        // Record events — we should see TokenRegistered but NOT BuybackRegistrationFailed.
+        vm.recordLogs();
+        coordinator.fulfillRandomWords(address(vrfRouter), requestId, words);
+
+        // Verify no BuybackRegistrationFailed event was emitted.
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 failedSig = keccak256("BuybackRegistrationFailed(uint256,uint256)");
+        for (uint256 i; i < logs.length; i++) {
+            assertNotEq(
+                logs[i].topics[0],
+                failedSig,
+                "BuybackRegistrationFailed must not be emitted when pool is paused"
+            );
+        }
+
+        // NFT was delivered to user.
+        assertEq(assetNFT.balanceOf(user), CARDS_PER_PACK, "user should have won cards");
+
+        // Unpause and verify the won tokens are properly registered (buyback works).
+        vm.prank(pauser);
+        pool.unpause();
+
+        // Find a won token and confirm it has an active buyback record.
+        for (uint256 tokenId = 1; tokenId <= assetNFT.totalSupply(); tokenId++) {
+            if (assetNFT.ownerOf(tokenId) == user) {
+                (,, bool tokenIsActive) = pool.getTokenInfo(tokenId);
+                assertTrue(
+                    tokenIsActive,
+                    "won token must be registered in pool"
+                );
+                break;
+            }
+        }
+    }
+
+    // =========================================================================
+    // withdraw
+    // =========================================================================
+
+    function test_Withdraw_TransfersAmountToDestination() public {
+        uint256 amount = 50e6;
+        address dest = makeAddr("dest");
+        _seedPool(100e6);
+
+        uint256 poolBefore = pool.poolBalance();
+        uint256 destBefore = usdc.balanceOf(dest);
+
+        vm.expectEmit(true, false, false, true);
+        emit BuybackPool.Withdrawal(dest, amount);
+        vm.prank(admin);
+        pool.withdraw(dest, amount);
+
+        assertEq(pool.poolBalance(), poolBefore - amount, "pool balance decreased");
+        assertEq(usdc.balanceOf(dest), destBefore + amount, "dest received funds");
+    }
+
+    function test_Withdraw_WorksWhileNotPaused() public {
+        _seedPool(100e6);
+        // Must succeed without pausing (unlike emergencyWithdraw).
+        assertFalse(pool.paused());
+        vm.prank(admin);
+        pool.withdraw(makeAddr("dest"), 50e6);
+    }
+
+    function test_Withdraw_WorksWhilePaused() public {
+        _seedPool(100e6);
+        vm.prank(pauser);
+        pool.pause();
+        // withdraw is not gated by whenNotPaused — must still succeed.
+        vm.prank(admin);
+        pool.withdraw(makeAddr("dest"), 50e6);
+    }
+
+    function test_Withdraw_RevertsForNonAdmin() public {
+        _seedPool(100e6);
+        vm.expectRevert();
+        vm.prank(unauthorized);
+        pool.withdraw(makeAddr("dest"), 50e6);
+    }
+
+    function test_Withdraw_RevertsOnZeroAddress() public {
+        _seedPool(100e6);
+        vm.expectRevert(BuybackPool.BuybackPool__ZeroAddress.selector);
+        vm.prank(admin);
+        pool.withdraw(address(0), 50e6);
+    }
+
+    function test_Withdraw_RevertsOnZeroAmount() public {
+        _seedPool(100e6);
+        vm.expectRevert(BuybackPool.BuybackPool__ZeroAmount.selector);
+        vm.prank(admin);
+        pool.withdraw(makeAddr("dest"), 0);
+    }
+
+    function test_Withdraw_RevertsWhenAmountExceedsBalance() public {
+        uint256 seeded = 10e6;
+        uint256 requested = 50e6;
+        _seedPool(seeded);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BuybackPool.BuybackPool__InsufficientBalance.selector,
+                seeded,
+                requested
+            )
+        );
+        vm.prank(admin);
+        pool.withdraw(makeAddr("dest"), requested);
+    }
+
+    function test_Withdraw_DrainExactBalance() public {
+        uint256 seeded = 77e6;
+        _seedPool(seeded);
+        address dest = makeAddr("dest");
+
+        vm.prank(admin);
+        pool.withdraw(dest, seeded);
+
+        assertEq(pool.poolBalance(), 0);
+        assertEq(usdc.balanceOf(dest), seeded);
+    }
+
+    /// @dev buyback (redemption) must still revert while the pool is paused —
+    ///      only registration is unblocked; fund flows remain frozen.
+    function test_M014_Buyback_StillRevertsWhilePaused() public {
+        _depositNFTs(CARDS_PER_PACK);
+        uint256[] memory wonTokens = _openPackAndFulfill();
+        _appraiseAndSeed(wonTokens[0]);
+
+        vm.prank(pauser);
+        pool.pause();
+
+        vm.prank(user);
+        assetNFT.approve(address(pool), wonTokens[0]);
+
+        vm.expectRevert();
+        vm.prank(user);
+        pool.buyback(wonTokens[0]);
     }
 }
