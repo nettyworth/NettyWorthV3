@@ -34,13 +34,13 @@
     "keyHash": "0x00b81b5a830cb0a4009fbd8904de511e28631e62ce5ad231373d3cdad373ccab",
     "callbackGasLimit": 500000,
     "requestConfirmations": 3,
-    "deployedAt": "2026-07-11T06:58:48.825Z"
+    "deployedAt": "2026-07-11T06:55:57.141Z"
   },
   "PackMachineFactory": {
     "proxy": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
     "implementation": "0x0e9C989b32C6a2a9f4432Abf4D5B76D3A6042236",
     "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
-    "packMachineImplementation": "0xFBBA100CEeCBaec2dF0934374881369AE98e8829",
+    "packMachineImplementation": "0xfbba100ceecbaec2df0934374881369ae98e8829",
     "packVRFRouter": "0x4aD5C628030546D12754F608081a6256D6c5FDc9",
     "buybackPool": "0x60e0Ea52aD26EF5b5A6da2132587aD62d43AAa47",
     "packRegistry": "0xb86217f0Ce896ce5bC2dC7c5B1813683f415092b",
@@ -49,29 +49,21 @@
     "paymentToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     "financeWallet": "0x0ab34B16c2f1c10a840bF090c8D39Cf8dC7e8318",
     "trustedForwarder": "0x0000000000000000000000000000000000000000",
-    "deployedAt": "2026-07-11T06:59:35.725Z",
-    "implementationHistory": [
-      {
-        "previousImplementation": "0xFBBA100CEeCBaec2dF0934374881369AE98e8829",
-        "newImplementation": "0xFBBA100CEeCBaec2dF0934374881369AE98e8829",
-        "changedAt": "2026-07-11T07:05:42.362Z",
-        "txHash": "0xaf0ee539af729201aed31cd251ace1a1e6019925ce52819697cb38a1860bba04"
-      }
-    ]
+    "deployedAt": "2026-07-11T06:56:37.901Z"
   },
   "PackRegistry": {
     "proxy": "0xb86217f0Ce896ce5bC2dC7c5B1813683f415092b",
     "implementation": "0xa95B0AFDB2D1d6D40464F82CcA689bB173a80bb1",
     "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
     "factory": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
-    "deployedAt": "2026-07-11T06:59:35.729Z"
+    "deployedAt": "2026-07-11T06:56:37.903Z"
   },
   "PackTierRegistry": {
     "proxy": "0xEC49Bcf37A86A88c967F92c259771ea1708Ef091",
     "implementation": "0xe6693706c08f8e4c01B3c019bB9Dd6ecAAD5591D",
     "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
     "factory": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
-    "deployedAt": "2026-07-11T06:59:35.731Z"
+    "deployedAt": "2026-07-11T06:56:37.904Z"
   },
   "BuybackPool": {
     "proxy": "0x60e0Ea52aD26EF5b5A6da2132587aD62d43AAa47",
@@ -82,7 +74,7 @@
     "financeWallet": "0x0ab34B16c2f1c10a840bF090c8D39Cf8dC7e8318",
     "factory": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
     "defaultBuybackBps": 8000,
-    "deployedAt": "2026-07-11T06:59:39.715Z"
+    "deployedAt": "2026-07-11T06:56:41.410Z"
   },
   "PromoCodeRegistry": {
     "proxy": "0x8239fcbda24a38d77f046575738e98a24f8ea64c",
@@ -158,10 +150,10 @@
     "deployedAt": "2026-07-09T11:14:18.938Z"
   },
   "PackMachineImplementation": {
-    "implementation": "0xFBBA100CEeCBaec2dF0934374881369AE98e8829",
+    "implementation": "0xfbba100ceecbaec2df0934374881369ae98e8829",
     "packPoolLib": "0x6b88b78e7b79b81d798375284c67c423be6c66b0",
     "packFulfillLib": "0x9b455b2f46a6c66a4b04124db906f050ccd98463",
     "trustedForwarder": "0x0000000000000000000000000000000000000000",
-    "deployedAt": "2026-07-11T07:05:42.357Z"
+    "deployedAt": "2026-07-11T06:56:01.963Z"
   }
 }
