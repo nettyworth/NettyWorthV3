@@ -64,7 +64,9 @@ const [deployerClient] = await viem.getWalletClients();
 const deployerAddress = deployerClient.account.address;
 const chainId = await publicClient.getChainId();
 
-const isLive = connection.networkConfig.type === "http";
+const isLive =
+  connection.networkConfig.type === "http" ||
+  connection.networkConfig.type === "edr-simulated";
 const networkName = connection.networkName;
 
 // ─── Resume helper — returns an already-deployed address if chain has code there

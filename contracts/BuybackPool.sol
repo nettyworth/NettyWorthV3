@@ -91,6 +91,9 @@ contract BuybackPool is
         ///      inherit defaultBuybackMode", 1 means FMV, and 2 means Spend.
         ///      Decode: if value == 0 → use defaultBuybackMode; else mode = BuybackMode(value - 1).
         mapping(address packMachine => uint8) packMachineBuybackMode;
+        /// @dev Fee deducted from each buyback payout and sent to financeWallet (basis points).
+        ///      0 = no fee (default after upgrade). E.g. 500 = 5%.
+        uint16 buybackFeeBps;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.BuybackPool")) - 1)) & ~bytes32(uint256(0xff))
@@ -158,6 +161,14 @@ contract BuybackPool is
     );
     /// @notice Emitted when the pool is funded by an operator.
     event PoolFunded(address indexed from, uint256 amount);
+    /// @notice Emitted when the buyback fee rate is updated.
+    event BuybackFeeBpsUpdated(uint16 oldBps, uint16 newBps);
+    /// @notice Emitted when a buyback fee is charged and transferred to the financeWallet.
+    event BuybackFeeCharged(
+        uint256 indexed tokenId,
+        address indexed feeWallet,
+        uint256 fee
+    );
 
     // =========================================================================
     // Errors
@@ -349,6 +360,19 @@ contract BuybackPool is
         $.defaultBuybackBps = bps;
     }
 
+    /// @notice Set the protocol fee charged on every buyback payout (basis points).
+    ///         The fee is deducted from the seller's payout and sent to financeWallet.
+    ///         0 disables the fee entirely. Max 100% (BPS_PRECISION).
+    ///         Example: 500 = 5% fee.  payout 31.99 → fee 1.60 → seller receives 30.39.
+    function setBuybackFeeBps(
+        uint16 bps
+    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
+        if (bps > BPS_PRECISION) revert BuybackPool__InvalidBps(bps);
+        BuybackPoolStorage storage $ = _getStorage();
+        emit BuybackFeeBpsUpdated($.buybackFeeBps, bps);
+        $.buybackFeeBps = bps;
+    }
+
     /// @notice Set a per-PackMachine buyback rate override (0 clears the override, falling back to defaultBuybackBps).
     function setPackMachineBuybackBps(
         address machine,
@@ -509,6 +533,11 @@ contract BuybackPool is
         return _getStorage().packMachineBuybackBps[machine];
     }
 
+    /// @notice Returns the current buyback fee rate in basis points (0 = no fee).
+    function getBuybackFeeBps() external view returns (uint16) {
+        return _getStorage().buybackFeeBps;
+    }
+
     function getPromoCodeRegistry() external view returns (address) {
         return _getStorage().promoCodeRegistry;
     }
@@ -607,6 +636,11 @@ contract BuybackPool is
         uint256 payout = (basis * buybackBps) / BPS_PRECISION;
         if (payout == 0) revert BuybackPool__ZeroAmount();
 
+        // ── Compute fee deducted from payout and routed to financeWallet ──────
+        uint16 feeBps = $.buybackFeeBps;
+        uint256 fee = feeBps == 0 ? 0 : (payout * feeBps) / BPS_PRECISION;
+        uint256 sellerAmount = payout - fee;
+
         IERC20 paymentToken = IERC20($.paymentToken);
         uint256 balance = paymentToken.balanceOf(address(this));
         if (balance < payout)
@@ -622,10 +656,17 @@ contract BuybackPool is
         // Pull NFT from user.
         IERC721($.assetNFT).transferFrom(caller, address(this), tokenId);
 
-        // Pay user.
-        paymentToken.safeTransfer(caller, payout);
+        // Pay seller (payout minus fee).
+        paymentToken.safeTransfer(caller, sellerAmount);
 
-        // Emit with the basis value used (appraisal for FMV mode, amountPaidPerCard for Spend mode).
+        // Route fee to financeWallet.
+        if (fee > 0) {
+            address feeWallet = $.financeWallet;
+            paymentToken.safeTransfer(feeWallet, fee);
+            emit BuybackFeeCharged(tokenId, feeWallet, fee);
+        }
+
+        // Emit with the gross payout and basis; fee is separately auditable via BuybackFeeCharged.
         emit BuybackExecuted(tokenId, caller, payout, basis);
 
         // Auto re-deposit the NFT back into its source PackMachine.
