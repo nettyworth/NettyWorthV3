@@ -116,6 +116,11 @@ interface IBuybackPool {
     ///         falling back to defaultBuybackBps).
     function setPackMachineBuybackBps(address machine, uint16 bps) external;
 
+    /// @notice Set the protocol fee charged on every buyback payout (basis points).
+    ///         The fee is deducted from the seller's payout and sent to financeWallet.
+    ///         0 disables the fee entirely (default). Max 100% (10000).
+    function setBuybackFeeBps(uint16 bps) external;
+
     // =========================================================================
     // Admin — mode configuration
     // =========================================================================
@@ -152,6 +157,9 @@ interface IBuybackPool {
     function getPackMachineBuybackBps(
         address machine
     ) external view returns (uint16);
+
+    /// @notice Returns the current buyback fee rate in basis points (0 = no fee).
+    function getBuybackFeeBps() external view returns (uint16);
 
     /// @notice Returns the global default buyback mode (FMV=0, Spend=1).
     function getDefaultBuybackMode() external view returns (BuybackMode);

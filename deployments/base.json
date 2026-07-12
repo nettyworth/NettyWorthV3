@@ -13,8 +13,9 @@
     "name": "NettyWorth Assets",
     "symbol": "NWA",
     "contractURI": "https://app-api.nettyworth.io:3005/api/v2/trading-cards/metadata/",
-    "baseURI": "https://app-api.nettyworth.io:3005/api/v2/trading-cards/metadata/",
-    "deployedAt": "2026-07-09T10:03:35.507Z"
+    "baseURI": "https://app-api.nettyworth.io/api/v2/trading-cards/metadata/",
+    "deployedAt": "2026-07-09T10:03:35.507Z",
+    "baseURIUpdatedAt": "2026-07-11T14:23:14.331Z"
   },
   "FeeController": {
     "proxy": "0xc496468dced9ca8dac62253c137bb5ed2ed28f55",
@@ -110,7 +111,7 @@
     ]
   },
   "AssetLendingPoolConfig": {
-    "proxy": "0x73E18959f780d51D601321F5A7817a353748bFB0",
+    "proxy": "0x99e04cc8Ad25EA0d35a924293dA80a7c8ed2c9A1",
     "implementation": "0x0f697205df567c2c2e3b7a00226c99e2bfb2668f",
     "owner": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
     "paymentToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -127,14 +128,21 @@
         "durationSeconds": 1296000,
         "aprBps": 36500,
         "active": true,
-        "updatedAt": "2026-07-09T15:15:48.244Z"
+        "updatedAt": "2026-07-11T15:38:10.612Z"
       },
       {
         "termId": 2,
         "durationSeconds": 2592000,
         "aprBps": 24333,
         "active": true,
-        "updatedAt": "2026-07-09T15:15:51.310Z"
+        "updatedAt": "2026-07-11T15:38:13.831Z"
+      },
+      {
+        "termId": 0,
+        "durationSeconds": 604800,
+        "aprBps": 52143,
+        "active": true,
+        "updatedAt": "2026-07-11T15:38:07.665Z"
       }
     ]
   },
@@ -144,7 +152,10 @@
     "owner": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
     "config": "0x99e04cc8ad25ea0d35a924293da80a7c8ed2c9a1",
     "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
-    "deployedAt": "2026-07-09T11:13:02.576Z"
+    "deployedAt": "2026-07-09T11:13:02.576Z",
+    "minAppraisalValue": "100000000",
+    "minGrade": "0",
+    "eligibilityUpdatedAt": "2026-07-11T16:36:34.433Z"
   },
   "NettyWorthMarketplace": {
     "proxy": "0xcdf82fb57b50b28a0353c792101219973dc87fba",
