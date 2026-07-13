@@ -1628,7 +1628,7 @@ contract BuybackPoolTest is Test {
     }
 
     function test_BuybackFee_BuybackExecutedReportsGrossPayout() public {
-        // BuybackExecuted.payout must equal gross payout (before fee), not the net seller amount
+        // BuybackExecuted must carry gross payout, net sellerAmount, fee, and basis unambiguously
         vm.prank(operator);
         pool.setBuybackFeeBps(500);
 
@@ -1638,7 +1638,9 @@ contract BuybackPoolTest is Test {
 
         _appraiseAndSeed(tokenId);
 
-        uint256 expectedGrossPayout = (DEFAULT_APPRAISAL * 8000) / 10000;
+        uint256 expectedGrossPayout  = (DEFAULT_APPRAISAL * 8000) / 10000;
+        uint256 expectedFee          = (expectedGrossPayout * 500) / 10000;
+        uint256 expectedSellerAmount = expectedGrossPayout - expectedFee;
 
         vm.prank(user);
         assetNFT.approve(address(pool), tokenId);
@@ -1648,13 +1650,15 @@ contract BuybackPoolTest is Test {
             tokenId,
             user,
             expectedGrossPayout,
+            expectedSellerAmount,
+            expectedFee,
             DEFAULT_APPRAISAL
         );
         vm.prank(user);
         pool.buyback(tokenId);
     }
 
-    function test_BuybackFee_TotalPaidOutTracksGrossPayout() public {
+    function test_BuybackFee_AccumulatorsTrackNetAndFee() public {
         vm.prank(operator);
         pool.setBuybackFeeBps(500);
 
@@ -1664,7 +1668,9 @@ contract BuybackPoolTest is Test {
 
         _appraiseAndSeed(tokenId);
 
-        uint256 grossPayout = (DEFAULT_APPRAISAL * 8000) / 10000;
+        uint256 grossPayout  = (DEFAULT_APPRAISAL * 8000) / 10000;
+        uint256 expectedFee  = (grossPayout * 500) / 10000;
+        uint256 expectedNet  = grossPayout - expectedFee;
 
         vm.prank(user);
         assetNFT.approve(address(pool), tokenId);
@@ -1673,12 +1679,20 @@ contract BuybackPoolTest is Test {
         vm.prank(user);
         pool.buyback(tokenId);
 
-        // totalPaidOut is not directly exposed; verify via pool balance delta:
-        // outflow = sellerAmount + fee = grossPayout exactly
+        // Pool outflow equals the full gross payout (seller net + fee).
         assertEq(
             poolBefore - pool.poolBalance(),
             grossPayout,
             "gross payout drained from pool"
+        );
+        // totalSellerPaid tracks net only — fee is NOT included.
+        assertEq(pool.getTotalSellerPaid(),    expectedNet, "totalSellerPaid == net");
+        assertEq(pool.getTotalFeesCollected(), expectedFee, "totalFeesCollected == fee");
+        // Sanity: net + fee == gross.
+        assertEq(
+            pool.getTotalSellerPaid() + pool.getTotalFeesCollected(),
+            grossPayout,
+            "net + fee == gross"
         );
     }
 

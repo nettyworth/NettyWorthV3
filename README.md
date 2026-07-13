@@ -79,6 +79,7 @@ scripts/
   upgrade-pack-vrf-router.ts      # UUPS upgrade for PackVRFRouter proxy
   deploy-asset-lending-pool.ts    # Deploy AssetLendingPool + ERC1967 proxy; grant STATE_MANAGER_ROLE
   deploy-fee-controller.ts        # Deploy FeeController + ERC1967 proxy
+  set-buyback-fee.ts              # Set the BuybackPool protocol fee bps (PACK_OPERATOR_ROLE)
   set-collectible-fee.ts          # Set collectible sale fee bps and enable it on FeeController (DEFAULT_ADMIN_ROLE)
   deploy-marketplace.ts           # Deploy NettyWorthMarketplace + ERC1967 proxy; wire pool + AssetNFT
   deploy-p2p-trade-escrow.ts      # Deploy P2PTradeEscrow + ERC1967 proxy; standalone (no protocol deps)
@@ -687,6 +688,10 @@ LENDER_SHARE_BPS=                 # Lender share of interest in bps (default 800
 # --- deploy-fee-controller.ts (required) ---
 TREASURY=                         # Platform fee recipient address
 
+# --- set-buyback-fee.ts ---
+BUYBACK_FEE_BPS=                  # Required. Protocol fee deducted from every BuybackPool payout (0–10000 bps; e.g. 500 = 5%; 0 disables)
+# BUYBACK_POOL_PROXY              # (optional) Override BuybackPool proxy; falls back to deployments/<network>.json
+
 # --- set-collectible-fee.ts ---
 COLLECTIBLE_FEES_BPS=             # Required. New collectible sale fee in basis points (0–1000; e.g. 300 = 3%)
 FEE_CONTROLLER_PROXY=             # (optional) Override FeeController proxy; falls back to deployments/<network>.json
@@ -1062,6 +1067,7 @@ Deploys the `P2PTradeEscrow` implementation and ERC1967 proxy. `initialize(owner
 | `set-finance-wallet.ts` | Set the finance wallet address on `AssetLendingPoolConfig`; env: `FINANCE_WALLET` (required), `CONFIG_PROXY` (opt), `ASSET_LENDING_POOL_PROXY` (opt) | Config owner |
 | `set-lender-config.ts` | Set lender revenue-share bps and toggle lender deposits open/closed on `AssetLendingPool` | Pool owner |
 | `set-term-config.ts` | Create or update a loan term slot (duration, APR, active flag) on `AssetLendingPoolConfig`; env: `TERM_ID` (default 3), `DURATION_SECONDS`, `APR_BPS`, `ACTIVE`, `CONFIG_PROXY` (opt), `ASSET_LENDING_POOL_PROXY` (opt) | Config owner |
+| `set-buyback-fee.ts` | Set `buybackFeeBps` on `BuybackPool` — fee deducted from every payout and sent to `financeWallet`; env: `BUYBACK_FEE_BPS` (required, 0–10000), `BUYBACK_POOL_PROXY` (opt); `0` disables the fee | `PACK_OPERATOR_ROLE` |
 | `set-collectible-fee.ts` | Set `collectibleFeesBps` on `FeeController` and optionally enable it; env: `COLLECTIBLE_FEES_BPS` (required, 0–1000), `FEE_CONTROLLER_PROXY` (opt), `SKIP_ENABLE` (opt) | `DEFAULT_ADMIN_ROLE` |
 | `set-marketplace-allowlist.ts` | Toggle allowed collections / payment tokens on `NettyWorthMarketplace` via `setAllowedCollection` / `setAllowedPaymentToken`; env: `COLLECTIONS` and/or `PAYMENT_TOKENS` (≥1 required), `ALLOWED` (default `true`), `MARKETPLACE_PROXY` (opt), `SKIP_CONFIRM` (opt) | `DEFAULT_ADMIN_ROLE` |
 | `set-marketplace-lending-pool.ts` | Point the marketplace at the lending pool via `setLendingPool`; env: `MARKETPLACE_PROXY` (opt), `LENDING_POOL` (opt), `SKIP_CONFIRM` (opt) | `DEFAULT_ADMIN_ROLE` |
@@ -1288,6 +1294,37 @@ COLLECTIBLE_FEES_BPS=300 SKIP_ENABLE=1 npx hardhat run scripts/set-collectible-f
 ```
 
 On live networks the script prints a confirmation summary (current vs new rate, enable action) and requires `yes` before sending. After the transaction(s) it re-reads both `collectibleFeesBps` and `collectibleFeesEnabled` and exits with code 1 on any mismatch. Persists `collectibleFeesBps`, `collectibleFeesEnabled`, and `collectibleFeesUpdatedAt` to `deployments/<network>.json`.
+
+---
+
+### `set-buyback-fee.ts` — Set the BuybackPool protocol fee
+
+Sets the protocol fee charged on every `BuybackPool` payout (`setBuybackFeeBps`). The fee is
+deducted from the seller's payout before USDC is transferred, and the deducted amount is routed to
+`financeWallet`. Setting `BUYBACK_FEE_BPS=0` disables the fee entirely (the default). Caller must
+hold `PACK_OPERATOR_ROLE` on `PermissionManager`.
+
+**Environment variables:**
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `BUYBACK_FEE_BPS` | Yes | New fee rate in basis points (0–10000; e.g. `500` = 5%). `0` disables the fee. Validated client-side — script exits before sending if the value exceeds `10000`. |
+| `BUYBACK_POOL_PROXY` | No | Override BuybackPool proxy; falls back to `deployments/<network>.json` |
+
+```bash
+# Set fee to 5% and apply on Base:
+BUYBACK_FEE_BPS=500 npx hardhat run scripts/set-buyback-fee.ts --network base
+
+# Dry-run on a fork (no prompt, no JSON write):
+BUYBACK_FEE_BPS=500 npx hardhat run scripts/set-buyback-fee.ts --network forkBase
+
+# Disable the fee:
+BUYBACK_FEE_BPS=0 npx hardhat run scripts/set-buyback-fee.ts --network base
+```
+
+On live networks the script prints a confirmation summary (current vs new rate) and requires `yes`
+before sending. After the transaction it re-reads `getBuybackFeeBps()` and exits with code 1 on any
+mismatch. Persists `buybackFeeBps` and `buybackFeeUpdatedAt` to `deployments/<network>.json`.
 
 ---
 

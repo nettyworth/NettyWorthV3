@@ -53,6 +53,31 @@ interface ContractMeta {
    * Return null only if you cannot reconstruct it (proxy verify will be skipped).
    */
   proxyInitData: (entry: DeploymentEntry) => string | null;
+  /**
+   * Return `{ "contracts/Foo.sol:Foo": "0x..." }` for each library that the
+   * implementation links against. These are passed as --libraries flags when
+   * verifying the implementation. Return an empty object or omit when the
+   * implementation has no linked dependencies.
+   */
+  linkedLibraries?: (entry: DeploymentEntry) => Record<string, string>;
+}
+
+interface LibraryMeta {
+  /** Path within contracts/ including filename, e.g. "lib/PackPoolLib.sol" */
+  sourcePath: string;
+  /** Solidity library name */
+  contractName: string;
+  /**
+   * Extract the on-chain address of the deployed library from the deployments
+   * record. Return null if the address is not recorded (verification is skipped).
+   */
+  addressFrom: (deployments: Deployments) => string | null;
+  /**
+   * Return `{ "contracts/Foo.sol:Foo": "0x..." }` for each library that THIS
+   * library links against (rare, but PackFulfillLib links PackPoolLib).
+   * Return an empty object or omit when the library has no linked dependencies.
+   */
+  linkedLibraries?: (deployments: Deployments) => Record<string, string>;
 }
 
 // ─── Chain ID map ─────────────────────────────────────────────────────────────
@@ -163,7 +188,7 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //       ],
   //     }),
   // },
-  // // PackMachineImplementation has no proxy — it is the EIP-1167 clone template.
+  // PackMachineImplementation has no proxy — it is the EIP-1167 clone template.
   // PackMachineImplementation: {
   //   sourcePath: "PackMachine.sol",
   //   contractName: "PackMachine",
@@ -220,38 +245,9 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //       args: [e.permissionManager as `0x${string}`],
   //     }),
   // },
-  BuybackPool: {
-    sourcePath: "BuybackPool.sol",
-    contractName: "BuybackPool",
-    implCtorArgs: () => null,
-    proxyInitData: (e) =>
-      encodeFunctionData({
-        abi: [
-          {
-            type: "function",
-            name: "initialize",
-            inputs: [
-              { type: "address" }, // permissionManager
-              { type: "address" }, // assetNFT
-              { type: "address" }, // paymentToken
-              { type: "address" }, // financeWallet
-              { type: "address" }, // factory
-            ],
-          },
-        ],
-        functionName: "initialize",
-        args: [
-          e.permissionManager as `0x${string}`,
-          e.assetNFT as `0x${string}`,
-          e.paymentToken as `0x${string}`,
-          e.financeWallet as `0x${string}`,
-          e.factory as `0x${string}`,
-        ],
-      }),
-  },
-  // AssetLendingPoolConfig: {
-  //   sourcePath: "AssetLendingPoolConfig.sol",
-  //   contractName: "AssetLendingPoolConfig",
+  // BuybackPool: {
+  //   sourcePath: "BuybackPool.sol",
+  //   contractName: "BuybackPool",
   //   implCtorArgs: () => null,
   //   proxyInitData: (e) =>
   //     encodeFunctionData({
@@ -260,34 +256,67 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //           type: "function",
   //           name: "initialize",
   //           inputs: [
-  //             { type: "address" }, // initialOwner
-  //             { type: "address" }, // paymentToken
+  //             { type: "address" }, // permissionManager
   //             { type: "address" }, // assetNFT
-  //             { type: "uint256" }, // ltvBps
-  //             { type: "uint256" }, // lenderShareBps
-  //             { type: "uint256" }, // acquisitionWindow
-  //             { type: "uint256" }, // auctionWindow
-  //             { type: "address" }, // packMachineFactory
+  //             { type: "address" }, // paymentToken
+  //             { type: "address" }, // financeWallet
+  //             { type: "address" }, // factory
   //           ],
   //         },
   //       ],
   //       functionName: "initialize",
   //       args: [
-  //         e.owner as `0x${string}`,
-  //         e.paymentToken as `0x${string}`,
+  //         e.permissionManager as `0x${string}`,
   //         e.assetNFT as `0x${string}`,
-  //         BigInt(e?.ltvBps ?? "5000"),
-  //         BigInt(e?.lenderShareBps ?? "8000"),
-  //         BigInt(e?.acquisitionWindow ?? String(24 * 3600)),
-  //         BigInt(e?.auctionWindow ?? String(7 * 24 * 3600)),
-  //         e.packMachineFactory as `0x${string}`,
+  //         e.paymentToken as `0x${string}`,
+  //         e.financeWallet as `0x${string}`,
+  //         e.factory as `0x${string}`,
   //       ],
   //     }),
   // },
+  AssetLendingPoolConfig: {
+    sourcePath: "AssetLendingPoolConfig.sol",
+    contractName: "AssetLendingPoolConfig",
+    implCtorArgs: () => null,
+    proxyInitData: (e) =>
+      encodeFunctionData({
+        abi: [
+          {
+            type: "function",
+            name: "initialize",
+            inputs: [
+              { type: "address" }, // initialOwner
+              { type: "address" }, // paymentToken
+              { type: "address" }, // assetNFT
+              { type: "uint256" }, // ltvBps
+              { type: "uint256" }, // lenderShareBps
+              { type: "uint256" }, // acquisitionWindow
+              { type: "uint256" }, // auctionWindow
+              { type: "address" }, // packMachineFactory
+            ],
+          },
+        ],
+        functionName: "initialize",
+        args: [
+          e.owner as `0x${string}`,
+          e.paymentToken as `0x${string}`,
+          e.assetNFT as `0x${string}`,
+          BigInt(e?.ltvBps ?? "5000"),
+          BigInt(e?.lenderShareBps ?? "8000"),
+          BigInt(e?.acquisitionWindow ?? String(24 * 3600)),
+          BigInt(e?.auctionWindow ?? String(7 * 24 * 3600)),
+          e.packMachineFactory as `0x${string}`,
+        ],
+      }),
+  },
   // AssetLendingPool: {
   //   sourcePath: "AssetLendingPool.sol",
   //   contractName: "AssetLendingPool",
   //   implCtorArgs: () => null,
+  //   linkedLibraries: (e): Record<string, string> =>
+  //     e.lendingLib
+  //       ? { "contracts/lib/LendingLib.sol:LendingLib": e.lendingLib }
+  //       : {},
   //   proxyInitData: (e) =>
   //     encodeFunctionData({
   //       abi: [
@@ -327,37 +356,37 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //       ],
   //     }),
   // },
-  NettyWorthMarketplace: {
-    sourcePath: "NettyWorthMarketplace.sol",
-    contractName: "NettyWorthMarketplace",
-    implCtorArgs: () => null,
-    proxyInitData: (e) =>
-      encodeFunctionData({
-        abi: [
-          {
-            type: "function",
-            name: "initialize",
-            inputs: [
-              { type: "address" }, // permissionManager
-              { type: "address" }, // feeController
-              { type: "address" }, // lendingPool
-              { type: "address" }, // assetNFT
-              { type: "address" }, // paymentToken
-              { type: "address" }, // treasury
-            ],
-          },
-        ],
-        functionName: "initialize",
-        args: [
-          e.permissionManager as `0x${string}`,
-          e.feeController as `0x${string}`,
-          e.lendingPool as `0x${string}`,
-          e.assetNFT as `0x${string}`,
-          e.paymentToken as `0x${string}`,
-          e.treasury as `0x${string}`,
-        ],
-      }),
-  },
+  // NettyWorthMarketplace: {
+  //   sourcePath: "NettyWorthMarketplace.sol",
+  //   contractName: "NettyWorthMarketplace",
+  //   implCtorArgs: () => null,
+  //   proxyInitData: (e) =>
+  //     encodeFunctionData({
+  //       abi: [
+  //         {
+  //           type: "function",
+  //           name: "initialize",
+  //           inputs: [
+  //             { type: "address" }, // permissionManager
+  //             { type: "address" }, // feeController
+  //             { type: "address" }, // lendingPool
+  //             { type: "address" }, // assetNFT
+  //             { type: "address" }, // paymentToken
+  //             { type: "address" }, // treasury
+  //           ],
+  //         },
+  //       ],
+  //       functionName: "initialize",
+  //       args: [
+  //         e.permissionManager as `0x${string}`,
+  //         e.feeController as `0x${string}`,
+  //         e.lendingPool as `0x${string}`,
+  //         e.assetNFT as `0x${string}`,
+  //         e.paymentToken as `0x${string}`,
+  //         e.treasury as `0x${string}`,
+  //       ],
+  //     }),
+  // },
   // P2PTradeEscrow: {
   //   sourcePath: "P2PTradeEscrow.sol",
   //   contractName: "P2PTradeEscrow",
@@ -394,6 +423,56 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   // },
 };
 
+// ─── Deployed-library metadata ────────────────────────────────────────────────
+// Libraries are deployed as standalone contracts (linked via DELEGATECALL) to keep
+// their callers under the 24 KiB EIP-170 limit. They have no constructor args and no
+// proxy — only the library address and (for libs that link other libs) a --libraries flag.
+
+const LIBRARY_META: Record<string, LibraryMeta> = {
+  // PackPoolLib: {
+  //   sourcePath: "lib/PackPoolLib.sol",
+  //   contractName: "PackPoolLib",
+  //   // Address is recorded under the PackMachineImplementation entry.
+  //   addressFrom: (deps) => {
+  //     const e = deps["PackMachineImplementation"];
+  //     return e && !Array.isArray(e)
+  //       ? ((e as DeploymentEntry).packPoolLib ?? null)
+  //       : null;
+  //   },
+  // },
+  // PackFulfillLib: {
+  //   sourcePath: "lib/PackFulfillLib.sol",
+  //   contractName: "PackFulfillLib",
+  //   addressFrom: (deps) => {
+  //     const e = deps["PackMachineImplementation"];
+  //     return e && !Array.isArray(e)
+  //       ? ((e as DeploymentEntry).packFulfillLib ?? null)
+  //       : null;
+  //   },
+  //   // PackFulfillLib calls into PackPoolLib via delegatecall — forge needs the address
+  //   // to match the linked bytecode it verifies against.
+  //   linkedLibraries: (deps): Record<string, string> => {
+  //     const e = deps["PackMachineImplementation"];
+  //     const addr =
+  //       e && !Array.isArray(e)
+  //         ? ((e as DeploymentEntry).packPoolLib ?? null)
+  //         : null;
+  //     if (!addr) return {};
+  //     return { "contracts/lib/PackPoolLib.sol:PackPoolLib": addr };
+  //   },
+  // },
+  // LendingLib: {
+  //   sourcePath: "lib/LendingLib.sol",
+  //   contractName: "LendingLib",
+  //   addressFrom: (deps) => {
+  //     const e = deps["AssetLendingPool"];
+  //     return e && !Array.isArray(e)
+  //       ? ((e as DeploymentEntry).lendingLib ?? null)
+  //       : null;
+  //   },
+  // },
+};
+
 // ─── forge verify-contract wrapper ───────────────────────────────────────────
 
 function forgeVerify(
@@ -403,7 +482,16 @@ function forgeVerify(
   accessKey: string,
   constructorArgs: string | null,
   label: string,
+  /** `{ "contracts/Foo.sol:Foo": "0xADDR" }` — passed as one --libraries flag each */
+  libraries: Record<string, string> = {},
 ): boolean {
+  const libraryFlags = Object.entries(libraries).map(
+    ([ref, addr]) => `--libraries '${ref}:${addr}'`,
+  );
+  const libraryFlagsExec = Object.entries(libraries).map(
+    ([ref, addr]) => `--libraries "${ref}:${addr}"`,
+  );
+
   const cmd = [
     "forge verify-contract",
     address,
@@ -411,6 +499,7 @@ function forgeVerify(
     `--verifier-url '${verifierUrl}'`,
     `--etherscan-api-key '${accessKey}'`,
     "--watch",
+    ...libraryFlags,
     // --constructor-args must be LAST (Tenderly requirement)
     ...(constructorArgs ? [`--constructor-args '${constructorArgs}'`] : []),
   ].join(" \\\n  ");
@@ -426,6 +515,7 @@ function forgeVerify(
         `--verifier-url "${verifierUrl}"`,
         `--etherscan-api-key "${accessKey}"`,
         "--watch",
+        ...libraryFlagsExec,
         ...(constructorArgs ? [`--constructor-args "${constructorArgs}"`] : []),
       ].join(" "),
       { stdio: "pipe", encoding: "utf8" },
@@ -520,6 +610,7 @@ for (const [contractKey, meta] of Object.entries(CONTRACT_META)) {
   if (entry.implementation) {
     const implCtorArgs = meta.implCtorArgs(entry);
     const implRef = `contracts/${meta.sourcePath}:${meta.contractName}`;
+    const implLibs = meta.linkedLibraries ? meta.linkedLibraries(entry) : {};
 
     console.log(`\n📄 ${contractKey} implementation (${entry.implementation})`);
     const ok = forgeVerify(
@@ -529,6 +620,7 @@ for (const [contractKey, meta] of Object.entries(CONTRACT_META)) {
       TENDERLY_ACCESS_KEY,
       implCtorArgs,
       `${contractKey} impl`,
+      implLibs,
     );
     ok ? passed++ : failed++;
   } else {
@@ -563,6 +655,34 @@ for (const [contractKey, meta] of Object.entries(CONTRACT_META)) {
       ok ? passed++ : failed++;
     }
   }
+}
+
+// ─── Deployed libraries ───────────────────────────────────────────────────────
+
+for (const [libKey, meta] of Object.entries(LIBRARY_META)) {
+  const address = meta.addressFrom(deployments);
+  if (!address) {
+    console.log(
+      `\n⚪ ${libKey}: address not recorded in ${networkName}.json — skipping`,
+    );
+    skipped++;
+    continue;
+  }
+
+  const libRef = `contracts/${meta.sourcePath}:${meta.contractName}`;
+  const libs = meta.linkedLibraries ? meta.linkedLibraries(deployments) : {};
+
+  console.log(`\n📚 ${libKey} (${address})`);
+  const ok = forgeVerify(
+    address,
+    libRef,
+    verifierUrl,
+    TENDERLY_ACCESS_KEY,
+    null, // libraries have no constructor args
+    libKey,
+    libs,
+  );
+  ok ? passed++ : failed++;
 }
 
 // ─── Summary ──────────────────────────────────────────────────────────────────

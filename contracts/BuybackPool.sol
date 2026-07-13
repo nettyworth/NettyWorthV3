@@ -80,7 +80,11 @@ contract BuybackPool is
         mapping(uint256 tokenId => TokenBuybackInfo) tokenInfo;
         mapping(address packMachine => bool) registeredPackMachines;
         uint256 totalReceived;
-        uint256 totalPaidOut;
+        /// @dev Renamed from totalPaidOut (was gross). From this upgrade forward accumulates the
+        ///      net USDC actually transferred to sellers (payout − fee). Any value inherited from
+        ///      the old slot represents historic gross amounts, but the field was never exposed
+        ///      on-chain so the semantic shift is safe. See also totalFeesCollected below.
+        uint256 totalSellerPaid;
         /// @dev Per-PackMachine buyback rate override (0 = use defaultBuybackBps).
         mapping(address packMachine => uint16) packMachineBuybackBps;
         /// @dev PromoCodeRegistry proxy address for buyback-boost code redemption.
@@ -94,6 +98,9 @@ contract BuybackPool is
         /// @dev Fee deducted from each buyback payout and sent to financeWallet (basis points).
         ///      0 = no fee (default after upgrade). E.g. 500 = 5%.
         uint16 buybackFeeBps;
+        /// @dev Cumulative protocol fees routed to financeWallet across all buybacks.
+        ///      Appended at struct end to preserve ERC-7201 storage layout on upgrade.
+        uint256 totalFeesCollected;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.BuybackPool")) - 1)) & ~bytes32(uint256(0xff))
@@ -116,12 +123,18 @@ contract BuybackPool is
         uint8 tier
     );
     /// @notice Emitted on every successful buyback.
-    /// @param basis The value the payout was computed against: the on-chain appraisal in FMV
-    ///              mode, or the amount paid per card in Spend mode.
+    /// @param payout       Gross payout = basis × buybackBps / BPS (before fee).
+    /// @param sellerAmount Net USDC actually transferred to the seller (payout − fee).
+    /// @param fee          Protocol fee routed to financeWallet (payout × buybackFeeBps / BPS).
+    ///                     Zero when buybackFeeBps == 0.
+    /// @param basis        The value the payout was computed against: the on-chain appraisal in
+    ///                     FMV mode, or the amount paid per card in Spend mode.
     event BuybackExecuted(
         uint256 indexed tokenId,
         address indexed seller,
         uint256 payout,
+        uint256 sellerAmount,
+        uint256 fee,
         uint256 basis
     );
     event TokenRedeposited(
@@ -538,6 +551,18 @@ contract BuybackPool is
         return _getStorage().buybackFeeBps;
     }
 
+    /// @notice Cumulative net USDC actually transferred to sellers across all buybacks.
+    ///         Does not include protocol fees. Pair with getTotalFeesCollected() for full
+    ///         accounting: totalFlowOut = totalSellerPaid + totalFeesCollected.
+    function getTotalSellerPaid() external view returns (uint256) {
+        return _getStorage().totalSellerPaid;
+    }
+
+    /// @notice Cumulative protocol fees routed to financeWallet across all buybacks.
+    function getTotalFeesCollected() external view returns (uint256) {
+        return _getStorage().totalFeesCollected;
+    }
+
     function getPromoCodeRegistry() external view returns (address) {
         return _getStorage().promoCodeRegistry;
     }
@@ -648,7 +673,8 @@ contract BuybackPool is
 
         // ── State update before external calls (checks-effects-interactions) ──
         info.isActive = false;
-        $.totalPaidOut += payout;
+        $.totalSellerPaid += sellerAmount;
+        $.totalFeesCollected += fee;
 
         uint8 tier = info.tier;
         address sourceMachine = info.sourcePackMachine;
@@ -666,8 +692,7 @@ contract BuybackPool is
             emit BuybackFeeCharged(tokenId, feeWallet, fee);
         }
 
-        // Emit with the gross payout and basis; fee is separately auditable via BuybackFeeCharged.
-        emit BuybackExecuted(tokenId, caller, payout, basis);
+        emit BuybackExecuted(tokenId, caller, payout, sellerAmount, fee, basis);
 
         // Auto re-deposit the NFT back into its source PackMachine.
         _redeposit($, tokenId, tier, sourceMachine);
