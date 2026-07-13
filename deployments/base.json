@@ -76,14 +76,24 @@
   },
   "BuybackPool": {
     "proxy": "0x60e0Ea52aD26EF5b5A6da2132587aD62d43AAa47",
-    "implementation": "0x196B1e07E7B1359d2fF08026A187c83aC670a3Ea",
+    "implementation": "0xedb6bfb2ef1b5acb5f502e387e63e3dfe2214c07",
     "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
     "assetNFT": "0x2F7AFE6B9C272CAff83a3377afbaeD2C8901B865",
     "paymentToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     "financeWallet": "0x0ab34B16c2f1c10a840bF090c8D39Cf8dC7e8318",
     "factory": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
     "defaultBuybackBps": 8000,
-    "deployedAt": "2026-07-11T06:59:39.715Z"
+    "deployedAt": "2026-07-11T06:59:39.715Z",
+    "upgradedAt": "2026-07-13T05:03:33.010Z",
+    "upgradeHistory": [
+      {
+        "previousImplementation": "0x196B1e07E7B1359d2fF08026A187c83aC670a3Ea",
+        "newImplementation": "0xedb6bfb2ef1b5acb5f502e387e63e3dfe2214c07",
+        "upgradedAt": "2026-07-13T05:03:33.009Z",
+        "txHash": "0xad79a25493e90992787f581690a033a9f778e0b8065e87dea303e4fcafd301ca",
+        "upgradeCalldata": "0x"
+      }
+    ]
   },
   "PromoCodeRegistry": {
     "proxy": "0x8239fcbda24a38d77f046575738e98a24f8ea64c",
@@ -148,14 +158,26 @@
   },
   "AssetLendingPool": {
     "proxy": "0xcc60cfaf47fdd8b54e96846ad257395cfe58bc07",
-    "implementation": "0xb7e9f81add83cdcfd012a6e46f93c05f7e5a7514",
+    "implementation": "0x25e0e667354f4a87cd9ee4d1d31b929248b3fb68",
     "owner": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
     "config": "0x99e04cc8ad25ea0d35a924293da80a7c8ed2c9a1",
     "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
     "deployedAt": "2026-07-09T11:13:02.576Z",
     "minAppraisalValue": "100000000",
     "minGrade": "0",
-    "eligibilityUpdatedAt": "2026-07-11T16:36:34.433Z"
+    "eligibilityUpdatedAt": "2026-07-13T09:28:35.530Z",
+    "lendingLib": "0xf2bd50387c3a8da1af01ba7490900fc77cdc557f",
+    "upgradedAt": "2026-07-13T08:46:54.662Z",
+    "upgradeHistory": [
+      {
+        "previousImplementation": "0xb7E9F81aDd83CdCFD012A6E46F93C05f7e5a7514",
+        "newImplementation": "0x25e0e667354f4a87cd9ee4d1d31b929248b3fb68",
+        "lendingLib": "0xf2bd50387c3a8da1af01ba7490900fc77cdc557f",
+        "upgradedAt": "2026-07-13T08:46:54.661Z",
+        "txHash": "0xc848982f50c897d542af117a368fe7e2b7ac62868d384877718804401e75724a",
+        "upgradeCalldata": "0x"
+      }
+    ]
   },
   "NettyWorthMarketplace": {
     "proxy": "0xcdf82fb57b50b28a0353c792101219973dc87fba",

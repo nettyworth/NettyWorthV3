@@ -18,6 +18,22 @@ interface IBuybackPool {
     // Events
     // =========================================================================
 
+    /// @notice Emitted on every successful buyback.
+    /// @param payout       Gross payout = basis × buybackBps / BPS (before fee).
+    /// @param sellerAmount Net USDC actually transferred to the seller (payout − fee).
+    /// @param fee          Protocol fee routed to financeWallet (payout × buybackFeeBps / BPS).
+    ///                     Zero when buybackFeeBps == 0.
+    /// @param basis        The value the payout was computed against: the on-chain appraisal
+    ///                     in FMV mode, or the amount paid per card in Spend mode.
+    event BuybackExecuted(
+        uint256 indexed tokenId,
+        address indexed seller,
+        uint256 payout,
+        uint256 sellerAmount,
+        uint256 fee,
+        uint256 basis
+    );
+
     /// @notice Emitted when a buyback NFT cannot be redeposited because its source
     ///         PackMachine has been deregistered. Admin must call rescueNFT to recover.
     event TokenStuck(uint256 indexed tokenId, address indexed sourceMachine);
@@ -160,6 +176,13 @@ interface IBuybackPool {
 
     /// @notice Returns the current buyback fee rate in basis points (0 = no fee).
     function getBuybackFeeBps() external view returns (uint16);
+
+    /// @notice Cumulative net USDC actually transferred to sellers across all buybacks.
+    ///         Does not include protocol fees.
+    function getTotalSellerPaid() external view returns (uint256);
+
+    /// @notice Cumulative protocol fees routed to financeWallet across all buybacks.
+    function getTotalFeesCollected() external view returns (uint256);
 
     /// @notice Returns the global default buyback mode (FMV=0, Spend=1).
     function getDefaultBuybackMode() external view returns (BuybackMode);
