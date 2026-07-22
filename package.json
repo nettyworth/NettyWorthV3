@@ -11,7 +11,8 @@
     "fork:sepolia": "hardhat node --network forkSepolia",
     "lint": "solhint 'contracts/**/*.sol'",
     "verify:slots": "node --experimental-strip-types scripts/verify-storage-slots.ts",
-    "verify:tenderly": "node --experimental-strip-types scripts/verify-tenderly.ts"
+    "verify:tenderly": "node --experimental-strip-types scripts/verify-tenderly.ts",
+    "verify:basescan": "node --experimental-strip-types scripts/verify-basescan.ts --network base"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-ignition": "^3.1.5",

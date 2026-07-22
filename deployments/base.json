@@ -1,9 +1,19 @@
 {
   "PermissionManager": {
     "proxy": "0xc4816911a267b27f4509929be4fc4516bde7ec1d",
-    "implementation": "0x8b805ffbda6ec3734ef29c3dc3e545754a55a10d",
+    "implementation": "0x329d35978538ef68e90ee391dbe27d7fe99493c0",
     "admin": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
-    "deployedAt": "2026-06-30T12:28:30.383Z"
+    "deployedAt": "2026-06-30T12:28:30.383Z",
+    "upgradedAt": "2026-07-17T15:23:33.281Z",
+    "upgradeHistory": [
+      {
+        "previousImplementation": "0x8B805fFBdA6EC3734Ef29c3DC3e545754a55A10d",
+        "newImplementation": "0x329d35978538ef68e90ee391dbe27d7fe99493c0",
+        "upgradedAt": "2026-07-17T15:23:33.280Z",
+        "txHash": "0xcee720b2246c88b74c4381cb9210475cfc04c32e85d22ca3e021ed31b8cd4923",
+        "upgradeCalldata": "0x"
+      }
+    ]
   },
   "AssetNFT": {
     "proxy": "0x2f7afe6b9c272caff83a3377afbaed2c8901b865",
