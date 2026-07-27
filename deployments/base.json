@@ -93,7 +93,9 @@
         "txHash": "0xad79a25493e90992787f581690a033a9f778e0b8065e87dea303e4fcafd301ca",
         "upgradeCalldata": "0x"
       }
-    ]
+    ],
+    "buybackFeeBps": "500",
+    "buybackFeeUpdatedAt": "2026-07-27T08:49:01.309Z"
   },
   "PromoCodeRegistry": {
     "proxy": "0x8239fcbda24a38d77f046575738e98a24f8ea64c",
