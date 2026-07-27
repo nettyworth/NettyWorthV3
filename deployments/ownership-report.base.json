@@ -1,0 +1,123 @@
+{
+  "network": "base",
+  "chainId": 8453,
+  "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
+  "caller": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+  "safe": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+  "generatedAt": "2026-07-27T10:01:12.800Z",
+  "roles": [
+    {
+      "role": "DEFAULT_ADMIN_ROLE",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "holders": [
+        "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+        "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456"
+      ]
+    },
+    {
+      "role": "MINTER_ROLE",
+      "hash": "0x9f2df0fed2c77648de5860a4cc508cd0818c85b8b8a1ab4ceeef8d981c8956a6",
+      "holders": [
+        "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+        "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456"
+      ]
+    },
+    {
+      "role": "BURNER_ROLE",
+      "hash": "0x3c11d16cbaffd01df69ce1c404f6340ee057498f5f00246190ea54220576a848",
+      "holders": [
+        "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+        "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456"
+      ]
+    },
+    {
+      "role": "STATE_MANAGER_ROLE",
+      "hash": "0xecfee88fcfa2ef792f0f3299f6260bd7d97f69a4e460612fb6373f878eea12e8",
+      "holders": [
+        "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+        "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+        "0xCc60cFaF47fdD8B54e96846aD257395CFe58BC07"
+      ]
+    },
+    {
+      "role": "URI_SETTER_ROLE",
+      "hash": "0x7804d923f43a17d325d77e781528e0793b2edd9890ab45fc64efd7b4b427744c",
+      "holders": [
+        "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+        "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456"
+      ]
+    },
+    {
+      "role": "PAUSER_ROLE",
+      "hash": "0x65d7a28e3265b37a6474929f336521b332c1681b933f6cb9f3376673440d862a",
+      "holders": [
+        "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+        "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456"
+      ]
+    },
+    {
+      "role": "UPGRADER_ROLE",
+      "hash": "0x189ab7a9244df0848122154315af71fe140f3db0fe014031783b0946b8c9d2e3",
+      "holders": [
+        "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+        "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456"
+      ]
+    },
+    {
+      "role": "BLACKLIST_ROLE",
+      "hash": "0x22435ed027edf5f902dc0093fbc24cdb50c05b5fd5f311b78c67c1cbaff60e13",
+      "holders": [
+        "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+        "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456"
+      ]
+    },
+    {
+      "role": "PACK_OPERATOR_ROLE",
+      "hash": "0xd897432901a0be67ce45a5b2c9ffd6ed1af3cdea9c5ccbdd176b3d6784f6cb0f",
+      "holders": [
+        "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+        "0xe980A0855187478734cf47Eb7163a64Cb8e67648",
+        "0x0ab34B16c2f1c10a840bF090c8D39Cf8dC7e8318",
+        "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456"
+      ]
+    },
+    {
+      "role": "BUYBACK_POOL_ROLE",
+      "hash": "0x7d61418e38dc1edd864562b32f2d63bfd8e232545ccffa330a367360691dd0ef",
+      "holders": [
+        "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456"
+      ]
+    },
+    {
+      "role": "MARKETPLACE_ROLE",
+      "hash": "0x0ea61da3a8a09ad801432653699f8c1860b1ae9d2ea4a141fadfd63227717bc8",
+      "holders": [
+        "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+        "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456"
+      ]
+    }
+  ],
+  "owners": [
+    {
+      "key": "AssetLendingPool",
+      "proxy": "0xCc60cFaF47fdD8B54e96846aD257395CFe58BC07",
+      "owner": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+      "pendingOwner": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+      "status": "deployed"
+    },
+    {
+      "key": "AssetLendingPoolConfig",
+      "proxy": "0x99e04cc8Ad25EA0d35a924293dA80a7c8ed2c9A1",
+      "owner": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+      "pendingOwner": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+      "status": "deployed"
+    },
+    {
+      "key": "P2PTradeEscrow",
+      "proxy": null,
+      "owner": null,
+      "pendingOwner": null,
+      "status": "not_deployed"
+    }
+  ]
+}

@@ -1,33 +1,14 @@
 import { network } from "hardhat";
-import { getAddress, keccak256, toBytes } from "viem";
+import { getAddress } from "viem";
 import { createInterface } from "node:readline/promises";
 import { readDeployments, getDeploymentPath } from "./lib/deployments.js";
-import { writeFile, rename, mkdir } from "node:fs/promises";
-
-// ─── Role map — canonical names from contracts/lib/Roles.sol ─────────────────
-const DEFAULT_ADMIN_ROLE =
-  "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
-
-const ROLES: Record<string, `0x${string}`> = {
+import {
+  ROLES,
   DEFAULT_ADMIN_ROLE,
-  MINTER_ROLE: keccak256(toBytes("MINTER_ROLE")),
-  BURNER_ROLE: keccak256(toBytes("BURNER_ROLE")),
-  STATE_MANAGER_ROLE: keccak256(toBytes("STATE_MANAGER_ROLE")),
-  URI_SETTER_ROLE: keccak256(toBytes("URI_SETTER_ROLE")),
-  PAUSER_ROLE: keccak256(toBytes("PAUSER_ROLE")),
-  UPGRADER_ROLE: keccak256(toBytes("UPGRADER_ROLE")),
-  BLACKLIST_ROLE: keccak256(toBytes("BLACKLIST_ROLE")),
-  PACK_OPERATOR_ROLE: keccak256(toBytes("PACK_OPERATOR_ROLE")),
-  BUYBACK_POOL_ROLE: keccak256(toBytes("BUYBACK_POOL_ROLE")),
-  MARKETPLACE_ROLE: keccak256(toBytes("MARKETPLACE_ROLE")),
-};
-
-// ─── Ownable2Step contracts to transfer ──────────────────────────────────────
-const OWNABLE_CONTRACTS: Array<{ key: string; contract: string }> = [
-  { key: "AssetLendingPool", contract: "AssetLendingPool" },
-  { key: "AssetLendingPoolConfig", contract: "AssetLendingPoolConfig" },
-  { key: "P2PTradeEscrow", contract: "P2PTradeEscrow" },
-];
+  OWNABLE_CONTRACTS,
+} from "./lib/ownership.js";
+import { writeFile, rename, mkdir } from "node:fs/promises";
+import { sleep } from "./lib/sleep.js";
 
 // ─── Validate NEW_OWNER env var ───────────────────────────────────────────────
 const rawNewOwner = process.env.NEW_OWNER;
@@ -239,6 +220,7 @@ for (const { name, hash } of rolesToGrant) {
   const receipt = await publicClient.waitForTransactionReceipt({
     hash: txHash,
   });
+  await sleep(2000);
   // verify
   const confirmed = await pm.read.hasProtocolRole([hash, newOwner]);
   if (!confirmed) {
@@ -316,6 +298,7 @@ for (const item of ownableWork) {
   const receipt = await publicClient.waitForTransactionReceipt({
     hash: txHash,
   });
+  await sleep(2000);
   // verify
   const pendingOwnerNow = getAddress(
     (await c.read.pendingOwner()) as string,

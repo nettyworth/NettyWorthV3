@@ -1,0 +1,37 @@
+{
+  "version": "1.0",
+  "chainId": "8453",
+  "createdAt": 1785145528355,
+  "meta": {
+    "name": "Accept NettyWorth ownership (base)",
+    "description": "acceptOwnership() for AssetLendingPool, AssetLendingPoolConfig",
+    "txBuilderVersion": "1.16.5",
+    "createdFromSafeAddress": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+    "createdFromOwnerAddress": "",
+    "checksum": "0xbe4755b087f475c61707d80f04a2e81e9daffd1fcc66aaa6ca751d0dbced9172"
+  },
+  "transactions": [
+    {
+      "to": "0xCc60cFaF47fdD8B54e96846aD257395CFe58BC07",
+      "value": "0",
+      "data": "0x79ba5097",
+      "contractMethod": {
+        "inputs": [],
+        "name": "acceptOwnership",
+        "payable": false
+      },
+      "contractInputsValues": null
+    },
+    {
+      "to": "0x99e04cc8Ad25EA0d35a924293dA80a7c8ed2c9A1",
+      "value": "0",
+      "data": "0x79ba5097",
+      "contractMethod": {
+        "inputs": [],
+        "name": "acceptOwnership",
+        "payable": false
+      },
+      "contractInputsValues": null
+    }
+  ]
+}
