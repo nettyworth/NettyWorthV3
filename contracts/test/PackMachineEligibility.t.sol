@@ -29,6 +29,7 @@ contract PackMachineEligibilityTest is Test {
     MockERC20 internal usdc;
     AssetNFT internal assetNFT;
     MockVRFCoordinatorV2Plus internal coordinator;
+    MockAssetLendingPool internal lendingPool;
 
     address internal admin = makeAddr("admin");
     address internal forwarder = makeAddr("forwarder");
@@ -147,9 +148,9 @@ contract PackMachineEligibilityTest is Test {
         vrfRouter.setAuthorizedPackMachine(cloneAddr, true);
 
         // Wire mock lending pool so getAppraisalValue works
-        MockAssetLendingPool mockLendingPool = new MockAssetLendingPool();
+        lendingPool = new MockAssetLendingPool();
         vm.prank(admin);
-        assetNFT.setLendingPool(address(mockLendingPool));
+        assetNFT.setLendingPool(address(lendingPool));
 
         // Add Pro (pack 1) and Elite (pack 2)
         uint32[6] memory weights = [uint32(7040), 2500, 400, 50, 9, 1];
@@ -976,5 +977,105 @@ contract PackMachineEligibilityTest is Test {
         r = new uint8[](2);
         r[0] = a;
         r[1] = b;
+    }
+
+    // =========================================================================
+    // FMV band gaps
+    // =========================================================================
+
+    /// @notice Pins the invariant the off-chain pack-tier recheck depends on: an
+    ///         FMV that falls in a *gap between* two configured bands is rejected
+    ///         for EVERY tier, not just the tier it is nearest to.
+    ///
+    ///         Bands are authored in whole dollars while appraisals carry cents,
+    ///         so `[20, 50]` / `[51, 100]` leaves $50.000001–$50.999999 in no band.
+    ///         The recheck must therefore never propose "snap this card to the
+    ///         nearer tier" — that transaction always reverts. Its `band-gap`
+    ///         status exists precisely because of this.
+    function test_SetPackEligibility_Reverts_WhenFmvFallsInBandGap() public {
+        uint256[] memory ids = _mint(1);
+
+        // Deposit under the wide-open bounds from setUp.
+        uint8[] memory tiers = new uint8[](1);
+        tiers[0] = 0;
+        uint256[] memory masks = new uint256[](1);
+        masks[0] = 1 << PACK_BASE;
+        _deposit(ids, tiers, masks);
+
+        // Now install gapped bands: Base [20, 50], Common [51, 100], rest unset.
+        uint128[6] memory minFmv;
+        uint128[6] memory maxFmv;
+        minFmv[0] = 20e6;
+        maxFmv[0] = 50e6;
+        minFmv[1] = 51e6;
+        maxFmv[1] = 100e6;
+        vm.prank(operator);
+        packRegistry.setPackTierFmvBounds(address(packMachine), PACK_BASE, minFmv, maxFmv);
+
+        // $50.75 — above Base's ceiling, below Common's floor.
+        uint256 gapFmv = 50_750_000;
+        lendingPool.setAppraisalValue(ids[0], gapFmv);
+
+        // Neither the "nearer" tier nor any other tier accepts it.
+        uint8[] memory toCommon = new uint8[](1);
+        toCommon[0] = 1;
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                PackMachine.PackMachine__FmvOutOfRange.selector,
+                ids[0],
+                PACK_BASE,
+                uint8(1),
+                gapFmv
+            )
+        );
+        packMachine.setPackEligibility(PACK_BASE, ids, toCommon, true);
+
+        uint8[] memory toBase = new uint8[](1);
+        toBase[0] = 0;
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                PackMachine.PackMachine__FmvOutOfRange.selector,
+                ids[0],
+                PACK_BASE,
+                uint8(0),
+                gapFmv
+            )
+        );
+        packMachine.setPackEligibility(PACK_BASE, ids, toBase, true);
+    }
+
+    /// @notice The remediation the recheck modal offers: making the bands
+    ///         contiguous (Base's ceiling raised to one base unit below Common's
+    ///         floor) lets the same card be re-tiered without any other change.
+    function test_SetPackEligibility_Succeeds_AfterBandsMadeContiguous() public {
+        uint256[] memory ids = _mint(1);
+
+        uint8[] memory tiers = new uint8[](1);
+        tiers[0] = 0;
+        uint256[] memory masks = new uint256[](1);
+        masks[0] = 1 << PACK_BASE;
+        _deposit(ids, tiers, masks);
+
+        uint256 gapFmv = 50_750_000;
+        lendingPool.setAppraisalValue(ids[0], gapFmv);
+
+        // Contiguous bands: Base [20, 50.999999], Common [51, 100].
+        uint128[6] memory minFmv;
+        uint128[6] memory maxFmv;
+        minFmv[0] = 20e6;
+        maxFmv[0] = 51e6 - 1;
+        minFmv[1] = 51e6;
+        maxFmv[1] = 100e6;
+        vm.prank(operator);
+        packRegistry.setPackTierFmvBounds(address(packMachine), PACK_BASE, minFmv, maxFmv);
+
+        uint8[] memory toBase = new uint8[](1);
+        toBase[0] = 0;
+        vm.prank(operator);
+        packMachine.setPackEligibility(PACK_BASE, ids, toBase, true);
+
+        assertEq(packMachine.getPackTokenTier(ids[0], PACK_BASE), 0);
     }
 }

@@ -159,5 +159,13 @@
     "packMachineFactory": "0x2Dd68af36e7001690d2c815B68103d7FA81E20D1",
     "buybackPool": "0x778e60808A37FAABD61446a4ed29C11fF6d64698",
     "deployedAt": "2026-07-07T08:00:38.103Z"
+  },
+  "PackBatcher": {
+    "proxy": "0x48cd1936186e0b69f82a5e9343338943597ab009",
+    "implementation": "0xe1EFe6eA13EEA2B8c2b62D221eC167a821851825",
+    "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
+    "packMachineFactory": "0x2Dd68af36e7001690d2c815B68103d7FA81E20D1",
+    "maxBatch": "20",
+    "deployedAt": "2026-08-05T16:38:47.825Z"
   }
 }

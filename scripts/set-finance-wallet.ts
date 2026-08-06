@@ -30,14 +30,13 @@ import { network } from "hardhat";
 import { getAddress, isAddress } from "viem";
 import { createInterface } from "node:readline/promises";
 import { readDeployments, saveDeployment } from "./lib/deployments.js";
+import { sleep } from "./lib/sleep.js";
 
 // ─── Parse FINANCE_WALLET ─────────────────────────────────────────────────────
 
 const rawWallet = process.env.FINANCE_WALLET;
 if (!rawWallet) {
-  console.error(
-    "Missing required env variable FINANCE_WALLET.",
-  );
+  console.error("Missing required env variable FINANCE_WALLET.");
   console.error(
     "Usage: FINANCE_WALLET=0x<addr> npx hardhat run scripts/set-finance-wallet.ts --network <net>",
   );
@@ -165,12 +164,12 @@ if (connection.networkConfig.type === "http") {
 // ─── Send transaction ─────────────────────────────────────────────────────────
 
 console.log(`\n[1/2] Calling setFinanceWallet(${newWallet})…`);
-const txHash = await config.write.setFinanceWallet(
-  [newWallet],
-  { account: callerClient.account },
-);
+const txHash = await config.write.setFinanceWallet([newWallet], {
+  account: callerClient.account,
+});
 const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 console.log(`  tx: ${txHash} (block ${receipt.blockNumber})`);
+await sleep(2000);
 
 if (receipt.status !== "success") {
   console.error(`Transaction reverted! Hash: ${txHash}`);

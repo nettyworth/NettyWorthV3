@@ -76,7 +76,7 @@
   },
   "BuybackPool": {
     "proxy": "0x60e0Ea52aD26EF5b5A6da2132587aD62d43AAa47",
-    "implementation": "0xedb6bfb2ef1b5acb5f502e387e63e3dfe2214c07",
+    "implementation": "0xb7c11e5d8ad4c215ff6a1359a080f7a8fa6b7719",
     "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
     "assetNFT": "0x2F7AFE6B9C272CAff83a3377afbaeD2C8901B865",
     "paymentToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -84,13 +84,20 @@
     "factory": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
     "defaultBuybackBps": 8000,
     "deployedAt": "2026-07-11T06:59:39.715Z",
-    "upgradedAt": "2026-07-13T05:03:33.010Z",
+    "upgradedAt": "2026-07-29T14:49:59.762Z",
     "upgradeHistory": [
       {
         "previousImplementation": "0x196B1e07E7B1359d2fF08026A187c83aC670a3Ea",
         "newImplementation": "0xedb6bfb2ef1b5acb5f502e387e63e3dfe2214c07",
         "upgradedAt": "2026-07-13T05:03:33.009Z",
         "txHash": "0xad79a25493e90992787f581690a033a9f778e0b8065e87dea303e4fcafd301ca",
+        "upgradeCalldata": "0x"
+      },
+      {
+        "previousImplementation": "0xEdb6BFb2EF1b5AcB5F502e387E63E3dFe2214c07",
+        "newImplementation": "0xb7c11e5d8ad4c215ff6a1359a080f7a8fa6b7719",
+        "upgradedAt": "2026-07-29T14:49:59.761Z",
+        "txHash": "0xd52b34ba85d03c99a478eeafbd95691db876fbf0742d5873fd02843f45c9f45f",
         "upgradeCalldata": "0x"
       }
     ],
@@ -309,5 +316,12 @@
       "txHash": "0x9489b841c16253a53857a80d11c229c2724985ecfc8d6d1fedb39795a4f57ee0",
       "revokedAt": "2026-07-27T10:01:05.406Z"
     }
-  ]
+  ],
+  "PackBatcher": {
+    "proxy": "0x2612B7e75913630aF05Fb8F56d5f9Bb18e8957Cd",
+    "implementation": "0xe1EFe6eA13EEA2B8c2b62D221eC167a821851825",
+    "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
+    "packMachineFactory": "0x2Dd68af36e7001690d2c815B68103d7FA81E20D1",
+    "deployedAt": "2026-08-05T16:35:16.442Z"
+  }
 }
