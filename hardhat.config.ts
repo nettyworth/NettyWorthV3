@@ -5,6 +5,32 @@ import "dotenv/config";
 
 export default defineConfig({
   plugins: [hardhatToolboxViemPlugin, HardhatContractSizer],
+  etherscan: {
+    apiKey: {
+      base: configVariable("BASESCAN_API_KEY"),
+      baseSepolia: configVariable("BASESCAN_API_KEY"),
+      sepolia: configVariable("ETHERSCAN_API_KEY"),
+      mainnet: configVariable("ETHERSCAN_API_KEY"),
+    },
+    customChains: [
+      {
+        network: "base",
+        chainId: 8453,
+        urls: {
+          apiURL: "https://api.basescan.org/api",
+          browserURL: "https://basescan.org",
+        },
+      },
+      {
+        network: "baseSepolia",
+        chainId: 84532,
+        urls: {
+          apiURL: "https://api-sepolia.basescan.org/api",
+          browserURL: "https://sepolia.basescan.org",
+        },
+      },
+    ],
+  },
   solidity: {
     profiles: {
       default: {

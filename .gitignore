@@ -35,3 +35,9 @@
 /snapshots
 .claude
 /asset-frontend/
+# macOS
+.DS_Store
+
+# Private ops tooling — nested git repo with its own private remote.
+# Contains one-off migration scripts, Safe transaction batches, and internal runbooks.
+scripts/ops/
