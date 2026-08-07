@@ -1073,6 +1073,9 @@ Deploys the `P2PTradeEscrow` implementation and ERC1967 proxy. `initialize(owner
 | `set-marketplace-lending-pool.ts` | Point the marketplace at the lending pool via `setLendingPool`; env: `MARKETPLACE_PROXY` (opt), `LENDING_POOL` (opt), `SKIP_CONFIRM` (opt) | `DEFAULT_ADMIN_ROLE` |
 | `set-pack-machine-implementation.ts` | Deploy new `PackMachine` logic + call `factory.setImplementation`; only new clones use the new logic — existing clones are unaffected | `DEFAULT_ADMIN_ROLE` |
 | `relink-buyback-pool.ts` | Deploy a fresh `BuybackPool` (new impl + proxy) and relink every existing PackMachine clone to it; use when ERC-7201 storage slot changed and in-place upgrade would corrupt state | `DEFAULT_ADMIN_ROLE` + `PACK_OPERATOR_ROLE` |
+| `transfer-ownership.ts` | Grant all protocol roles to a new owner + call `transferOwnership` on the Ownable2Step contracts; env: `NEW_OWNER` (required), `PERMISSION_MANAGER_PROXY` (opt). See *Ownership handoff* below | `DEFAULT_ADMIN_ROLE` (+ current owner of each Ownable2Step contract) |
+| `generate-safe-accept-ownership.ts` | *(read-only)* Emit a Safe Transaction Builder batch JSON of `acceptOwnership()` calls for the new Safe owner to import & execute; env: `SAFE_ADDRESS` (required) | — |
+| `review-ownership.ts` | *(read-only)* Enumerate every PermissionManager role + holders and `owner()`/`pendingOwner()` per Ownable2Step contract; env: `SAFE_ADDRESS` (opt), `WRITE_REPORT` (opt) | — |
 | `check-buyback-registration.ts` | *(read-only)* Report BuybackPool registration status and buyback rates for one or more PackMachine clones | — |
 | `check-lending-pool-config.ts` | *(read-only)* Print full `AssetLendingPool` / `AssetLendingPoolConfig` configuration; optionally inspect per-token appraisal + eligibility | — |
 | `check-pack-buyback.ts` | *(read-only)* Print `buybackPool` address and `buybackAllocationBps` for one or more pack IDs on a PackMachine clone | — |
@@ -1429,6 +1432,77 @@ CLONES=0x<clone1>,0x<clone2> \
 ```
 
 Saves the new `BuybackPool` entry to `deployments/<network>.json` after step 1 as a checkpoint — re-running with `BUYBACK_POOL=<new-address>` skips the deploy step and resumes at step 2.
+
+---
+
+### Ownership handoff (EOA → Gnosis Safe multisig)
+
+Three scripts move protocol authority from the deployer EOA to a Safe multisig. The protocol has two independent authority surfaces:
+
+- **PermissionManager roles** — `AccessControlEnumerable` grants (`DEFAULT_ADMIN_ROLE`, `MINTER_ROLE`, …). Granting is one-step: the Safe simply needs to be granted each role, then the old EOA revokes/renounces its own. No "accept" step.
+- **Ownable2Step contracts** — `AssetLendingPool`, `AssetLendingPoolConfig`, and `P2PTradeEscrow` use OpenZeppelin's two-step transfer. The old owner calls `transferOwnership(safe)` (sets `pendingOwner`), then the **new owner must call `acceptOwnership()` from its own key** before it takes effect.
+
+Recommended flow:
+
+```bash
+# 1. Snapshot current state (who holds what) before touching anything
+SAFE_ADDRESS=0x<multisig> WRITE_REPORT=1 \
+  npx hardhat run scripts/review-ownership.ts --network base
+
+# 2. Old EOA grants all roles to the Safe + calls transferOwnership(safe) on the Ownable2Step contracts
+NEW_OWNER=0x<multisig> \
+  npx hardhat run scripts/transfer-ownership.ts --network base
+
+# 3. Generate the Safe batch that calls acceptOwnership() on each Ownable2Step contract
+SAFE_ADDRESS=0x<multisig> \
+  npx hardhat run scripts/generate-safe-accept-ownership.ts --network base
+#    → import deployments/safe-accept-ownership.<network>.json into the Safe web app
+#      (Apps → Transaction Builder → import) and execute the batch from the multisig
+
+# 4. Confirm the handoff: owner() flipped to the Safe, Safe holds the roles, old EOA renounced
+SAFE_ADDRESS=0x<multisig> \
+  npx hardhat run scripts/review-ownership.ts --network base
+```
+
+> **Note:** `transfer-ownership.ts` grants roles to the Safe but does **not** revoke the old EOA's roles — do that separately (`grant-role.ts` + a manual `revokeRole`) once the Safe is verified working. Chainlink VRF subscription ownership on the coordinator is also separate (`requestSubscriptionOwnerTransfer` / `acceptSubscriptionOwnerTransfer`).
+
+#### `review-ownership.ts` — Audit current roles & owners *(read-only)*
+
+Enumerates every `PermissionManager` role and all of its current holders (via `getRoleMemberCount` / `getRoleMember`), and prints `owner()` / `pendingOwner()` for each deployed Ownable2Step contract. Holders are tagged `SAFE` / `caller/EOA`. Run it before and after a handoff to diff authority state.
+
+**Environment variables:**
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `SAFE_ADDRESS` | No | Multisig address; when set, holders/owners matching it are tagged `SAFE` |
+| `WRITE_REPORT` | No | When set (e.g. `1`), also writes `deployments/ownership-report.<network>.json` |
+| `PERMISSION_MANAGER_PROXY` | No | Override PermissionManager proxy; falls back to `deployments/<network>.json` |
+
+```bash
+npx hardhat run scripts/review-ownership.ts --network base
+
+# Tag a specific Safe and persist a JSON snapshot:
+SAFE_ADDRESS=0x<multisig> WRITE_REPORT=1 \
+  npx hardhat run scripts/review-ownership.ts --network base
+```
+
+#### `generate-safe-accept-ownership.ts` — Build the Safe accept-ownership batch *(read-only)*
+
+Emits a Safe **Transaction Builder** batch JSON with one `acceptOwnership()` call (`0x79ba5097`, no args) per deployed Ownable2Step contract. Makes no on-chain writes — it only reads state to verify and writes the JSON file. Skips contracts not deployed on the network, skips any the Safe already owns, and warns (but still includes) any whose `pendingOwner` isn't yet the Safe (i.e. `transfer-ownership.ts` hasn't run). Computes the Safe checksum so the file imports without a warning.
+
+**Environment variables:**
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `SAFE_ADDRESS` | Yes | The multisig that should be `pendingOwner` — stamped into the batch meta and used to verify on-chain |
+
+```bash
+SAFE_ADDRESS=0x<multisig> \
+  npx hardhat run scripts/generate-safe-accept-ownership.ts --network base
+# → writes deployments/safe-accept-ownership.<network>.json
+```
+
+Import the resulting file in the Safe web app (Apps → **Transaction Builder** → import), review that each row decodes as `acceptOwnership` on the correct contract, and execute the batch from the multisig.
 
 ---
 
