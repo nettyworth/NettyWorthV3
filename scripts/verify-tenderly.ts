@@ -274,10 +274,33 @@ const CONTRACT_META: Record<string, ContractMeta> = {
   //       ],
   //     }),
   // },
-  PackBatcher: {
-    sourcePath: "PackBatcher.sol",
-    contractName: "PackBatcher",
-    implCtorArgs: () => null, // no-arg constructor (not ERC-2771)
+  // PackBatcher: {
+  //   sourcePath: "PackBatcher.sol",
+  //   contractName: "PackBatcher",
+  //   implCtorArgs: () => null, // no-arg constructor (not ERC-2771)
+  //   proxyInitData: (e) =>
+  //     encodeFunctionData({
+  //       abi: [
+  //         {
+  //           type: "function",
+  //           name: "initialize",
+  //           inputs: [
+  //             { type: "address" }, // permissionManager
+  //             { type: "address" }, // factory
+  //           ],
+  //         },
+  //       ],
+  //       functionName: "initialize",
+  //       args: [
+  //         e.permissionManager as `0x${string}`,
+  //         e.packMachineFactory as `0x${string}`,
+  //       ],
+  //     }),
+  // },
+  AssetLendingPoolConfig: {
+    sourcePath: "AssetLendingPoolConfig.sol",
+    contractName: "AssetLendingPoolConfig",
+    implCtorArgs: () => null,
     proxyInitData: (e) =>
       encodeFunctionData({
         abi: [
@@ -285,77 +308,54 @@ const CONTRACT_META: Record<string, ContractMeta> = {
             type: "function",
             name: "initialize",
             inputs: [
-              { type: "address" }, // permissionManager
-              { type: "address" }, // factory
+              { type: "address" }, // initialOwner
+              { type: "address" }, // paymentToken
+              { type: "address" }, // assetNFT
+              { type: "uint256" }, // ltvBps
+              { type: "uint256" }, // lenderShareBps
+              { type: "uint256" }, // acquisitionWindow
+              { type: "uint256" }, // auctionWindow
+              { type: "address" }, // packMachineFactory
             ],
           },
         ],
         functionName: "initialize",
         args: [
-          e.permissionManager as `0x${string}`,
+          e.owner as `0x${string}`,
+          e.paymentToken as `0x${string}`,
+          e.assetNFT as `0x${string}`,
+          BigInt(e?.ltvBps ?? "5000"),
+          BigInt(e?.lenderShareBps ?? "8000"),
+          BigInt(e?.acquisitionWindow ?? String(24 * 3600)),
+          BigInt(e?.auctionWindow ?? String(7 * 24 * 3600)),
           e.packMachineFactory as `0x${string}`,
         ],
       }),
   },
-  // AssetLendingPoolConfig: {
-  //   sourcePath: "AssetLendingPoolConfig.sol",
-  //   contractName: "AssetLendingPoolConfig",
-  //   implCtorArgs: () => null,
-  //   proxyInitData: (e) =>
-  //     encodeFunctionData({
-  //       abi: [
-  //         {
-  //           type: "function",
-  //           name: "initialize",
-  //           inputs: [
-  //             { type: "address" }, // initialOwner
-  //             { type: "address" }, // paymentToken
-  //             { type: "address" }, // assetNFT
-  //             { type: "uint256" }, // ltvBps
-  //             { type: "uint256" }, // lenderShareBps
-  //             { type: "uint256" }, // acquisitionWindow
-  //             { type: "uint256" }, // auctionWindow
-  //             { type: "address" }, // packMachineFactory
-  //           ],
-  //         },
-  //       ],
-  //       functionName: "initialize",
-  //       args: [
-  //         e.owner as `0x${string}`,
-  //         e.paymentToken as `0x${string}`,
-  //         e.assetNFT as `0x${string}`,
-  //         BigInt(e?.ltvBps ?? "5000"),
-  //         BigInt(e?.lenderShareBps ?? "8000"),
-  //         BigInt(e?.acquisitionWindow ?? String(24 * 3600)),
-  //         BigInt(e?.auctionWindow ?? String(7 * 24 * 3600)),
-  //         e.packMachineFactory as `0x${string}`,
-  //       ],
-  //     }),
-  // },
-  // AssetLendingPool: {
-  //   sourcePath: "AssetLendingPool.sol",
-  //   contractName: "AssetLendingPool",
-  //   implCtorArgs: () => null,
-  //   linkedLibraries: (e): Record<string, string> =>
-  //     e.lendingLib
-  //       ? { "contracts/lib/LendingLib.sol:LendingLib": e.lendingLib }
-  //       : {},
-  //   proxyInitData: (e) =>
-  //     encodeFunctionData({
-  //       abi: [
-  //         {
-  //           type: "function",
-  //           name: "initialize",
-  //           inputs: [
-  //             { type: "address" }, // initialOwner
-  //             { type: "address" }, // config (AssetLendingPoolConfig proxy)
-  //           ],
-  //         },
-  //       ],
-  //       functionName: "initialize",
-  //       args: [e.owner as `0x${string}`, e.config as `0x${string}`],
-  //     }),
-  // },
+  AssetLendingPool: {
+    sourcePath: "AssetLendingPool.sol",
+    contractName: "AssetLendingPool",
+    implCtorArgs: () => null,
+    linkedLibraries: (e): Record<string, string> =>
+      e.lendingLib
+        ? { "contracts/lib/LendingLib.sol:LendingLib": e.lendingLib }
+        : {},
+    proxyInitData: (e) =>
+      encodeFunctionData({
+        abi: [
+          {
+            type: "function",
+            name: "initialize",
+            inputs: [
+              { type: "address" }, // initialOwner
+              { type: "address" }, // config (AssetLendingPoolConfig proxy)
+            ],
+          },
+        ],
+        functionName: "initialize",
+        args: [e.owner as `0x${string}`, e.config as `0x${string}`],
+      }),
+  },
   // FeeController: {
   //   sourcePath: "FeeController.sol",
   //   contractName: "FeeController",

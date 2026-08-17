@@ -20,10 +20,10 @@
  */
 
 import { network } from "hardhat";
-import { getAddress, toFunctionSelector, keccak256, toBytes } from "viem";
-import { writeFile, rename, mkdir } from "node:fs/promises";
-import { readDeployments, getDeploymentPath } from "./lib/deployments.js";
+import { getAddress, toFunctionSelector } from "viem";
+import { readDeployments } from "./lib/deployments.js";
 import { OWNABLE_CONTRACTS } from "./lib/ownership.js";
+import { buildBatch, writeBatch, type SafeTx } from "./lib/safe-batch.js";
 
 // ─── acceptOwnership() selector (Ownable2StepUpgradeable, no args) ────────────
 const ACCEPT_OWNERSHIP_DATA = toFunctionSelector("acceptOwnership()"); // 0x79ba5097
@@ -53,63 +53,6 @@ const chainId = await publicClient.getChainId();
 
 // ─── Load deployments ─────────────────────────────────────────────────────────
 const deploymentData = await readDeployments(connection.networkName);
-
-// ─── Safe Transaction Builder types ───────────────────────────────────────────
-type SafeTx = {
-  to: `0x${string}`;
-  value: string;
-  data: `0x${string}`;
-  contractMethod: {
-    inputs: never[];
-    name: string;
-    payable: boolean;
-  };
-  contractInputsValues: null;
-};
-
-type SafeBatch = {
-  version: string;
-  chainId: string;
-  createdAt: number;
-  meta: {
-    name: string;
-    description: string;
-    txBuilderVersion: string;
-    createdFromSafeAddress: `0x${string}`;
-    createdFromOwnerAddress: string;
-    checksum?: `0x${string}`;
-  };
-  transactions: SafeTx[];
-};
-
-/**
- * Reimplements the Safe Transaction Builder `calculateChecksum`: serialize the
- * batch with sorted keys (meta.name nulled), then keccak256 over UTF-8 bytes.
- * Matches safe-react so the app imports the file without a checksum warning.
- */
-function serializeJSONObject(json: unknown): string {
-  if (Array.isArray(json)) {
-    return `[${json.map((el) => serializeJSONObject(el)).join(",")}]`;
-  }
-  if (typeof json === "object" && json !== null) {
-    const obj = json as Record<string, unknown>;
-    const keys = Object.keys(obj).sort();
-    let acc = `{${JSON.stringify(keys)}`;
-    for (const key of keys) {
-      acc += `${serializeJSONObject(obj[key])},`;
-    }
-    return `${acc}}`;
-  }
-  return `${JSON.stringify(json)}`;
-}
-
-function calculateChecksum(batch: SafeBatch): `0x${string}` {
-  const serialized = serializeJSONObject({
-    ...batch,
-    meta: { ...batch.meta, name: null },
-  });
-  return keccak256(toBytes(serialized));
-}
 
 // ─── Build one acceptOwnership() tx per deployed Ownable2Step contract ─────────
 const transactions: SafeTx[] = [];
@@ -174,32 +117,20 @@ if (transactions.length === 0) {
 }
 
 // ─── Assemble the batch ────────────────────────────────────────────────────────
-// createdAt: Date.now() is fine here (this is a plain node script, not a
-// deterministic workflow). It is informational metadata only.
-const batch: SafeBatch = {
-  version: "1.0",
-  chainId: String(chainId),
-  createdAt: Date.now(),
-  meta: {
-    name: `Accept NettyWorth ownership (${connection.networkName})`,
-    description: `acceptOwnership() for ${included.map((i) => i.key).join(", ")}`,
-    txBuilderVersion: "1.16.5",
-    createdFromSafeAddress: safeAddress,
-    createdFromOwnerAddress: "",
-  },
+const batch = buildBatch({
+  chainId,
+  safeAddress,
+  name: `Accept NettyWorth ownership (${connection.networkName})`,
+  description: `acceptOwnership() for ${included.map((i) => i.key).join(", ")}`,
   transactions,
-};
-batch.meta.checksum = calculateChecksum(batch);
+});
 
 // ─── Write output (atomic tmp-write + rename) ──────────────────────────────────
-const outPath = getDeploymentPath(connection.networkName).replace(
-  /[^/]+$/,
-  `safe-accept-ownership.${connection.networkName}.json`,
+const outPath = await writeBatch(
+  connection.networkName,
+  "safe-accept-ownership",
+  batch,
 );
-const tmpPath = `${outPath}.tmp`;
-await mkdir(outPath.replace(/\/[^/]+$/, ""), { recursive: true });
-await writeFile(tmpPath, JSON.stringify(batch, null, 2) + "\n");
-await rename(tmpPath, outPath);
 
 console.log("--------------------------------------");
 console.log(`Generated ${transactions.length} acceptOwnership() tx(s):`);

@@ -91,6 +91,7 @@ scripts/
   set-term-config.ts              # Create or update a loan term slot on AssetLendingPoolConfig (owner)
   set-pack-machine-implementation.ts  # Deploy new PackMachine logic + call factory.setImplementation; new clones use the new logic
   relink-buyback-pool.ts          # Deploy a fresh BuybackPool proxy + relink every PackMachine clone to it (idempotent)
+  analyze-pack-open-rates.ts      # Read-only: reconstruct realized tier distribution of pack opens from event logs → CSV
   check-buyback-registration.ts   # Read-only: report BuybackPool registration status and buyback config for PackMachine clones
   check-lending-pool-config.ts    # Read-only: print full AssetLendingPool / AssetLendingPoolConfig configuration
   check-pack-buyback.ts           # Read-only: print buybackPool address and buybackAllocationBps for one or more packs
@@ -1075,7 +1076,9 @@ Deploys the `P2PTradeEscrow` implementation and ERC1967 proxy. `initialize(owner
 | `relink-buyback-pool.ts` | Deploy a fresh `BuybackPool` (new impl + proxy) and relink every existing PackMachine clone to it; use when ERC-7201 storage slot changed and in-place upgrade would corrupt state | `DEFAULT_ADMIN_ROLE` + `PACK_OPERATOR_ROLE` |
 | `transfer-ownership.ts` | Grant all protocol roles to a new owner + call `transferOwnership` on the Ownable2Step contracts; env: `NEW_OWNER` (required), `PERMISSION_MANAGER_PROXY` (opt). See *Ownership handoff* below | `DEFAULT_ADMIN_ROLE` (+ current owner of each Ownable2Step contract) |
 | `generate-safe-accept-ownership.ts` | *(read-only)* Emit a Safe Transaction Builder batch JSON of `acceptOwnership()` calls for the new Safe owner to import & execute; env: `SAFE_ADDRESS` (required) | — |
+| `generate-safe-set-max-appraisal-age.ts` | *(read-only)* Emit a Safe Transaction Builder batch JSON calling `AssetLendingPoolConfig.setMaxAppraisalAge`; env: `SAFE_ADDRESS` (required), `MAX_APPRAISAL_AGE` (opt, seconds, default 30 days), `CONFIG_PROXY` (opt). See *Safe-routed admin operations* below | — (executed by the Safe, which must be `owner()`) |
 | `review-ownership.ts` | *(read-only)* Enumerate every PermissionManager role + holders and `owner()`/`pendingOwner()` per Ownable2Step contract; env: `SAFE_ADDRESS` (opt), `WRITE_REPORT` (opt) | — |
+| `analyze-pack-open-rates.ts` | *(read-only)* Reconstruct the realized tier distribution of pack opens from event logs and write one CSV row per drawn card; env: `PACK_MACHINE` (opt), `LOGS_RPC_URL` (opt but usually needed — see below), `FROM_BLOCK`/`TO_BLOCK` (opt), `OUT_FILE` (opt) | — |
 | `check-buyback-registration.ts` | *(read-only)* Report BuybackPool registration status and buyback rates for one or more PackMachine clones | — |
 | `check-lending-pool-config.ts` | *(read-only)* Print full `AssetLendingPool` / `AssetLendingPoolConfig` configuration; optionally inspect per-token appraisal + eligibility | — |
 | `check-pack-buyback.ts` | *(read-only)* Print `buybackPool` address and `buybackAllocationBps` for one or more pack IDs on a PackMachine clone | — |
@@ -1506,9 +1509,70 @@ Import the resulting file in the Safe web app (Apps → **Transaction Builder** 
 
 ---
 
+### Safe-routed admin operations
+
+Once the Safe owns `AssetLendingPoolConfig`, the ordinary EOA setter scripts (`set-lender-config.ts`, `set-term-config.ts`, …) can no longer be used — they hard-exit because `config.owner() != callerAddress`. Owner-gated config changes are instead delivered as Safe **Transaction Builder** batch JSON files, built with the shared helpers in [`scripts/lib/safe-batch.ts`](scripts/lib/safe-batch.ts) (batch assembly + the safe-react-compatible checksum).
+
+#### `generate-safe-set-max-appraisal-age.ts` — Set the appraisal staleness window *(read-only)*
+
+Emits a batch calling `AssetLendingPoolConfig.setMaxAppraisalAge(newMaxAge)`. `maxAppraisalAge` is the maximum age (in **seconds**) an appraisal may have before `borrow` / `borrowBundle` / `financeMarketplacePurchase` reject the collateral as stale; it defaults to 7 days at `initialize()`. Staleness is an origination-time gate only — widening it does not affect existing loans, repayment, or the default lifecycle.
+
+The script makes no on-chain writes. Before emitting anything it verifies `owner() == SAFE_ADDRESS` (and, if not, reports whether the Safe is merely `pendingOwner` and still needs to run the accept-ownership batch), short-circuits to a no-op if the target already matches, and warns on `0` (disables the check entirely) or values over 365 days. The setter itself validates nothing, so these guards exist only here.
+
+Transactions are emitted in **ABI mode** (`data: null` plus `contractMethod` / `contractInputsValues`) so signers review a decoded `setMaxAppraisalAge(<n>)` in the Safe UI rather than opaque hex. The equivalent raw calldata is printed to the console for cross-checking at signing time.
+
+**Environment variables:**
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `SAFE_ADDRESS` | Yes | The multisig that owns the config contract — stamped into the batch meta and verified on-chain |
+| `MAX_APPRAISAL_AGE` | No | Target age in **seconds**. Defaults to `2592000` (30 days). `0` disables the staleness check |
+| `CONFIG_PROXY` | No | Override the `AssetLendingPoolConfig` proxy; otherwise resolved from the deployments JSON, falling back to `AssetLendingPool.getConfig()` |
+
+```bash
+SAFE_ADDRESS=0x<multisig> \
+  npx hardhat run scripts/generate-safe-set-max-appraisal-age.ts --network base
+# → writes deployments/safe-set-max-appraisal-age.<network>.json
+
+# Explicit value (14 days):
+SAFE_ADDRESS=0x<multisig> MAX_APPRAISAL_AGE=1209600 \
+  npx hardhat run scripts/generate-safe-set-max-appraisal-age.ts --network base
+```
+
+Import the file in the Safe web app (Apps → **Transaction Builder** → import), confirm the decoded call and calldata match the script output, then collect signatures and execute. Verify afterwards with:
+
+```bash
+npx hardhat run scripts/check-lending-pool-config.ts --network base
+```
+
+Note the `MaxAppraisalAgeUpdated(oldMaxAge, newMaxAge)` event is emitted by the **config** proxy, not the pool.
+
+---
+
 ### Diagnostic / read-only scripts
 
 These scripts make no on-chain writes and require no special roles. They are safe to run against any network at any time.
+
+#### `analyze-pack-open-rates.ts`
+
+Reconstructs what pack opens actually paid out, per `(PackMachine, packId)`: how many cards were drawn in each tier, the realized percentage, and the declared `Pack.tierWeights` to compare against. Writes one CSV row per drawn card to `deployments/pack-draws.<network>.csv` and prints a per-pack recap.
+
+```bash
+# All clones known to the factory, full history since machine creation:
+LOGS_RPC_URL=https://mainnet.base.org \
+  npx hardhat run scripts/analyze-pack-open-rates.ts --network base
+
+# One machine, explicit block range, no CSV timestamp column:
+PACK_MACHINE=0x<addr> FROM_BLOCK=48500000 TO_BLOCK=latest SKIP_TIMESTAMPS=1 \
+  LOGS_RPC_URL=https://mainnet.base.org \
+  npx hardhat run scripts/analyze-pack-open-rates.ts --network base
+```
+
+**`LOGS_RPC_URL` is usually required.** The configured `BASE_RPC_URL` is a free Alchemy tier that caps `eth_getLogs` at a **10-block** range, which cannot scan months of history. `LOGS_RPC_URL` points only the log scan at a node with a usable range (`https://mainnet.base.org` allows 10,000); contract reads keep using the hardhat network. The scanner halves its chunk width on any rejection and backs off on rate limits, so it adapts to whatever the node allows.
+
+**How tiers are recovered.** `CardWon` carries neither the tier nor the `packId`. The `packId` comes from `PackOpened`, joined on `(machine, requestId)` — `PackOpened` is emitted *after* its `CardWon` logs, so grouping is by `requestId`, never log order. The tier comes from `BuybackPool.TokenRegistered`, emitted in the same transaction. When that log is absent (buyback pool inactive at the time), the script falls back to a live `BuybackPool.getTokenInfo` read and then to the clone's `getPackTokenTier`. The `tierSource` column records which path was used: `event` is exact, the reads are best-effort because they reflect current state. `PackTierRegistry` is deliberately unused — nothing calls `setTier`, so `getTier` returns 0 for every token.
+
+**Reading the output.** Observed rates are not expected to match declared weights exactly. The draw zeroes any tier whose pool is empty at fulfill time and renormalizes the rest over the active total, so a tier that ran dry pushes its probability mass onto the others. The recap prints current per-`(pack, tier)` pool sizes and flags empty tiers for exactly this reason.
 
 #### `check-buyback-registration.ts`
 

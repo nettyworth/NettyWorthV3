@@ -130,7 +130,7 @@
     ]
   },
   "AssetLendingPoolConfig": {
-    "proxy": "0x99e04cc8Ad25EA0d35a924293dA80a7c8ed2c9A1",
+    "proxy": "0x73E18959f780d51D601321F5A7817a353748bFB0",
     "implementation": "0x0f697205df567c2c2e3b7a00226c99e2bfb2668f",
     "owner": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
     "paymentToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -163,7 +163,9 @@
         "active": true,
         "updatedAt": "2026-07-11T15:38:07.665Z"
       }
-    ]
+    ],
+    "maxAppraisalAge": "0",
+    "maxAppraisalAgeUpdatedAt": "2026-08-13T16:25:25.275Z"
   },
   "AssetLendingPool": {
     "proxy": "0xcc60cfaf47fdd8b54e96846ad257395cfe58bc07",

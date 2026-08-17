@@ -1,0 +1,34 @@
+{
+  "version": "1.0",
+  "chainId": "8453",
+  "createdAt": 1786120435202,
+  "meta": {
+    "name": "Set maxAppraisalAge to 0 days (base)",
+    "description": "AssetLendingPoolConfig.setMaxAppraisalAge(0) on 0x99e04cc8Ad25EA0d35a924293dA80a7c8ed2c9A1 — was 604800",
+    "txBuilderVersion": "1.16.5",
+    "createdFromSafeAddress": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+    "createdFromOwnerAddress": "",
+    "checksum": "0x8c28c315ae1069cb6886fd8e8b60e6b808024f6a976e07a0d7a07213c9e062c9"
+  },
+  "transactions": [
+    {
+      "to": "0x99e04cc8Ad25EA0d35a924293dA80a7c8ed2c9A1",
+      "value": "0",
+      "data": null,
+      "contractMethod": {
+        "inputs": [
+          {
+            "internalType": "uint256",
+            "name": "newMaxAge",
+            "type": "uint256"
+          }
+        ],
+        "name": "setMaxAppraisalAge",
+        "payable": false
+      },
+      "contractInputsValues": {
+        "newMaxAge": "0"
+      }
+    }
+  ]
+}
