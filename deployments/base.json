@@ -133,7 +133,7 @@
   "AssetLendingPoolConfig": {
     "proxy": "0x99e04cc8Ad25EA0d35a924293dA80a7c8ed2c9A1",
     "implementation": "0x0f697205df567c2c2e3b7a00226c99e2bfb2668f",
-    "owner": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+    "owner": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
     "paymentToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     "assetNFT": "0x2F7AFE6B9C272CAff83a3377afbaeD2C8901B865",
     "packMachineFactory": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
@@ -169,7 +169,7 @@
   "AssetLendingPool": {
     "proxy": "0xcc60cfaf47fdd8b54e96846ad257395cfe58bc07",
     "implementation": "0x25e0e667354f4a87cd9ee4d1d31b929248b3fb68",
-    "owner": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+    "owner": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
     "config": "0x99e04cc8ad25ea0d35a924293da80a7c8ed2c9a1",
     "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
     "deployedAt": "2026-07-09T11:13:02.576Z",
