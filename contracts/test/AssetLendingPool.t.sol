@@ -13,6 +13,8 @@ import {AssetNFT} from "../AssetNFT.sol";
 import {PermissionManager} from "../PermissionManager.sol";
 import {Roles} from "../lib/Roles.sol";
 import {MockERC20} from "../test-helpers/MockERC20.sol";
+import {FeeController} from "../FeeController.sol";
+import {MockMarketplaceFeeSource} from "../test-helpers/MockMarketplaceFeeSource.sol";
 
 // Minimal mock PackMachine: accepts depositFromPool and pulls the NFT.
 contract MockPackMachine {
@@ -71,10 +73,19 @@ contract AssetLendingPoolTest is Test {
     uint256 internal sellerPk;
     address internal seller;
 
-    // Fake marketplace address: used only for the domain separator in pool finance tests.
-    // The pool's setMarketplace is called with this address in setUp so the pool can
+    // Stand-in marketplace: supplies the domain separator for pool finance tests AND the
+    // FeeController + treasury that financeMarketplacePurchase reads to price the sale.
+    // The pool's setMarketplace is called with its address in setUp so the pool can
     // verify listing signatures signed against this domain.
-    address internal fakeMarketplace = makeAddr("fakeMarketplace");
+    MockMarketplaceFeeSource internal mockMarketplace;
+    address internal fakeMarketplace;
+    FeeController internal feeController;
+    address internal treasury = makeAddr("treasury");
+
+    // ERC-2981 receiver configured on AssetNFT below (2.5% default royalty).
+    address internal royaltyReceiver = makeAddr("royalty");
+    uint256 internal constant ROYALTY_BPS = 250;
+    uint256 internal constant COLLECTIBLE_FEE_BPS = 500; // FeeController default (5%)
 
     // financeWallet: funded USDC address used by acquireDefaultedAsset to repay defaulted loans.
     address internal financeWallet = makeAddr("financeWallet");
@@ -122,8 +133,8 @@ contract AssetLendingPoolTest is Test {
                     "NettyWorth Assets",
                     "NWA",
                     "ipfs://contract",
-                    makeAddr("royalty"),
-                    250
+                    royaltyReceiver,
+                    uint96(ROYALTY_BPS)
                 )
             )
         );
@@ -133,6 +144,20 @@ contract AssetLendingPoolTest is Test {
         mockMachine = new MockPackMachine(address(assetNFT));
         mockFactory = new MockPackMachineFactory();
         mockFactory.register(address(mockMachine));
+
+        // FeeController + stand-in marketplace. financeMarketplacePurchase reads the collectible
+        // fee and treasury through the marketplace address, so it must be a real contract.
+        FeeController feeControllerImpl = new FeeController();
+        ERC1967Proxy feeControllerProxy = new ERC1967Proxy(
+            address(feeControllerImpl),
+            abi.encodeCall(FeeController.initialize, (address(pm), treasury))
+        );
+        feeController = FeeController(address(feeControllerProxy));
+        mockMarketplace = new MockMarketplaceFeeSource(
+            address(feeController),
+            treasury
+        );
+        fakeMarketplace = address(mockMarketplace);
 
         // AssetLendingPoolConfig (24h acquisition window, 7d auction window, 80% lender share)
         AssetLendingPoolConfig configImpl = new AssetLendingPoolConfig();
@@ -168,7 +193,8 @@ contract AssetLendingPoolTest is Test {
         // Grant STATE_MANAGER_ROLE to pool so it can call batchSetAssetState
         vm.startPrank(admin);
         pm.grantRole(pm.STATE_MANAGER_ROLE(), address(pool));
-        // Set marketplace on config so financeMarketplacePurchase can verify listing signatures.
+        // Set marketplace on config so financeMarketplacePurchase can verify listing signatures
+        // and read the FeeController + treasury used to price the sale.
         config.setMarketplace(fakeMarketplace);
         // Set financeWallet on config for acquireDefaultedAsset
         config.setFinanceWallet(financeWallet);
@@ -939,12 +965,25 @@ contract AssetLendingPoolTest is Test {
         vm.stopPrank();
 
         uint256 sellerBefore = usdc.balanceOf(seller);
+        uint256 treasuryBefore = usdc.balanceOf(treasury);
+        uint256 royaltyBefore = usdc.balanceOf(royaltyReceiver);
 
         vm.prank(borrower);
         pool.financeMarketplacePurchase(listing, sig, depositAmount, 0);
 
-        // Seller received full listing price (500 deposit + 500 loan)
-        assertEq(usdc.balanceOf(seller), sellerBefore + listingPrice);
+        // Sale fees match a direct marketplace buy: 5% collectible fee + 2.5% royalty come
+        // out of the gross, so the seller nets the remainder — not the full listing price.
+        uint256 expectedFee = (listingPrice * COLLECTIBLE_FEE_BPS) / 10_000;
+        uint256 expectedRoyalty = (listingPrice * ROYALTY_BPS) / 10_000;
+        assertEq(usdc.balanceOf(treasury), treasuryBefore + expectedFee);
+        assertEq(
+            usdc.balanceOf(royaltyReceiver),
+            royaltyBefore + expectedRoyalty
+        );
+        assertEq(
+            usdc.balanceOf(seller),
+            sellerBefore + listingPrice - expectedFee - expectedRoyalty
+        );
         // NFT in pool, Loaned state
         assertEq(assetNFT.ownerOf(tokenId), address(pool));
         assertEq(
@@ -958,7 +997,7 @@ contract AssetLendingPoolTest is Test {
         assertTrue(pool.getLoan(loanIds[0]).isMarketplaceFinanced);
     }
 
-    function test_FinanceMarketplace_SellerReceivesListingPriceNotAppraisal()
+    function test_FinanceMarketplace_SellerProceedsBasedOnListingPriceNotAppraisal()
         public
     {
         uint256 tokenId = _mintNFT(seller);
@@ -992,11 +1031,126 @@ contract AssetLendingPoolTest is Test {
         vm.prank(borrower);
         pool.financeMarketplacePurchase(listing, sig, depositAmount, 0);
 
-        // Seller receives full listing price, not the appraisal value
-        assertEq(usdc.balanceOf(seller), sellerBefore + listingPrice);
+        // Fees are priced off the listing price, not the appraisal value
+        uint256 expectedFee = (listingPrice * COLLECTIBLE_FEE_BPS) / 10_000;
+        uint256 expectedRoyalty = (listingPrice * ROYALTY_BPS) / 10_000;
+        assertEq(
+            usdc.balanceOf(seller),
+            sellerBefore + listingPrice - expectedFee - expectedRoyalty
+        );
         // Loan capped at LTV × appraisal
         uint256 loanId = pool.getBorrowerLoans(borrower)[0];
         assertEq(pool.getLoan(loanId).principal, loanAmount);
+    }
+
+    /// @dev Buyer outlay is unchanged by the fee split: they still pay only the deposit
+    ///      (origination fee is 0 by default), and the pool still lends exactly loanAmount.
+    function test_FinanceMarketplace_BuyerOutlayUnchangedByFees() public {
+        uint256 tokenId = _mintNFT(seller);
+        _appraise(tokenId);
+        vm.prank(seller);
+        assetNFT.setApprovalForAll(address(pool), true);
+
+        uint256 depositAmount = 500e6;
+        INettyWorthMarketplace.SignedListing memory listing = _makeListing(
+            tokenId,
+            APPRAISAL_VALUE,
+            1,
+            block.timestamp + 1 days
+        );
+        bytes memory sig = _signListing(listing, sellerPk);
+
+        usdc.mint(borrower, depositAmount);
+        vm.prank(borrower);
+        usdc.approve(address(pool), depositAmount);
+
+        uint256 buyerBefore = usdc.balanceOf(borrower);
+        uint256 poolBefore = usdc.balanceOf(address(pool));
+
+        vm.prank(borrower);
+        pool.financeMarketplacePurchase(listing, sig, depositAmount, 0);
+
+        // Buyer paid exactly the deposit; the pool's net outflow is exactly the loan
+        // principal, which also proves nothing from the deposit is stranded in the pool.
+        assertEq(usdc.balanceOf(borrower), buyerBefore - depositAmount);
+        assertEq(
+            usdc.balanceOf(address(pool)),
+            poolBefore - (APPRAISAL_VALUE - depositAmount)
+        );
+    }
+
+    function test_FinanceMarketplace_CollectibleFeeDisabled() public {
+        vm.prank(admin);
+        feeController.setCollectibleFeesEnabled(false);
+
+        uint256 tokenId = _mintNFT(seller);
+        _appraise(tokenId);
+        vm.prank(seller);
+        assetNFT.setApprovalForAll(address(pool), true);
+
+        uint256 depositAmount = 500e6;
+        INettyWorthMarketplace.SignedListing memory listing = _makeListing(
+            tokenId,
+            APPRAISAL_VALUE,
+            1,
+            block.timestamp + 1 days
+        );
+        bytes memory sig = _signListing(listing, sellerPk);
+
+        usdc.mint(borrower, depositAmount);
+        vm.prank(borrower);
+        usdc.approve(address(pool), depositAmount);
+
+        uint256 sellerBefore = usdc.balanceOf(seller);
+        uint256 treasuryBefore = usdc.balanceOf(treasury);
+
+        vm.prank(borrower);
+        pool.financeMarketplacePurchase(listing, sig, depositAmount, 0);
+
+        // Fee disabled → treasury untouched; royalty still paid, seller nets the rest.
+        assertEq(usdc.balanceOf(treasury), treasuryBefore);
+        uint256 expectedRoyalty = (APPRAISAL_VALUE * ROYALTY_BPS) / 10_000;
+        assertEq(
+            usdc.balanceOf(seller),
+            sellerBefore + APPRAISAL_VALUE - expectedRoyalty
+        );
+    }
+
+    /// @dev A collection with no royalty receiver must not brick the sale (try/catch path).
+    function test_FinanceMarketplace_NoRoyaltyReceiver() public {
+        vm.prank(admin);
+        assetNFT.deleteDefaultRoyalty();
+
+        uint256 tokenId = _mintNFT(seller);
+        _appraise(tokenId);
+        vm.prank(seller);
+        assetNFT.setApprovalForAll(address(pool), true);
+
+        uint256 depositAmount = 500e6;
+        INettyWorthMarketplace.SignedListing memory listing = _makeListing(
+            tokenId,
+            APPRAISAL_VALUE,
+            1,
+            block.timestamp + 1 days
+        );
+        bytes memory sig = _signListing(listing, sellerPk);
+
+        usdc.mint(borrower, depositAmount);
+        vm.prank(borrower);
+        usdc.approve(address(pool), depositAmount);
+
+        uint256 sellerBefore = usdc.balanceOf(seller);
+        uint256 royaltyBefore = usdc.balanceOf(royaltyReceiver);
+
+        vm.prank(borrower);
+        pool.financeMarketplacePurchase(listing, sig, depositAmount, 0);
+
+        uint256 expectedFee = (APPRAISAL_VALUE * COLLECTIBLE_FEE_BPS) / 10_000;
+        assertEq(usdc.balanceOf(royaltyReceiver), royaltyBefore);
+        assertEq(
+            usdc.balanceOf(seller),
+            sellerBefore + APPRAISAL_VALUE - expectedFee
+        );
     }
 
     function test_FinanceMarketplace_RepayGivesNFTToBuyer() public {

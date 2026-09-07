@@ -4,7 +4,9 @@ pragma solidity ^0.8.28;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {IERC2981} from "@openzeppelin/contracts/interfaces/IERC2981.sol";
 import {IAssetNFT} from "../interfaces/IAssetNFT.sol";
+import {IFeeController} from "../interfaces/IFeeController.sol";
 import {IAssetLendingPool} from "../interfaces/IAssetLendingPool.sol";
 import {IAssetLendingPoolConfig} from "../interfaces/IAssetLendingPoolConfig.sol";
 import {INettyWorthMarketplace} from "../interfaces/INettyWorthMarketplace.sol";
@@ -97,6 +99,13 @@ library LendingLib {
         uint256 depositAmount,
         uint256 loanAmount
     );
+    event FinancedSaleFeesPaid(
+        uint256 indexed loanId,
+        uint256 collectibleFee,
+        uint256 royalty,
+        address royaltyReceiver,
+        uint256 sellerProceeds
+    );
 
     // =========================================================================
     // Errors — mirrored subset used inside this library
@@ -127,6 +136,23 @@ library LendingLib {
     error AssetLendingPool__ListingPaymentTokenMismatch();
     error AssetLendingPool__ListingNonceUsed();
     error AssetLendingPool__InvalidSignature();
+    error AssetLendingPool__InsufficientReceived(
+        uint256 expected,
+        uint256 actual
+    );
+
+    // =========================================================================
+    // Internal types
+    // =========================================================================
+
+    /// @dev Sale-proceeds breakdown for a financed marketplace purchase. Grouped in a struct
+    ///      so financeMarketplacePurchase stays under the stack limit.
+    struct SaleSplit {
+        uint256 collectibleFee;
+        uint256 royalty;
+        address royaltyReceiver;
+        uint256 sellerProceeds;
+    }
 
     // =========================================================================
     // Public entry points — DELEGATECALL dispatch
@@ -261,6 +287,13 @@ library LendingLib {
             revert AssetLendingPool__ActiveLoanExists();
         }
 
+        SaleSplit memory split = _computeSaleSplit(
+            marketplace,
+            listing.collection,
+            tokenId,
+            purchasePrice
+        );
+
         // --- Execute atomic purchase + loan origination ---
         $.assetNFT.transferFrom(listing.seller, address(this), tokenId);
 
@@ -268,17 +301,89 @@ library LendingLib {
         ids[0] = tokenId;
         uint256 loanId = _originateLoan($, sender, ids, loanAmount, termId, true);
 
-        // Buyer deposit -> seller, pool loan -> seller.
-        $.paymentToken.safeTransferFrom(sender, listing.seller, depositAmount);
-        $.paymentToken.safeTransfer(listing.seller, loanAmount);
+        // Pull the buyer's deposit into the pool so fee/royalty/seller can be fanned out from
+        // one balance. Balance-delta guard mirrors the marketplace's fee-on-transfer check.
+        uint256 balBefore = $.paymentToken.balanceOf(address(this));
+        $.paymentToken.safeTransferFrom(sender, address(this), depositAmount);
+        uint256 received = $.paymentToken.balanceOf(address(this)) - balBefore;
+        if (received < depositAmount) {
+            revert AssetLendingPool__InsufficientReceived(
+                depositAmount,
+                received
+            );
+        }
+
+        // depositAmount + loanAmount == purchasePrice == fee + royalty + sellerProceeds, so the
+        // pool's net outflow of its own liquidity is still exactly loanAmount.
+        if (split.collectibleFee > 0) {
+            $.paymentToken.safeTransfer(
+                INettyWorthMarketplace(marketplace).treasury(),
+                split.collectibleFee
+            );
+        }
+        if (split.royalty > 0 && split.royaltyReceiver != address(0)) {
+            $.paymentToken.safeTransfer(split.royaltyReceiver, split.royalty);
+        }
+        $.paymentToken.safeTransfer(listing.seller, split.sellerProceeds);
 
         // Origination fee pulled from buyer on top of deposit.
-        uint256 fee = (loanAmount * $.loans[loanId].originationFeeBpsSnapshot) / BPS;
+        uint256 fee =
+            (loanAmount * $.loans[loanId].originationFeeBpsSnapshot) / BPS;
         if (fee > 0) {
             $.paymentToken.safeTransferFrom(sender, cfg.feeWallet(), fee);
         }
 
-        emit MarketplacePurchaseFinanced(loanId, sender, tokenId, depositAmount, loanAmount);
+        emit MarketplacePurchaseFinanced(
+            loanId,
+            sender,
+            tokenId,
+            depositAmount,
+            loanAmount
+        );
+        emit FinancedSaleFeesPaid(
+            loanId,
+            split.collectibleFee,
+            split.royalty,
+            split.royaltyReceiver,
+            split.sellerProceeds
+        );
+    }
+
+    /// @dev Computes the collectible fee / ERC-2981 royalty / seller-proceeds split for a
+    ///      financed purchase, mirroring NettyWorthMarketplace._executeSale steps 2-3 and its
+    ///      royalty cap. FeeController and treasury are read from the marketplace so both
+    ///      purchase routes always price the same listing identically.
+    function _computeSaleSplit(
+        address marketplace,
+        address collection,
+        uint256 tokenId,
+        uint256 gross
+    ) private view returns (SaleSplit memory split) {
+        (split.collectibleFee, ) = IFeeController(
+            INettyWorthMarketplace(marketplace).feeController()
+        ).getCollectibleFee(gross);
+
+        // A non-compliant or reverting collection must not brick the sale.
+        try IERC2981(collection).royaltyInfo(tokenId, gross) returns (
+            address receiver,
+            uint256 amount
+        ) {
+            if (receiver != address(0)) {
+                split.royaltyReceiver = receiver;
+                split.royalty = amount;
+            }
+        } catch {} // solhint-disable-line no-empty-blocks
+
+        // Cap the royalty so fee + royalty can never exceed gross. Priority matches the
+        // marketplace: collectible fee first, royalty takes the residual, seller the rest.
+        if (split.collectibleFee < gross) {
+            uint256 maxRoyalty = gross - split.collectibleFee;
+            if (split.royalty > maxRoyalty) split.royalty = maxRoyalty;
+        } else {
+            split.royalty = 0;
+        }
+
+        split.sellerProceeds = gross - split.collectibleFee - split.royalty;
     }
 
     /// @notice Execute the loan repayment / settlement flow.

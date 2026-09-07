@@ -160,6 +160,17 @@ interface IAssetLendingPool {
         uint256 loanAmount
     );
 
+    /// @notice Emitted alongside MarketplacePurchaseFinanced with the sale-proceeds breakdown.
+    /// @dev Mirrors the fee/royalty split of NettyWorthMarketplace's SaleExecuted so both
+    ///      purchase routes are reconcilable by indexers.
+    event FinancedSaleFeesPaid(
+        uint256 indexed loanId,
+        uint256 collectibleFee,
+        uint256 royalty,
+        address royaltyReceiver,
+        uint256 sellerProceeds
+    );
+
     /// @notice Emitted when a seller revokes an unused marketplace-finance nonce (H010 fix).
     event FinanceNonceCancelled(address indexed seller, uint256 indexed nonce);
 
@@ -271,6 +282,12 @@ interface IAssetLendingPool {
     error AssetLendingPool__InvalidSeller();
     /// @dev Thrown by financeMarketplacePurchase when listing.buyer is set and != msg.sender (H009 fix).
     error AssetLendingPool__NotIntendedBuyer();
+    /// @dev Thrown by financeMarketplacePurchase when a fee-on-transfer payment token delivers
+    ///      less than the requested deposit, which would leave the fee split underfunded.
+    error AssetLendingPool__InsufficientReceived(
+        uint256 expected,
+        uint256 actual
+    );
 
     // =========================================================================
     // Borrower functions
@@ -319,10 +336,10 @@ interface IAssetLendingPool {
 
     /// @notice Returns true if a seller's finance nonce has been consumed (by a successful
     ///         financeMarketplacePurchase) or cancelled (by cancelFinanceNonce).
-    function isFinanceNonceUsed(address seller, uint256 nonce)
-        external
-        view
-        returns (bool);
+    function isFinanceNonceUsed(
+        address seller,
+        uint256 nonce
+    ) external view returns (bool);
 
     function repay(uint256 loanId) external;
 
