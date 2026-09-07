@@ -814,6 +814,16 @@ contract NettyWorthMarketplace is
         return _hashTypedDataV4(_hashAuction(auction));
     }
 
+    /// @inheritdoc INettyWorthMarketplace
+    function feeController() external view override returns (address) {
+        return address(_getMarketplaceStorage().feeController);
+    }
+
+    /// @inheritdoc INettyWorthMarketplace
+    function treasury() external view override returns (address) {
+        return _getMarketplaceStorage().treasury;
+    }
+
     // =========================================================================
     // Internal: sale execution core
     // =========================================================================

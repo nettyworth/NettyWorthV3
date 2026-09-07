@@ -312,4 +312,15 @@ interface INettyWorthMarketplace {
     function hashAuction(
         SignedAuction calldata auction
     ) external view returns (bytes32);
+
+    /// @notice FeeController used to price the collectible fee on every sale.
+    /// @dev Read by AssetLendingPool.financeMarketplacePurchase so a financed purchase
+    ///      charges exactly the same fee as a direct buy — one source of truth.
+    function feeController() external view returns (address);
+
+    /// @notice Platform treasury that receives collectible fees.
+    /// @dev Read by AssetLendingPool.financeMarketplacePurchase for the same reason.
+    ///      Note this is the marketplace's own treasury, which may differ from
+    ///      IFeeController.protocolFeeRecipient().
+    function treasury() external view returns (address);
 }
