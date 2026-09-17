@@ -103,7 +103,9 @@
         "txHash": "0xad79a25493e90992787f581690a033a9f778e0b8065e87dea303e4fcafd301ca",
         "upgradeCalldata": "0x"
       }
-    ]
+    ],
+    "buybackFeeBps": "500",
+    "buybackFeeUpdatedAt": "2026-07-27T08:49:01.309Z"
   },
   "PromoCodeRegistry": {
     "proxy": "0x8239fcbda24a38d77f046575738e98a24f8ea64c",
@@ -215,6 +217,107 @@
       "startTime": "1783756735",
       "factory": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
       "createdAt": "2026-07-11T07:59:36.759Z"
+    }
+  ],
+  "OwnershipTransfers": [
+    {
+      "newOwner": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+      "transferredBy": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
+      "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
+      "rolesGranted": [
+        {
+          "role": "MINTER_ROLE",
+          "roleHash": "0x9f2df0fed2c77648de5860a4cc508cd0818c85b8b8a1ab4ceeef8d981c8956a6",
+          "txHash": "0x90fb08323315c0ead266e0c6c1e49d9efc601bf08e636a2bb90bbace6bc95993"
+        },
+        {
+          "role": "BURNER_ROLE",
+          "roleHash": "0x3c11d16cbaffd01df69ce1c404f6340ee057498f5f00246190ea54220576a848",
+          "txHash": "0xade89f1833c0c6c197f02bb2b879f37bf95595949649773207d83c5687350627"
+        },
+        {
+          "role": "STATE_MANAGER_ROLE",
+          "roleHash": "0xecfee88fcfa2ef792f0f3299f6260bd7d97f69a4e460612fb6373f878eea12e8",
+          "txHash": "0x5cc2dd3adb6eb1f7e0a3f7c395d0808e99b9ad7a80bf2b1fb0fa9a047319abdd"
+        },
+        {
+          "role": "URI_SETTER_ROLE",
+          "roleHash": "0x7804d923f43a17d325d77e781528e0793b2edd9890ab45fc64efd7b4b427744c",
+          "txHash": "0x8b562c9a77257be52d0985f24707b23366fce21813858772243cd50e8131e486"
+        },
+        {
+          "role": "PAUSER_ROLE",
+          "roleHash": "0x65d7a28e3265b37a6474929f336521b332c1681b933f6cb9f3376673440d862a",
+          "txHash": "0x2f53df3e879fd7548cac3635c336e00120f45e373677a67feec6dba8907c2393"
+        },
+        {
+          "role": "UPGRADER_ROLE",
+          "roleHash": "0x189ab7a9244df0848122154315af71fe140f3db0fe014031783b0946b8c9d2e3",
+          "txHash": "0x3cf9a5e8a9496b2a60e2c7160b1b0f25ccce54c24e82e855047db87720604acd"
+        },
+        {
+          "role": "BLACKLIST_ROLE",
+          "roleHash": "0x22435ed027edf5f902dc0093fbc24cdb50c05b5fd5f311b78c67c1cbaff60e13",
+          "txHash": "0x7300d64efcd2d21659931a473103f2631f24f5b47b5a8f3664ee9a61d2e23396"
+        },
+        {
+          "role": "PACK_OPERATOR_ROLE",
+          "roleHash": "0xd897432901a0be67ce45a5b2c9ffd6ed1af3cdea9c5ccbdd176b3d6784f6cb0f",
+          "txHash": "0x4dfe650c7589b94bcac5c3013fd71fcbb8d5b9ef058fb19546921610a091d9f4"
+        },
+        {
+          "role": "BUYBACK_POOL_ROLE",
+          "roleHash": "0x7d61418e38dc1edd864562b32f2d63bfd8e232545ccffa330a367360691dd0ef",
+          "txHash": "0x78243994ce4d0dd085f74c3ee37af05eab877eb7d0007aea62039bde33c066b0"
+        },
+        {
+          "role": "MARKETPLACE_ROLE",
+          "roleHash": "0x0ea61da3a8a09ad801432653699f8c1860b1ae9d2ea4a141fadfd63227717bc8",
+          "txHash": "0xb52718c0ab70b20a9ace9776c6269387b52f7a478bce5c4f212297568a2a8fae"
+        }
+      ],
+      "rolesAlreadyHeld": [
+        "DEFAULT_ADMIN_ROLE"
+      ],
+      "ownableTransfers": [
+        {
+          "contract": "AssetLendingPool",
+          "proxy": "0xCc60cFaF47fdD8B54e96846aD257395CFe58BC07",
+          "status": "transferred",
+          "txHash": "0x5741e040538dbc9bf0126ab6842c927a2e5037f345efc27300ce62b74893d926"
+        },
+        {
+          "contract": "AssetLendingPoolConfig",
+          "proxy": "0x99e04cc8Ad25EA0d35a924293dA80a7c8ed2c9A1",
+          "status": "transferred",
+          "txHash": "0xbbfa9fe848f0e44ca9049ce379992942bc839cee271b5cdc4ac44cb32772f6e7"
+        },
+        {
+          "contract": "P2PTradeEscrow",
+          "proxy": "(not deployed)",
+          "status": "skipped_not_deployed",
+          "txHash": null
+        }
+      ],
+      "transferredAt": "2026-07-27T09:44:37.474Z"
+    }
+  ],
+  "RoleRevocations": [
+    {
+      "role": "STATE_MANAGER_ROLE",
+      "roleHash": "0xecfee88fcfa2ef792f0f3299f6260bd7d97f69a4e460612fb6373f878eea12e8",
+      "account": "0x6066CB78cD147546c9F2a103Ac95fE48F2A37ed9",
+      "revokedBy": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
+      "txHash": "0x9760c0c75065a4d010c2ea6a9b4808e3852ad5b25e04d5e96e430dbb5daed5a8",
+      "revokedAt": "2026-07-27T10:01:02.507Z"
+    },
+    {
+      "role": "STATE_MANAGER_ROLE",
+      "roleHash": "0xecfee88fcfa2ef792f0f3299f6260bd7d97f69a4e460612fb6373f878eea12e8",
+      "account": "0xf3ffABb652e3DCa54b28A3f273013B72B31f385e",
+      "revokedBy": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
+      "txHash": "0x9489b841c16253a53857a80d11c229c2724985ecfc8d6d1fedb39795a4f57ee0",
+      "revokedAt": "2026-07-27T10:01:05.406Z"
     }
   ]
 }
