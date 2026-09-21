@@ -6,11 +6,14 @@
  *        keccak256(abi.encodePacked(preSeed, blockHash)) and proof.seed = preSeed.
  *   node --experimental-strip-types scripts/vrf/prove-ffi.ts output <sk> <preSeed> <blockHash>
  *     -> abi.encode(uint256 output), the expected VRF output for that request.
+ *   node --experimental-strip-types scripts/vrf/prove-ffi.ts register <sk> <chainId> <coordinator>
+ *     -> abi.encode(VRF.Proof), the registerKey proof of possession (key-possession.ts).
  *
  * TEST TOOLING ONLY: the secret key is passed on the command line.
  */
 import { encodeAbiParameters } from "viem";
 import { proveForRequest, type VrfProof } from "./ecvrf.ts";
+import { proveKeyPossession } from "./key-possession.ts";
 
 const PROOF_ABI = [
   {
@@ -47,8 +50,12 @@ function encodeProof(p: VrfProof): string {
 
 const [mode, skArg, preSeedArg, blockHash] = process.argv.slice(2);
 if (!mode || !skArg || !preSeedArg || !blockHash) {
-  process.stderr.write("usage: prove-ffi.ts <prove|output> <sk> <preSeed> <blockHash>\n");
+  process.stderr.write("usage: prove-ffi.ts <prove|output> <sk> <preSeed> <blockHash> | register <sk> <chainId> <coordinator>\n");
   process.exit(2);
+}
+if (mode === "register") {
+  process.stdout.write(encodeProof(proveKeyPossession(BigInt(skArg), BigInt(preSeedArg), blockHash).proof));
+  process.exit(0);
 }
 const result = proveForRequest(BigInt(skArg), BigInt(preSeedArg), blockHash);
 if (mode === "prove") {

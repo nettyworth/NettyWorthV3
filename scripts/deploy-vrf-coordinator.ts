@@ -5,8 +5,10 @@
  *
  * The deployer key (BASE_PRIVATE_KEY) only pays gas: ownership goes straight to the Safe in
  * the constructor, so the deployer holds no power over the coordinator afterwards. The
- * public key and router authorization are set by the Safe afterwards via the Transaction
- * Builder batch produced by scripts/vrf/build-safe-payloads.ts.
+ * public key (with its proof of possession), router authorization and fulfiller allowlist are
+ * set by the Safe afterwards via the Transaction Builder batch produced by
+ * scripts/vrf/build-safe-payloads.ts. The deployment block (from the receipt) is recorded as
+ * deployedAtBlock for check-pending.ts.
  *
  * AUDIT GATE: refuses to run unless the git working tree is completely clean
  * (no modified, staged or untracked files) and HEAD is exactly AUDITED_COMMIT,
@@ -92,7 +94,17 @@ if (isLive) {
   if (answer.toLowerCase() !== "yes") process.exit(0);
 }
 
-const coordinator = await viem.deployContract("NettyVRFCoordinator", [owner]);
+// sendDeploymentTransaction (not deployContract) so the deployment block comes from the
+// receipt: check-pending.ts --coordinator scans from exactly that block (audit F-03).
+const { contract: coordinator, deploymentTransaction } = await viem.sendDeploymentTransaction(
+  "NettyVRFCoordinator",
+  [owner],
+);
+const receipt = await publicClient.waitForTransactionReceipt({ hash: deploymentTransaction.hash });
+if (receipt.status !== "success" || !receipt.contractAddress || getAddress(receipt.contractAddress) !== getAddress(coordinator.address)) {
+  console.error(`Deployment transaction ${deploymentTransaction.hash} did not create the coordinator. Refusing to continue.`);
+  process.exit(1);
+}
 if (isLive) await waitForCode(publicClient, coordinator.address);
 
 const onChainOwner = await coordinator.read.owner();
@@ -100,8 +112,8 @@ if (getAddress(onChainOwner) !== owner) {
   console.error(`Owner mismatch: expected ${owner}, got ${onChainOwner}`);
   process.exit(1);
 }
-const blockNumber = await publicClient.getBlockNumber();
-console.log(`NettyVRFCoordinator deployed at ${coordinator.address} (owner ${onChainOwner})`);
+const deployedAtBlock = receipt.blockNumber;
+console.log(`NettyVRFCoordinator deployed at ${coordinator.address} in block ${deployedAtBlock} (owner ${onChainOwner})`);
 
 // The runtime bytecode on chain must be exactly the artifact compiled from the
 // audited commit (the contract has no immutables, so this is a byte compare).
@@ -121,7 +133,8 @@ if (isLive) {
     owner,
     deployer: deployer.account.address,
     auditedCommit: head,
-    deployedAtBlock: blockNumber.toString(),
+    deployedAtBlock: deployedAtBlock.toString(),
+    deploymentTx: deploymentTransaction.hash,
     deployedAt: new Date().toISOString(),
     verifier: "@chainlink/contracts@1.1.0 src/v0.8/vrf/VRF.sol (MIT)",
   });
@@ -139,4 +152,11 @@ or, with the repo's usual forge flow:
 Then confirm https://basescan.org/address/${coordinator.address}#code shows the verified source and that it matches:
   git show ${head}:contracts/NettyVRFCoordinator.sol
 
-Next: node --experimental-strip-types scripts/vrf/build-safe-payloads.ts --coordinator ${coordinator.address} --pk-x <x> --pk-y <y>`);
+Next:
+  1. Proof of possession from the fulfiller's VRF key (reads Secrets Manager, prints public values only):
+     node --experimental-strip-types scripts/vrf/key-possession-proof.ts --coordinator ${coordinator.address}
+  2. Safe batches (keyHash must equal the "vrf fulfiller started" log line's keyHash):
+     node --experimental-strip-types scripts/vrf/build-safe-payloads.ts --coordinator ${coordinator.address} \\
+       --key-possession deployments/safe/vrf-staging/key-possession.json --fulfiller-key-hash <keyHash> --simulate
+  3. Drain / recovery checks scan from block ${deployedAtBlock}:
+     node --experimental-strip-types scripts/vrf/check-pending.ts --coordinator ${coordinator.address} --from-block ${deployedAtBlock}`);

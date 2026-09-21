@@ -36,15 +36,45 @@ interface IVRFConsumerRawFulfill {
 ///      the trust argument above depends on the fulfilment logic being immutable. Access
 ///      control is a plain Ownable2Step owner (the protocol Safe) rather than
 ///      PermissionManager so this contract has no dependency on the protocol it serves.
+///      Ownership cannot be renounced (that would freeze key rotation and router changes).
 ///
-///      Lifecycle of a request:
-///        Pending --fulfill(valid proof)--> Fulfilled            (callback succeeded)
-///        Pending --fulfill(valid proof)--> CallbackFailed       (callback reverted; words kept)
-///        CallbackFailed --retry()--------> Fulfilled            (callback succeeded)
-///      `fulfill` needs blockhash(requestBlock), readable for 256 blocks (~8.5 min on Base).
-///      A request not fulfilled in that window can never be proven; the user is made whole by
-///      PackMachine.adminForceRefundPendingOpen after 24 h. `retry` does not need the block
-///      hash (the randomness is already stored), so a CallbackFailed request stays deliverable.
+///      Lifecycle of a request (as in Chainlink VRF, a failed callback is terminal):
+///        Pending --fulfill(valid proof)--> Fulfilled   (callback succeeded)
+///        Pending --fulfill(valid proof)--> Failed      (callback reverted; terminal)
+///      A Failed request is never redelivered and its randomness is neither stored nor
+///      emitted. PackMachine draws the card from the words AND the prize pool at delivery,
+///      so letting anyone choose when fixed words are delivered would let them choose the
+///      card (audit F-01). The words of a Failed request are therefore discarded for good.
+///
+///      Who may fulfil: only allowlisted fulfillers (`setFulfiller`, owner-managed). Only the
+///      VRF key holder can produce a proof, so permissionless submission gives no liveness
+///      benefit; it would only let a third party replay a proof leaked by a reverted fulfil
+///      transaction at a moment of its choosing (audit F-01, second trigger).
+///
+///      Verification window: `fulfill` needs the request block's hash. It uses `blockhash()`
+///      for the last 256 blocks and, beyond that, the EIP-2935 block-hash history contract,
+///      which serves the last 8191 blocks (~4.5 h on Base at 2 s blocks). A request not
+///      fulfilled within BLOCKHASH_WINDOW blocks can never be proven and stays Pending.
+///
+///      Settling a request that can no longer be delivered (Failed, or unfulfilled past the
+///      window) depends on the PackMachine behind the router, not on this contract:
+///        - a PackMachine that implements adminForceRefundPendingOpen (the production
+///          implementation) lets the admin refund the user 24 h after the request, with the
+///          machine paused;
+///        - the staging PackMachine implementation has no refund function. There the only
+///          recovery is the documented manual procedure (docs: VRF staging manual-recovery
+///          runbook), in which the Safe temporarily becomes the router's coordinator.
+///
+///      Randomness trust boundaries (audit F-05):
+///        - Reorgs: fulfilment needs only one block after the request (unsafe head on Base).
+///          If the request block is reorged, the request lands in a block with another hash
+///          and re-rolls; any words revealed on the abandoned branch are void. Nobody gains
+///          control of the outcome without the VRF key.
+///        - Sequencer: it can grind the request block's hash, but cannot evaluate outcomes
+///          without the VRF secret key, so grinding alone gives no advantage.
+///        - Sequencer and key holder colluding could pick a block hash with a known outcome.
+///          That is outside the accepted trust assumptions (the key holder is trusted not to
+///          collude); this contract does not defend against it.
 ///
 ///      This contract has no function that calls the router's `setCoordinator` or
 ///      `setVRFCoordinator`, and no generic call/execute. The router lets its current
@@ -59,7 +89,7 @@ contract NettyVRFCoordinator is VRF, Ownable2Step {
         None,
         Pending,
         Fulfilled,
-        CallbackFailed
+        Failed
     }
 
     struct Request {
@@ -80,6 +110,15 @@ contract NettyVRFCoordinator is VRF, Ownable2Step {
     uint32 public constant MAX_NUM_WORDS = 10;
     /// @notice Upper bound on the callback gas a router may request.
     uint32 public constant MAX_CALLBACK_GAS_LIMIT = 2_500_000;
+    /// @notice EIP-2935 block-hash history contract (same address on every chain that has it).
+    address public constant BLOCKHASH_HISTORY =
+        0x0000F90827F1C53a10cb7A02335B175320002935;
+    /// @notice Blocks after the request block within which a request can be proven
+    ///         (EIP-2935 HISTORY_SERVE_WINDOW).
+    uint256 public constant BLOCKHASH_WINDOW = 8191;
+    /// @notice Domain tag of the key-registration (proof of possession) seed.
+    bytes32 public constant KEY_REGISTRATION_DOMAIN =
+        keccak256("NettyVRFCoordinator.registerKey");
     /// @dev Gas reserved to perform the exact-gas check before the callback (Chainlink value).
     uint16 private constant GAS_FOR_CALL_EXACT_CHECK = 5_000;
 
@@ -93,9 +132,8 @@ contract NettyVRFCoordinator is VRF, Ownable2Step {
     uint256 public requestNonce;
 
     mapping(address router => bool) private _authorizedRouters;
+    mapping(address fulfiller => bool) private _fulfillers;
     mapping(uint256 requestId => Request) private _requests;
-    /// @dev VRF output kept for requests whose callback reverted, so `retry` can redeliver.
-    mapping(uint256 requestId => uint256) private _storedRandomness;
 
     // =========================================================================
     // Events
@@ -111,22 +149,19 @@ contract NettyVRFCoordinator is VRF, Ownable2Step {
         uint32 numWords,
         uint32 callbackGasLimit
     );
-    /// @notice Emitted when a proof is accepted. `success` is the router callback result.
-    event RandomWordsFulfilled(
-        uint256 indexed requestId,
-        uint256 randomness,
-        bool success
-    );
-    /// @notice Emitted when a previously failed callback is redelivered successfully.
-    event RandomWordsRedelivered(uint256 indexed requestId);
+    /// @notice Emitted when a proof is accepted. `success` is the router callback result;
+    ///         false means the request is terminally Failed. The randomness is never emitted.
+    event RandomWordsFulfilled(uint256 indexed requestId, bool success);
     event KeyRegistered(bytes32 indexed keyHash, uint256[2] publicKey);
     event RouterAuthorized(address indexed router, bool authorized);
+    event FulfillerSet(address indexed fulfiller, bool allowed);
 
     // =========================================================================
     // Errors
     // =========================================================================
 
     error NettyVRFCoordinator__UnauthorizedRouter(address caller);
+    error NettyVRFCoordinator__UnauthorizedFulfiller(address caller);
     error NettyVRFCoordinator__NoKeyRegistered();
     error NettyVRFCoordinator__InvalidNumWords(uint32 numWords);
     error NettyVRFCoordinator__InvalidCallbackGasLimit(uint32 callbackGasLimit);
@@ -135,16 +170,17 @@ contract NettyVRFCoordinator is VRF, Ownable2Step {
     error NettyVRFCoordinator__BlockhashUnavailable(uint256 requestId);
     error NettyVRFCoordinator__WrongKey(uint256 requestId);
     error NettyVRFCoordinator__WrongPreSeed(uint256 requestId);
-    error NettyVRFCoordinator__NotRetryable(uint256 requestId);
-    error NettyVRFCoordinator__CallbackReverted(uint256 requestId);
     error NettyVRFCoordinator__ZeroAddress();
+    error NettyVRFCoordinator__NotAContract(address account);
     error NettyVRFCoordinator__InvalidPublicKey();
+    error NettyVRFCoordinator__KeyPossessionNotProven();
+    error NettyVRFCoordinator__RenounceOwnershipDisabled();
 
     // =========================================================================
     // Constructor
     // =========================================================================
 
-    /// @param initialOwner The admin (protocol Safe). Keys and routers are registered by it.
+    /// @param initialOwner The admin (protocol Safe). Keys, routers and fulfillers are set by it.
     constructor(address initialOwner) Ownable(initialOwner) {}
 
     // =========================================================================
@@ -211,20 +247,25 @@ contract NettyVRFCoordinator is VRF, Ownable2Step {
     }
 
     // =========================================================================
-    // Fulfilment (permissionless: only a valid proof can pass)
+    // Fulfilment (allowlisted fulfillers; only a valid proof can pass)
     // =========================================================================
 
     /// @notice Verify a VRF proof for a pending request and deliver its words to the router.
-    /// @dev `proof.seed` must be the request's preSeed; the proof itself is over
-    ///      keccak256(abi.encodePacked(preSeed, blockhash(requestBlock))). A request that is
-    ///      already Fulfilled or CallbackFailed is a no-op (returns false), so concurrent
-    ///      fulfillers cannot double-deliver. A reverting router callback does not revert
-    ///      this call: the words are stored and the request becomes retryable.
+    /// @dev Only allowlisted fulfillers may call. `proof.seed` must be the request's preSeed;
+    ///      the proof itself is over keccak256(abi.encodePacked(preSeed, blockhash(requestBlock))).
+    ///      A request that is already Fulfilled or Failed is a no-op (returns false), so
+    ///      concurrent fulfillers cannot double-deliver. A reverting router callback does not
+    ///      revert this call: the request becomes Failed, terminally, and its randomness is
+    ///      discarded. CallWithExactGas reverts the whole transaction if the caller did not
+    ///      supply enough gas for the full callback limit, so a fulfiller cannot starve the
+    ///      callback to force a failure.
     /// @return delivered True if this call delivered the words successfully.
     function fulfill(
         uint256 requestId,
         Proof memory proof
     ) external returns (bool delivered) {
+        if (!_fulfillers[msg.sender])
+            revert NettyVRFCoordinator__UnauthorizedFulfiller(msg.sender);
         Request storage r = _requests[requestId];
         Status status = r.status;
         if (status == Status.None)
@@ -234,7 +275,7 @@ contract NettyVRFCoordinator is VRF, Ownable2Step {
         uint256 blockNum = r.blockNum;
         if (block.number <= blockNum)
             revert NettyVRFCoordinator__TooEarly(requestId);
-        bytes32 blockHash = blockhash(blockNum);
+        bytes32 blockHash = _requestBlockHash(blockNum);
         if (blockHash == bytes32(0))
             revert NettyVRFCoordinator__BlockhashUnavailable(requestId);
         if (keccak256(abi.encode(proof.pk)) != r.keyHash)
@@ -247,39 +288,11 @@ contract NettyVRFCoordinator is VRF, Ownable2Step {
         );
         uint256 randomness = _randomValueFromVRFProof(proof, actualSeed); // reverts if invalid
 
-        // Effects before the external call.
+        // Effects before the external call: a re-entrant fulfil sees a non-Pending request.
         r.status = Status.Fulfilled;
         delivered = _deliver(requestId, r, randomness);
-        if (!delivered) {
-            r.status = Status.CallbackFailed;
-            _storedRandomness[requestId] = randomness;
-        }
-        emit RandomWordsFulfilled(requestId, randomness, delivered);
-    }
-
-    /// @notice Redeliver the stored words of a request whose callback reverted.
-    /// @dev Permissionless and deterministic: the words were fixed by the verified proof.
-    ///      Works after the 256-block window. `gasLimit` may raise (never lower) the gas
-    ///      forwarded, so an undersized router gas limit cannot strand a request. Reverts,
-    ///      leaving the request retryable, if the callback reverts again. After an admin
-    ///      force-refund the PackMachine rejects the callback, so retry reverts harmlessly.
-    function retry(uint256 requestId, uint32 gasLimit) external {
-        Request storage r = _requests[requestId];
-        if (r.status != Status.CallbackFailed)
-            revert NettyVRFCoordinator__NotRetryable(requestId);
-        if (
-            gasLimit < r.callbackGasLimit || gasLimit > MAX_CALLBACK_GAS_LIMIT
-        ) {
-            revert NettyVRFCoordinator__InvalidCallbackGasLimit(gasLimit);
-        }
-        uint256 randomness = _storedRandomness[requestId];
-
-        r.status = Status.Fulfilled;
-        delete _storedRandomness[requestId];
-        if (!_deliverWithGas(requestId, r, randomness, gasLimit)) {
-            revert NettyVRFCoordinator__CallbackReverted(requestId);
-        }
-        emit RandomWordsRedelivered(requestId);
+        if (!delivered) r.status = Status.Failed;
+        emit RandomWordsFulfilled(requestId, delivered);
     }
 
     // =========================================================================
@@ -288,9 +301,24 @@ contract NettyVRFCoordinator is VRF, Ownable2Step {
 
     /// @notice Set the public key that NEW requests are bound to. Pending requests keep the
     ///         key recorded when they were made, so rotating never strands them.
-    function registerKey(uint256[2] calldata publicKey) external onlyOwner {
+    /// @dev Proof of possession: `proof` must be a valid VRF proof by `publicKey` over
+    ///      `registrationSeed(publicKey)`, which binds it to this chain, this contract and this
+    ///      key. Only the holder of the matching secret key can produce it, so a typo or wrong
+    ///      key file cannot be registered (audit F-04). Produce it with
+    ///      scripts/vrf/key-possession-proof.ts.
+    function registerKey(
+        uint256[2] calldata publicKey,
+        Proof memory proof
+    ) external onlyOwner {
         uint256[2] memory pk = publicKey;
         if (!_isOnCurve(pk)) revert NettyVRFCoordinator__InvalidPublicKey();
+        uint256 seed = registrationSeed(pk);
+        if (
+            proof.pk[0] != pk[0] ||
+            proof.pk[1] != pk[1] ||
+            proof.seed != seed
+        ) revert NettyVRFCoordinator__KeyPossessionNotProven();
+        _randomValueFromVRFProof(proof, seed); // reverts if the proof is invalid
         bytes32 keyHash = keccak256(abi.encode(pk));
         currentKeyHash = keyHash;
         emit KeyRegistered(keyHash, pk);
@@ -298,10 +326,28 @@ contract NettyVRFCoordinator is VRF, Ownable2Step {
 
     /// @notice Allow or revoke a router. Revoking stops new requests only; pending requests
     ///         remain fulfillable and deliver to the router recorded on the request.
+    /// @dev An authorized router must have code: a callback to a codeless address would make
+    ///      every fulfil revert and strand its requests (audit F-06). Revoking accepts any
+    ///      non-zero address.
     function setRouter(address router, bool authorized) external onlyOwner {
         if (router == address(0)) revert NettyVRFCoordinator__ZeroAddress();
+        if (authorized && router.code.length == 0)
+            revert NettyVRFCoordinator__NotAContract(router);
         _authorizedRouters[router] = authorized;
         emit RouterAuthorized(router, authorized);
+    }
+
+    /// @notice Allow or revoke an address that may submit `fulfill` transactions (the
+    ///         fulfiller service's gas wallets).
+    function setFulfiller(address fulfiller, bool allowed) external onlyOwner {
+        if (fulfiller == address(0)) revert NettyVRFCoordinator__ZeroAddress();
+        _fulfillers[fulfiller] = allowed;
+        emit FulfillerSet(fulfiller, allowed);
+    }
+
+    /// @notice Disabled: without an owner, keys, routers and fulfillers could never change.
+    function renounceOwnership() public pure override {
+        revert NettyVRFCoordinator__RenounceOwnershipDisabled();
     }
 
     // =========================================================================
@@ -318,6 +364,10 @@ contract NettyVRFCoordinator is VRF, Ownable2Step {
         return _authorizedRouters[router];
     }
 
+    function isFulfiller(address fulfiller) external view returns (bool) {
+        return _fulfillers[fulfiller];
+    }
+
     /// @notice keccak256(abi.encode(publicKey)), the value recorded as a request's keyHash.
     function hashOfKey(
         uint256[2] calldata publicKey
@@ -325,26 +375,57 @@ contract NettyVRFCoordinator is VRF, Ownable2Step {
         return keccak256(abi.encode(publicKey));
     }
 
+    /// @notice The seed a key-registration proof must be over:
+    ///         keccak256(abi.encode(KEY_REGISTRATION_DOMAIN, chainid, this, pk[0], pk[1])).
+    function registrationSeed(
+        uint256[2] memory publicKey
+    ) public view returns (uint256) {
+        return
+            uint256(
+                keccak256(
+                    abi.encode(
+                        KEY_REGISTRATION_DOMAIN,
+                        block.chainid,
+                        address(this),
+                        publicKey[0],
+                        publicKey[1]
+                    )
+                )
+            );
+    }
+
     // =========================================================================
     // Internal
     // =========================================================================
 
+    /// @dev Hash of `blockNum`, or zero if it can no longer be read. `blockhash()` covers the
+    ///      last 256 blocks. Beyond that, the EIP-2935 history contract is asked with the
+    ///      32-byte block number; only a successful, exactly 32-byte, non-zero answer counts.
+    ///      It reverts outside its window and has no code on chains without EIP-2935, which
+    ///      both read as unavailable. Callers ensure block.number > blockNum.
+    function _requestBlockHash(
+        uint256 blockNum
+    ) private view returns (bytes32 h) {
+        h = blockhash(blockNum);
+        if (h != bytes32(0)) return h;
+        if (block.number - blockNum > BLOCKHASH_WINDOW) return bytes32(0);
+        address history = BLOCKHASH_HISTORY;
+        assembly ("memory-safe") {
+            mstore(0x00, blockNum)
+            let ok := staticcall(gas(), history, 0x00, 0x20, 0x00, 0x20)
+            if and(ok, eq(returndatasize(), 0x20)) {
+                h := mload(0x00)
+            }
+        }
+    }
+
+    /// @dev Calls router.rawFulfillRandomWords with exactly the request's callback gas limit.
+    ///      CallWithExactGas reverts the whole transaction (rather than returning false) if
+    ///      the caller did not supply enough gas.
     function _deliver(
         uint256 requestId,
         Request storage r,
         uint256 randomness
-    ) private returns (bool) {
-        return _deliverWithGas(requestId, r, randomness, r.callbackGasLimit);
-    }
-
-    /// @dev Calls router.rawFulfillRandomWords with exactly `gasLimit` gas. CallWithExactGas
-    ///      reverts the whole transaction (rather than returning false) if the caller did not
-    ///      supply enough gas, so a fulfiller cannot starve the callback to force a failure.
-    function _deliverWithGas(
-        uint256 requestId,
-        Request storage r,
-        uint256 randomness,
-        uint256 gasLimit
     ) private returns (bool) {
         uint256 n = r.numWords;
         uint256[] memory words = new uint256[](n);
@@ -359,7 +440,7 @@ contract NettyVRFCoordinator is VRF, Ownable2Step {
             CallWithExactGas._callWithExactGas(
                 payload,
                 r.router,
-                gasLimit,
+                r.callbackGasLimit,
                 GAS_FOR_CALL_EXACT_CHECK
             );
     }
