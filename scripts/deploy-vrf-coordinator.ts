@@ -8,16 +8,57 @@
  * public key and router authorization are set by the Safe afterwards via the Transaction
  * Builder batch produced by scripts/vrf/build-safe-payloads.ts.
  *
+ * AUDIT GATE: refuses to run unless the git working tree is completely clean
+ * (no modified, staged or untracked files) and HEAD is exactly AUDITED_COMMIT,
+ * the commit signed off in Ivan's security audit. Deploy from a fresh checkout:
+ *   git worktree add ../vrf-deploy <AUDITED_COMMIT> && cd ../vrf-deploy && pnpm install
+ *   AUDITED_COMMIT=<sha> npx hardhat run scripts/deploy-vrf-coordinator.ts --network base
+ * After deploying it checks the on-chain runtime bytecode against the compiled
+ * artifact and prints the Basescan verification commands.
+ *
  * Env:
+ *   AUDITED_COMMIT          required: full 40-hex commit hash of the audited source
  *   VRF_COORDINATOR_OWNER   owner (default: protocol Safe 0xfe78…f456)
  *   VRF_DEPLOYMENT_FILE     deployments/<name>.json to record into
  *                           (default: base.staging.snapshot, the staging record)
  *   VRF_DEPLOYMENT_KEY      key within that file (default: NettyVRFCoordinator)
  */
 import { network } from "hardhat";
-import { getAddress } from "viem";
+import { getAddress, encodeAbiParameters } from "viem";
 import { createInterface } from "node:readline/promises";
+import { execFileSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { saveDeployment, waitForCode } from "./lib/deployments.js";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+// ─── Audit gate (before anything is compiled, signed or sent) ────────────────
+function git(...args: string[]): string {
+  return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+}
+const auditedCommit = (process.env.AUDITED_COMMIT ?? "").trim().toLowerCase();
+if (!/^[0-9a-f]{40}$/.test(auditedCommit)) {
+  console.error(
+    "Refusing to deploy: set AUDITED_COMMIT to the full 40-hex commit hash signed off in the security audit.",
+  );
+  process.exit(1);
+}
+const dirty = git("status", "--porcelain", "--untracked-files=all");
+if (dirty) {
+  console.error(
+    "Refusing to deploy: the working tree is not clean. Deploy from a fresh checkout of the audited commit\n" +
+      `(git worktree add <dir> ${auditedCommit}). Offending paths:\n${dirty}`,
+  );
+  process.exit(1);
+}
+const head = git("rev-parse", "HEAD").toLowerCase();
+if (head !== auditedCommit) {
+  console.error(`Refusing to deploy: HEAD is ${head}, not AUDITED_COMMIT ${auditedCommit}.`);
+  process.exit(1);
+}
+console.log(`Audit gate passed: clean tree at audited commit ${head}`);
 
 const DEFAULT_OWNER = "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456";
 
@@ -44,6 +85,7 @@ if (isLive) {
   console.log(`Deployer:    ${deployer.account.address} (pays gas only)`);
   console.log(`Owner:       ${owner}`);
   console.log(`Record into: deployments/${deploymentFile}.json [${deploymentKey}]`);
+  console.log(`Source:      audited commit ${head}`);
   console.log("======================================\n");
   const answer = await rl.question("Proceed? (yes/no): ");
   rl.close();
@@ -61,18 +103,40 @@ if (getAddress(onChainOwner) !== owner) {
 const blockNumber = await publicClient.getBlockNumber();
 console.log(`NettyVRFCoordinator deployed at ${coordinator.address} (owner ${onChainOwner})`);
 
+// The runtime bytecode on chain must be exactly the artifact compiled from the
+// audited commit (the contract has no immutables, so this is a byte compare).
+const artifact = JSON.parse(
+  await readFile(join(REPO_ROOT, "artifacts/contracts/NettyVRFCoordinator.sol/NettyVRFCoordinator.json"), "utf8"),
+) as { deployedBytecode: string };
+const onChainCode = (await publicClient.getCode({ address: coordinator.address })) ?? "0x";
+if (onChainCode.toLowerCase() !== artifact.deployedBytecode.toLowerCase()) {
+  console.error("On-chain runtime bytecode does NOT match the artifact compiled from the audited commit. Do not use this deployment.");
+  process.exit(1);
+}
+console.log("On-chain runtime bytecode matches the artifact compiled from the audited commit.");
+
 if (isLive) {
   await saveDeployment(deploymentFile, deploymentKey, {
     address: coordinator.address,
     owner,
     deployer: deployer.account.address,
+    auditedCommit: head,
     deployedAtBlock: blockNumber.toString(),
     deployedAt: new Date().toISOString(),
     verifier: "@chainlink/contracts@1.1.0 src/v0.8/vrf/VRF.sol (MIT)",
   });
   console.log(`Recorded in deployments/${deploymentFile}.json`);
 }
-console.log(
-  "\nNext: node --experimental-strip-types scripts/vrf/build-safe-payloads.ts " +
-    `--coordinator ${coordinator.address} --pk-x <x> --pk-y <y>`,
-);
+
+const ctorArgs = encodeAbiParameters([{ type: "address" }], [owner]);
+console.log(`
+Verify the deployed source on Basescan (run from this same clean checkout at ${head}):
+  npx hardhat verify --network ${connection.networkName} ${coordinator.address} ${owner}
+or, with the repo's usual forge flow:
+  forge verify-contract ${coordinator.address} contracts/NettyVRFCoordinator.sol:NettyVRFCoordinator \\
+    --verifier etherscan --verifier-url https://api.etherscan.io/v2/api --etherscan-api-key "$BASESCAN_API_KEY" \\
+    --chain ${chainId} --watch --constructor-args ${ctorArgs}
+Then confirm https://basescan.org/address/${coordinator.address}#code shows the verified source and that it matches:
+  git show ${head}:contracts/NettyVRFCoordinator.sol
+
+Next: node --experimental-strip-types scripts/vrf/build-safe-payloads.ts --coordinator ${coordinator.address} --pk-x <x> --pk-y <y>`);
