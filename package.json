@@ -15,6 +15,7 @@
     "verify:basescan": "node --experimental-strip-types scripts/verify-basescan.ts --network base"
   },
   "devDependencies": {
+    "@noble/curves": "1.9.1",
     "@nomicfoundation/hardhat-ignition": "^3.1.5",
     "@nomicfoundation/hardhat-toolbox-viem": "^5.0.5",
     "@solidstate/hardhat-contract-sizer": "^3.0.0",
