@@ -28,8 +28,8 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createPublicClient, getAddress, http, parseAbiItem, type Address } from "viem";
-import { base } from "viem/chains";
+import { getAddress, parseAbiItem, type AbiEvent, type Address } from "viem";
+import { createScanClient, DEFAULT_DELAY_MS, scanLogs } from "./log-scan.ts";
 
 /** EIP-2935 HISTORY_SERVE_WINDOW, NettyVRFCoordinator.BLOCKHASH_WINDOW. */
 export const BLOCKHASH_WINDOW = 8191n;
@@ -56,19 +56,14 @@ const rpc = arg("rpc") ?? process.env.BASE_RPC_URL ?? "https://mainnet.base.org"
 // larger --chunk and --delay 0.
 const CHUNK = blockArg("chunk") ?? 2000n;
 if (CHUNK <= 0n) usage("--chunk must be positive");
-const DELAY_MS = Number(arg("delay") ?? "500");
-const client = createPublicClient({ chain: base, transport: http(rpc, { retryCount: 8, retryDelay: 2_000 }) });
+const delayArg = arg("delay");
+if (delayArg !== undefined && !/^\d+$/.test(delayArg)) usage("--delay must be a non-negative integer (ms)");
+const DELAY_MS = delayArg === undefined ? DEFAULT_DELAY_MS : Number(delayArg);
+const client = createScanClient(rpc);
 
-async function scan(address: Address | Address[], event: ReturnType<typeof parseAbiItem>, from: bigint, latest: bigint) {
-  const logs: Awaited<ReturnType<typeof client.getLogs>> = [];
-  for (let start = from; start <= latest; start += CHUNK) {
-    const end = start + CHUNK - 1n < latest ? start + CHUNK - 1n : latest;
-    // eslint-disable-next-line no-await-in-loop
-    logs.push(...(await client.getLogs({ address, event: event as never, fromBlock: start, toBlock: end })));
-    // eslint-disable-next-line no-await-in-loop
-    if (DELAY_MS > 0) await new Promise((r) => setTimeout(r, DELAY_MS));
-  }
-  return logs;
+/** Chunked, fail-closed scan of [from, latest] (scripts/vrf/log-scan.ts). */
+function scan(address: Address | Address[], event: ReturnType<typeof parseAbiItem>, from: bigint, latest: bigint) {
+  return scanLogs(client, { address, events: event as AbiEvent, fromBlock: from, toBlock: latest, chunk: CHUNK, delayMs: DELAY_MS });
 }
 
 function requestIdOf(log: { topics: readonly `0x${string}`[] }): bigint {

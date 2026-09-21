@@ -8,19 +8,18 @@
  *     [--secret-id nettyworth/staging-v2-vrf-fulfiller/vrf-key] [--region us-east-1] [--profile <aws profile>] \
  *     [--out deployments/safe/vrf-staging/key-possession.json]
  *
- * The secret is fetched with the AWS CLI (`aws secretsmanager get-secret-value`), read from
- * the child's stdout pipe straight into memory, parsed (JSON field `secret_key`, the field
- * the fulfiller's task definition injects as VRF_SECRET_KEY) and used only to compute the
- * public key and the proof. Only public values are written: the public key, its keyHash,
+ * The secret is fetched with the AWS CLI via aws-secret.ts (read from the child's stdout pipe
+ * straight into memory), parsed (JSON field `secret_key`, the field the fulfiller's task
+ * definition injects as VRF_SECRET_KEY) and used only to compute the public key and the proof. Only public values are written: the public key, its keyHash,
  * the registration seed and the proof. Errors never include the secret or the CLI output.
  *
  * The output file is the input of build-safe-payloads.ts (--key-possession).
  */
-import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAddress } from "viem";
+import { readSecretField, SecretReadError } from "./aws-secret.ts";
 import { parseSecretKey } from "./ecvrf.ts";
 import { keyPossessionToJson, proveKeyPossession } from "./key-possession.ts";
 
@@ -53,24 +52,12 @@ const out =
   join(dirname(fileURLToPath(import.meta.url)), "../../deployments/safe", `vrf-${envName}`, "key-possession.json");
 
 function readSecretKey(): bigint {
-  const cli = ["secretsmanager", "get-secret-value", "--secret-id", secretId, "--region", region,
-    "--query", "SecretString", "--output", "text"];
-  if (profile) cli.push("--profile", profile);
-  let secretString: string;
+  let field: string;
   try {
-    // stdout is piped into this process only; stderr (never secret) is discarded too, so a
-    // CLI failure cannot echo anything. The thrown error is not printed.
-    secretString = execFileSync("aws", cli, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 1 << 16 });
-  } catch {
-    fail(`could not read secret ${secretId} with the AWS CLI (check credentials, region and permission to GetSecretValue)`);
+    field = readSecretField({ secretId, region, profile }, "secret_key");
+  } catch (err) {
+    fail(err instanceof SecretReadError ? err.message : `could not read secret ${secretId}`);
   }
-  let field: unknown;
-  try {
-    field = (JSON.parse(secretString) as Record<string, unknown>).secret_key;
-  } catch {
-    fail(`secret ${secretId} is not JSON`);
-  }
-  if (typeof field !== "string") fail(`secret ${secretId} has no string field secret_key`);
   try {
     return parseSecretKey(field);
   } catch {

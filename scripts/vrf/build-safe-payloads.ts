@@ -4,6 +4,7 @@
  *   node --experimental-strip-types scripts/vrf/build-safe-payloads.ts \
  *     --coordinator 0x... --key-possession <file> --fulfiller-key-hash 0x... \
  *     [--env staging|prod] [--fulfiller-a 0x... --fulfiller-b 0x...] [--simulate] [--rpc <url>] [--out dir]
+ *     [--gas-key-secret-a <id> --gas-key-secret-b <id>] [--min-gas-eth 0.005] [--region us-east-1] [--profile <p>]
  *
  * --key-possession is the JSON written by key-possession-proof.ts (public key + registerKey
  * proof of possession, built from the fulfiller's VRF key in Secrets Manager).
@@ -11,7 +12,14 @@
  * started"); the build refuses unless it equals the registered key's keyHash, so the Safe can
  * only register the key the fulfiller actually proves with (audit F-04).
  * --simulate eth_calls every call of batch 01 from the Safe against the deployed coordinator
- * (read-only; no keys, no transactions) and refuses if any would revert.
+ * (read-only; no transactions) and refuses if any would revert. It then runs the fulfiller
+ * wallet preflight (fulfiller-preflight.ts, audit N-03): for wallets A and B, the address
+ * derived in memory from the gas key in Secrets Manager (staging default
+ * nettyworth/staging-v2-vrf-fulfiller/gas-key-a and -b, field private_key) must equal the
+ * allowlisted address, and each wallet must hold at least --min-gas-eth (default 0.005 ETH,
+ * 2.5x the low-gas alarm). The keys are never printed, logged or written.
+ * 03-switch.json is written only when --simulate passed; without --simulate the script
+ * writes the other batches, does not write 03 and removes a stale 03 from the output folder.
  *
  * Writes one JSON per Safe transaction into deployments/safe/vrf-<env>/, in execution order:
  *   01-coordinator-setup.json  coordinator.registerKey(pk, possession proof)
@@ -30,11 +38,12 @@
  * lists the key hash to check against, and Safe decodes the call once the coordinator source
  * is verified on Basescan.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createPublicClient, encodeFunctionData, getAddress, http, isAddress, zeroAddress, type Hex } from "viem";
+import { createPublicClient, encodeFunctionData, getAddress, http, formatEther, isAddress, parseEther, zeroAddress, type Address, type Hex, type PublicClient } from "viem";
 import { base } from "viem/chains";
+import { DEFAULT_MIN_GAS_WEI, fulfillerPreflight, PreflightError } from "./fulfiller-preflight.ts";
 import { checkKeyPossession, keyPossessionFromJson } from "./key-possession.ts";
 
 const SAFE = "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456";
@@ -46,14 +55,17 @@ const ENVS = {
     router: "0xeA3aDEac6b82b9852a140E642BC10135638653E1",
     machine: "0x46999a9D321df9e752eCc007f5F67D2981183109",
     previousConfirmations: 3,
-    // Gas wallets of the two staging-v2-vrf-fulfiller tasks (A and B).
+    // Gas wallets of the two staging-v2-vrf-fulfiller tasks (A and B), and the secrets their
+    // task definitions inject as VRF_GAS_WALLET_PRIVATE_KEY (aws staging/13-staging-v2-vrf-fulfiller).
     fulfillers: ["0xDB968Dd4d02A8F2FE66205fB000125c8B3e86442", "0x440F9c1dd178C7ff5595E6471B48A7BF7d53592C"],
+    gasKeySecrets: ["nettyworth/staging-v2-vrf-fulfiller/gas-key-a", "nettyworth/staging-v2-vrf-fulfiller/gas-key-b"],
   },
   prod: {
     router: "0x4aD5C628030546D12754F608081a6256D6c5FDc9",
     machine: "0x8a021c02Ac5233164D7c44d87a344623A49197c5",
     previousConfirmations: 3,
     fulfillers: [] as string[], // not provisioned yet: pass --fulfiller-a and --fulfiller-b
+    gasKeySecrets: [] as string[], // not provisioned yet: pass --gas-key-secret-a and --gas-key-secret-b
   },
 } as const;
 
@@ -104,6 +116,21 @@ const pk: [bigint, bigint] = [BigInt(kp.publicKey[0]), BigInt(kp.publicKey[1])];
 const fulfillerA = address("fulfiller-a", arg("fulfiller-a") ?? env.fulfillers[0] ?? fail("missing --fulfiller-a"));
 const fulfillerB = address("fulfiller-b", arg("fulfiller-b") ?? env.fulfillers[1] ?? fail("missing --fulfiller-b"));
 if (fulfillerA === fulfillerB) fail("fulfiller wallets A and B must differ");
+
+const simulate = process.argv.includes("--simulate");
+const minGasArg = arg("min-gas-eth");
+let minGasWei = DEFAULT_MIN_GAS_WEI;
+if (minGasArg !== undefined) {
+  if (!/^\d+(\.\d{1,18})?$/.test(minGasArg)) fail("--min-gas-eth must be a decimal ETH amount");
+  minGasWei = parseEther(minGasArg);
+  if (minGasWei <= 0n) fail("--min-gas-eth must be positive");
+}
+const region = arg("region") ?? "us-east-1";
+const profile = arg("profile");
+const gasKeySecretA = arg("gas-key-secret-a") ?? env.gasKeySecrets[0];
+const gasKeySecretB = arg("gas-key-secret-b") ?? env.gasKeySecrets[1];
+if (simulate && (!gasKeySecretA || !gasKeySecretB)) fail("--simulate needs --gas-key-secret-a and --gas-key-secret-b for this env");
+if (simulate && gasKeySecretA === gasKeySecretB) fail("gas key secrets A and B must differ");
 
 const outDir =
   arg("out") ??
@@ -229,7 +256,7 @@ const unpause = tx(env.machine, "unpause");
 
 // Optional pre-flight: every call of batch 01 must succeed as the Safe against the deployed
 // coordinator (proves the owner, the possession proof, the router and the fulfiller inputs).
-if (process.argv.includes("--simulate")) {
+if (simulate) {
   const rpc = arg("rpc") ?? process.env.BASE_RPC_URL ?? "https://mainnet.base.org";
   const client = createPublicClient({ chain: base, transport: http(rpc) });
   if (BigInt(await client.getChainId()) !== CHAIN_ID) fail(`--rpc is not Base mainnet (chain ${CHAIN_ID})`);
@@ -247,6 +274,24 @@ if (process.argv.includes("--simulate")) {
       fail(`simulation of ${name} from the Safe reverted: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
     }
     console.log(`  simulated ${name} from the Safe: ok`);
+  }
+  // Audit N-03: the allowlisted wallets must be the fulfiller tasks' wallets, and funded.
+  try {
+    const lines = await fulfillerPreflight(
+      client as unknown as PublicClient,
+      [
+        { label: "A", allowlisted: fulfillerA as Address, secret: { secretId: gasKeySecretA as string, region, profile } },
+        { label: "B", allowlisted: fulfillerB as Address, secret: { secretId: gasKeySecretB as string, region, profile } },
+      ],
+      minGasWei,
+    );
+    for (const l of lines) console.log(`  preflight ${l}`);
+  } catch (err) {
+    fail(
+      `fulfiller wallet preflight failed, refusing to build the switch batch:\n${
+        err instanceof PreflightError ? err.message : "unexpected error while checking the fulfiller wallets"
+      }`,
+    );
   }
 }
 
@@ -280,12 +325,21 @@ batch(
   `Pause PackMachine ${env.machine}. Then wait until check-pending.ts --router ${env.router} reports no pending Chainlink requests.`,
   [pause],
 );
-batch(
-  "03-switch.json",
-  `VRF ${envName} 3/3: switch to in-house VRF and unpause`,
-  `Point router ${env.router} at NettyVRFCoordinator ${coordinator}, set requestConfirmations to 1, unpause the machine.`,
-  [setVRF(coordinator), setConf(1), unpause],
-);
+if (simulate) {
+  batch(
+    "03-switch.json",
+    `VRF ${envName} 3/3: switch to in-house VRF and unpause`,
+    `Point router ${env.router} at NettyVRFCoordinator ${coordinator}, set requestConfirmations to 1, unpause the machine. Fulfiller wallets A ${fulfillerA} and B ${fulfillerB} passed the preflight (key matches, balance >= ${formatEther(minGasWei)} ETH) when this file was built; rebuild with --simulate right before queuing if time has passed.`,
+    [setVRF(coordinator), setConf(1), unpause],
+  );
+} else {
+  const stale = join(outDir, "03-switch.json");
+  if (existsSync(stale)) {
+    unlinkSync(stale);
+    console.log(`  removed stale ${stale}`);
+  }
+  console.log("  03-switch.json NOT written: rerun with --simulate (batch 01 simulation + fulfiller wallet preflight, audit N-03)");
+}
 batch(
   "rollback-01-pause.json",
   `VRF ${envName} rollback 1/2: pause machine`,
