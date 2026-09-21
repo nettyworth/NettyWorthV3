@@ -181,10 +181,11 @@ contract NettyVRFCoordinatorAuditRegressionTest is NettyVRFCoordinatorForkBase {
         vm.roll(uint256(reqBlock) + 8_192); // unprovable
         uint256 machineBal = IERC20(USDC).balanceOf(MACHINE);
 
-        // Runbook step: words from a block announced in advance, e.g. 30 blocks ahead.
+        // Runbook step: words from a block announced in advance (scripts/vrf/build-recovery-payload.ts
+        // derives word i as keccak256(abi.encode(blockhash(announced), requestId, i))).
         uint256 announcedBlock = block.number - 1; // stands in for the announced, now-mined block
         uint256[] memory words = new uint256[](1);
-        words[0] = uint256(keccak256(abi.encode(blockhash(announcedBlock), rid)));
+        words[0] = uint256(keccak256(abi.encode(blockhash(announcedBlock), rid, uint256(0))));
 
         vm.startPrank(SAFE);
         IMachineFork(MACHINE).pause();
