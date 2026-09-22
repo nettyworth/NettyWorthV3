@@ -2,7 +2,7 @@
  * Safe batches that freeze and unfreeze every staging pool mutator for the manual recovery
  * (audit N-01). Runbook: aws/docs/runbooks/vrf-staging-manual-recovery.md.
  *
- *   node --experimental-strip-types scripts/vrf/build-recovery-freeze.ts [--resume | --baseline-block <n>]
+ *   node --experimental-strip-types scripts/vrf/build-recovery-freeze.ts [--resume | --baseline-block <n> [--baseline-frozen-ok]]
  *         [--rpc <url>] [--out dir] [--chunk <blocks>] [--delay <ms>]
  *   node --experimental-strip-types scripts/vrf/build-recovery-freeze.ts --finish [--rpc <url>] [--out dir]
  *
@@ -17,6 +17,8 @@
  *   - later runs (baseline file present): if the state now differs from the baseline, a freeze
  *     is in effect or was partly lifted; pass --resume to rebuild against the recorded baseline.
  *     --baseline-block replaces the file instead (only for a stale baseline from an old incident).
+ *   - --baseline-block refuses a block whose state already looks frozen (a pause or a
+ *     de-authorized depositor), unless --baseline-frozen-ok confirms it was the normal state.
  *   - --finish, after recovery-unfreeze.json executed: checks the state equals the baseline, then
  *     deletes the baseline file, closing the incident.
  *
@@ -82,6 +84,8 @@ if (chunk === 0n) fail("--chunk must be positive");
 const delay = uintArg("delay");
 const tuning = { chunk, delayMs: delay === undefined ? undefined : Number(delay) };
 const baselineBlock = uintArg("baseline-block");
+const baselineFrozenOk = flag("baseline-frozen-ok");
+if (baselineFrozenOk && baselineBlock === undefined) fail("--baseline-frozen-ok only applies with --baseline-block");
 const resume = flag("resume");
 const finish = flag("finish");
 if ([resume, finish, baselineBlock !== undefined].filter(Boolean).length > 1) fail("pass at most one of --resume, --finish, --baseline-block");
@@ -207,6 +211,20 @@ try {
   if (baselineBlock !== undefined) {
     if (baselineBlock > latest) fail(`--baseline-block ${baselineBlock} is after the latest block ${latest}`);
     const at = await readFreezeState(client, STAGING_MACHINE, depositors, baselineBlock);
+    // A baseline must describe the state BEFORE the freeze. Recording a frozen state would give
+    // an unfreeze that restores nothing, and --finish would then close with staging still
+    // paused. A state that was genuinely paused before the incident needs the explicit flag.
+    const frozenAt = [
+      at.machinePaused && "the machine is paused",
+      at.buybackPoolPaused && "the BuybackPool is paused",
+      ...at.depositors.filter((d) => !d.authorized).map((d) => `depositor ${d.address} is not authorized`),
+    ].filter(Boolean);
+    if (frozenAt.length && !baselineFrozenOk) {
+      fail(
+        `block ${baselineBlock} already looks frozen (${frozenAt.join("; ")}). Pick a block before the freeze started.\n` +
+          "If that really was the normal state before this incident, rerun with --baseline-frozen-ok.",
+      );
+    }
     const blk = await client.getBlock({ blockNumber: baselineBlock });
     baseline = baselineFromState(at, blk.hash as Hex);
     if (existsSync(baselineFile)) console.log(`  replacing ${baselineFile} with the state at block ${baselineBlock} (--baseline-block)`);
