@@ -1,0 +1,25 @@
+{
+  "version": "1.0",
+  "chainId": "8453",
+  "createdAt": 1790091602876,
+  "meta": {
+    "name": "VRF staging rollback 1/2: pause machine",
+    "description": "Pause PackMachine 0x46999a9D321df9e752eCc007f5F67D2981183109. Then wait until check-pending.ts --coordinator 0xE09DB016De96c621925a28B27a7EDBb5951089bA reports no pending in-house requests.",
+    "txBuilderVersion": "1.16.5",
+    "createdFromSafeAddress": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0x46999a9D321df9e752eCc007f5F67D2981183109",
+      "value": "0",
+      "data": null,
+      "contractMethod": {
+        "inputs": [],
+        "name": "pause",
+        "payable": false
+      },
+      "contractInputsValues": null
+    }
+  ]
+}

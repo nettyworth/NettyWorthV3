@@ -1,0 +1,63 @@
+{
+  "version": "1.0",
+  "chainId": "8453",
+  "createdAt": 1790091602876,
+  "meta": {
+    "name": "VRF staging rollback 2/2: back to Chainlink and unpause",
+    "description": "Point router 0xeA3aDEac6b82b9852a140E642BC10135638653E1 back at Chainlink 0xd5D517aBE5cF79B7e95eC98dB0f0277788aFF634, restore requestConfirmations 3, unpause.",
+    "txBuilderVersion": "1.16.5",
+    "createdFromSafeAddress": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0xeA3aDEac6b82b9852a140E642BC10135638653E1",
+      "value": "0",
+      "data": null,
+      "contractMethod": {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "newCoordinator",
+            "type": "address"
+          }
+        ],
+        "name": "setVRFCoordinator",
+        "payable": false
+      },
+      "contractInputsValues": {
+        "newCoordinator": "0xd5D517aBE5cF79B7e95eC98dB0f0277788aFF634"
+      }
+    },
+    {
+      "to": "0xeA3aDEac6b82b9852a140E642BC10135638653E1",
+      "value": "0",
+      "data": null,
+      "contractMethod": {
+        "inputs": [
+          {
+            "internalType": "uint16",
+            "name": "confirmations",
+            "type": "uint16"
+          }
+        ],
+        "name": "setRequestConfirmations",
+        "payable": false
+      },
+      "contractInputsValues": {
+        "confirmations": "3"
+      }
+    },
+    {
+      "to": "0x46999a9D321df9e752eCc007f5F67D2981183109",
+      "value": "0",
+      "data": null,
+      "contractMethod": {
+        "inputs": [],
+        "name": "unpause",
+        "payable": false
+      },
+      "contractInputsValues": null
+    }
+  ]
+}

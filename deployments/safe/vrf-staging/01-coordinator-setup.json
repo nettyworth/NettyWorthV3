@@ -1,0 +1,96 @@
+{
+  "version": "1.0",
+  "chainId": "8453",
+  "createdAt": 1790091602876,
+  "meta": {
+    "name": "VRF staging 1/3: coordinator setup",
+    "description": "On NettyVRFCoordinator 0xE09DB016De96c621925a28B27a7EDBb5951089bA: registerKey (keyHash 0x359174e60549fb76bd0dc625c9b1a0580d2b0312ab1b013218462c5966f07b89, with proof of possession), authorize router 0xeA3aDEac6b82b9852a140E642BC10135638653E1, allow fulfillers A 0xDB968Dd4d02A8F2FE66205fB000125c8B3e86442 and B 0x440F9c1dd178C7ff5595E6471B48A7BF7d53592C. No effect on users until 03.",
+    "txBuilderVersion": "1.16.5",
+    "createdFromSafeAddress": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0xE09DB016De96c621925a28B27a7EDBb5951089bA",
+      "value": "0",
+      "data": "0x112fd8530f8f850fbafe78e453fcf7589c19bc0468a49df0c0331c33b767e3113811bd1bd0d7b891c5300bf53fe08460e1f3ad06330680eef7cc20bc89e69419a1e318210f8f850fbafe78e453fcf7589c19bc0468a49df0c0331c33b767e3113811bd1bd0d7b891c5300bf53fe08460e1f3ad06330680eef7cc20bc89e69419a1e31821e9aec2b4fa9983698df4ffb5f1ab3ab62322d6f6acea31bd00021e3eba5b4702db9ae75b07ddf7b7067163f755536672760f4723c794182458bf3c4bb96c5182736f8e35c8910067344273fc7d9751db2ec0f17115a590f18b67cc94249cc2da763abe51001162e7ff77b699239118e34fe70ac6c6d0e4bf30cca69e14c764878cf7589766cd463532d6eb3dc3b1de0457e3b6c0a84888d7589e446e2ab8a3f5000000000000000000000000f40f49d80db19062a0f718e11916093df30f2b29cbbaa3215f1f9750d0f8a28ee3eff18524db053a9b8e1ad114dcf67e0793c651a36470546431ac725aeaff1973b12cb8df930565e57d993de3b217171d859cfab318d1250b78b03a6683852167c58227e09159389860a752c6f43447e75b5422a3b41914c6a0bb2d047deaedc217d74841630c7ab0b50bd71d1c70407d62c7782fa1b81015479e198a9425695f407157bfd1ed20e3eaf9c71d4df6ec8e09fe75",
+      "contractMethod": null,
+      "contractInputsValues": null
+    },
+    {
+      "to": "0xE09DB016De96c621925a28B27a7EDBb5951089bA",
+      "value": "0",
+      "data": null,
+      "contractMethod": {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "router",
+            "type": "address"
+          },
+          {
+            "internalType": "bool",
+            "name": "authorized",
+            "type": "bool"
+          }
+        ],
+        "name": "setRouter",
+        "payable": false
+      },
+      "contractInputsValues": {
+        "router": "0xeA3aDEac6b82b9852a140E642BC10135638653E1",
+        "authorized": "true"
+      }
+    },
+    {
+      "to": "0xE09DB016De96c621925a28B27a7EDBb5951089bA",
+      "value": "0",
+      "data": null,
+      "contractMethod": {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "fulfiller",
+            "type": "address"
+          },
+          {
+            "internalType": "bool",
+            "name": "allowed",
+            "type": "bool"
+          }
+        ],
+        "name": "setFulfiller",
+        "payable": false
+      },
+      "contractInputsValues": {
+        "fulfiller": "0xDB968Dd4d02A8F2FE66205fB000125c8B3e86442",
+        "allowed": "true"
+      }
+    },
+    {
+      "to": "0xE09DB016De96c621925a28B27a7EDBb5951089bA",
+      "value": "0",
+      "data": null,
+      "contractMethod": {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "fulfiller",
+            "type": "address"
+          },
+          {
+            "internalType": "bool",
+            "name": "allowed",
+            "type": "bool"
+          }
+        ],
+        "name": "setFulfiller",
+        "payable": false
+      },
+      "contractInputsValues": {
+        "fulfiller": "0x440F9c1dd178C7ff5595E6471B48A7BF7d53592C",
+        "allowed": "true"
+      }
+    }
+  ]
+}

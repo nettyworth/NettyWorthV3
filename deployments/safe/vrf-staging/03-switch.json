@@ -1,0 +1,63 @@
+{
+  "version": "1.0",
+  "chainId": "8453",
+  "createdAt": 1790091602876,
+  "meta": {
+    "name": "VRF staging 3/3: switch to in-house VRF and unpause",
+    "description": "Point router 0xeA3aDEac6b82b9852a140E642BC10135638653E1 at NettyVRFCoordinator 0xE09DB016De96c621925a28B27a7EDBb5951089bA, set requestConfirmations to 1, unpause the machine. Fulfiller wallets A 0xDB968Dd4d02A8F2FE66205fB000125c8B3e86442 and B 0x440F9c1dd178C7ff5595E6471B48A7BF7d53592C passed the preflight (key matches, balance >= 0.005 ETH) when this file was built; rebuild with --simulate right before queuing if time has passed.",
+    "txBuilderVersion": "1.16.5",
+    "createdFromSafeAddress": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0xeA3aDEac6b82b9852a140E642BC10135638653E1",
+      "value": "0",
+      "data": null,
+      "contractMethod": {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "newCoordinator",
+            "type": "address"
+          }
+        ],
+        "name": "setVRFCoordinator",
+        "payable": false
+      },
+      "contractInputsValues": {
+        "newCoordinator": "0xE09DB016De96c621925a28B27a7EDBb5951089bA"
+      }
+    },
+    {
+      "to": "0xeA3aDEac6b82b9852a140E642BC10135638653E1",
+      "value": "0",
+      "data": null,
+      "contractMethod": {
+        "inputs": [
+          {
+            "internalType": "uint16",
+            "name": "confirmations",
+            "type": "uint16"
+          }
+        ],
+        "name": "setRequestConfirmations",
+        "payable": false
+      },
+      "contractInputsValues": {
+        "confirmations": "1"
+      }
+    },
+    {
+      "to": "0x46999a9D321df9e752eCc007f5F67D2981183109",
+      "value": "0",
+      "data": null,
+      "contractMethod": {
+        "inputs": [],
+        "name": "unpause",
+        "payable": false
+      },
+      "contractInputsValues": null
+    }
+  ]
+}
