@@ -125,7 +125,7 @@ async function send(from: Address | typeof deployer, to: Address, data: Hex): Pr
 const asSafe = (to: Address, data: Hex) => send(SAFE, to, data);
 
 function tool(script: string, args: string[]): { code: number; out: string } {
-  const r = spawnSync("node", ["--experimental-strip-types", join(HERE, script), ...args, "--rpc", URL, "--delay", "0"], {
+  const r = spawnSync("node", ["--experimental-strip-types", join(HERE, script), ...args, "--rpc", URL], {
     cwd: ROOT,
     encoding: "utf8",
     timeout: 600_000,

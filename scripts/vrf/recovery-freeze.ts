@@ -511,10 +511,12 @@ export async function readFreezeState(client: PublicClient, machine: Address, de
     depositors.map((d) => mappingSlot(d, MACHINE_STORAGE_SLOT + F_AUTHORIZED_DEPOSITORS)),
     blockNumber,
   );
+  // readSlots (eth_call), not eth_getStorageAt: an anvil fork forwards historical getStorageAt to
+  // its upstream even for blocks it mined itself, which stalls the rehearsal.
   const implementations = await Promise.all(
     STAGING_PROXIES.map(async (p) => {
-      const word = await client.getStorageAt({ address: p.proxy, slot: numberToHex(ERC1967_IMPLEMENTATION_SLOT, { size: 32 }), blockNumber });
-      return { name: p.name, proxy: p.proxy, implementation: getAddress(`0x${(word ?? "0x").slice(2).padStart(64, "0").slice(24)}`) };
+      const [word] = await readSlots(client, p.proxy, [ERC1967_IMPLEMENTATION_SLOT], blockNumber);
+      return { name: p.name, proxy: p.proxy, implementation: getAddress(numberToHex(word, { size: 20 })) };
     }),
   );
   return {
