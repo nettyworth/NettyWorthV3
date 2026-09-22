@@ -159,5 +159,15 @@
     "packMachineFactory": "0x2Dd68af36e7001690d2c815B68103d7FA81E20D1",
     "buybackPool": "0x778e60808A37FAABD61446a4ed29C11fF6d64698",
     "deployedAt": "2026-07-07T08:00:38.103Z"
+  },
+  "NettyVRFCoordinator": {
+    "address": "0xE09DB016De96c621925a28B27a7EDBb5951089bA",
+    "owner": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+    "deployer": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+    "auditedCommit": "01753d868dd2b628e7b7bc5027ed39ce702174e2",
+    "deployedAtBlock": "51650144",
+    "deploymentTx": "0x4c6e7e8242795b04c85e1ccbe8463e35da61866498e7115bb1b369d328e413f5",
+    "deployedAt": "2026-09-22T15:07:15.000Z",
+    "verifier": "@chainlink/contracts@1.1.0 src/v0.8/vrf/VRF.sol (MIT)"
   }
 }
