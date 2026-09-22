@@ -216,5 +216,16 @@
       "factory": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
       "createdAt": "2026-07-11T07:59:36.759Z"
     }
-  ]
+  ],
+  "NettyVRFCoordinator": {
+    "address": "0xB24D3534E96F72621737CF86A80898F4B2474846",
+    "owner": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+    "deployer": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
+    "auditedCommit": "01753d868dd2b628e7b7bc5027ed39ce702174e2",
+    "deployedAtBlock": "51664640",
+    "deploymentTx": "0x36bf240db623ed749a87373a9b59779cc4a5086d112df92ef18758e3be61dc20",
+    "deployedAt": "2026-09-22T23:10:27.000Z",
+    "verification": "verified on Basescan",
+    "verifier": "@chainlink/contracts@1.1.0 src/v0.8/vrf/VRF.sol (MIT)"
+  }
 }
