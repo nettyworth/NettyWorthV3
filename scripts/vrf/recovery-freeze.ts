@@ -32,6 +32,10 @@
  *   - registry setPackTierWeights (PACK_OPERATOR_ROLE; the registry has no pause), or a factory
  *     or registry change: procedurally locked, detected by recording the weights the machine
  *     resolves (machine.getPack(packId).tierWeights) at the same three points
+ *   - an upgrade of any UUPS proxy the draw or the freeze depends on (BuybackPool, registries,
+ *     factory, PermissionManager, AssetNFT, router; UPGRADER_ROLE): each implementation is pinned
+ *     (STAGING_PROXIES) at the announced block and now, and no Upgraded event may lie in between
+ *     (re-audit R-04)
  * This module reads that state; build-recovery-freeze.ts, build-recovery-payload.ts and
  * check-recovery-payload.ts act on it. Read-only: no keys, no transactions.
  */
@@ -84,6 +88,26 @@ const F_AUTHORIZED_DEPOSITORS = 6n;
 const F_PACK_TIER_POOLS = 8n;
 const F_PACK_POOL_INDEX = 9n;
 
+/**
+ * Every ERC-1967 (UUPS) proxy the staging draw or the freeze depends on, with the implementation
+ * reviewed for this procedure (read from the ERC-1967 slot on Base, 2026-09-22). The machine
+ * itself is an EIP-1167 clone and is pinned by code instead (assertDeployedCode). An upgrade can
+ * reopen a frozen path without emitting a pause or depositor event (re-audit R-04), so the tools
+ * refuse unless each implementation equals its pin at the announced block and now, with no
+ * Upgraded event in between. After a reviewed upgrade, update the pin in the same change.
+ */
+export const STAGING_PROXIES: readonly { name: string; proxy: Address; implementation: Address }[] = [
+  { name: "BuybackPool", proxy: STAGING_BUYBACK_POOL, implementation: getAddress("0x7bd203147f8506d46dca2a66b70eb17e9f4e8416") },
+  { name: "PackRegistry", proxy: getAddress("0xb57233fbc2539dbd3285e95dd28e3e40ea670552"), implementation: getAddress("0xa9324fb46d9e4e7617d138e7a974c9fd1a5a514e") },
+  { name: "PackTierRegistry", proxy: getAddress("0x24aadcfc57cbb3626123303efc3ab15bfbec2c3c"), implementation: getAddress("0x3b78bdbadb96f8d59890871819cc0bdb2e15287e") },
+  { name: "PackMachineFactory", proxy: getAddress("0x2dd68af36e7001690d2c815b68103d7fa81e20d1"), implementation: getAddress("0x5205be277119cc2f2c0833666dec76badf3bcee4") },
+  { name: "PermissionManager", proxy: getAddress("0x3aed0bcdf2a578688d31ac394d99fa710b780ec6"), implementation: getAddress("0xe64dcc7647c8fd321b964a64efbe9551006b3388") },
+  { name: "AssetNFT", proxy: getAddress("0x27b125fb73094e53741b850ad779a746a59b089a"), implementation: getAddress("0x16dae5d3e1ddc78940492e912abfa660e58e23de") },
+  { name: "PackVRFRouter", proxy: STAGING_ROUTER, implementation: getAddress("0xd70381eab150ebd57be4f59a765e85e03ff4f96b") },
+];
+/** ERC-1967 implementation slot: bytes32(uint256(keccak256("eip1967.proxy.implementation")) - 1). */
+export const ERC1967_IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbcn;
+
 /** The staging machine's runtime code: EIP-1167 minimal proxy to the verified implementation. */
 export const STAGING_MACHINE_IMPLEMENTATION = getAddress("0xe8a11268434946e6918b068328cd29af10b609fa");
 export const STAGING_MACHINE_CODE: Hex = "0x363d3d373d3d3d363d73e8a11268434946e6918b068328cd29af10b609fa5af43d82803e903d91602b57fd5bf3";
@@ -112,6 +136,7 @@ export const EV_PAUSED = parseAbiItem("event Paused(address account)");
 export const EV_UNPAUSED = parseAbiItem("event Unpaused(address account)");
 export const EV_DEPOSITOR = parseAbiItem("event AuthorizedDepositorUpdated(address indexed depositor, bool authorized)");
 export const EV_BUYBACK_POOL = parseAbiItem("event BuybackPoolUpdated(address indexed oldPool, address indexed newPool)");
+export const EV_UPGRADED = parseAbiItem("event Upgraded(address indexed implementation)");
 export const EV_ROUTER_REQUESTED = parseAbiItem(
   "event RandomnessRequested(uint256 indexed requestId, address indexed packMachine, address user)",
 );
@@ -451,6 +476,8 @@ export interface FreezeState {
   buybackPoolPaused: boolean;
   /** Every address ever authorized as a depositor (checkpoint + later events) and its status. */
   depositors: { address: Address; authorized: boolean }[];
+  /** Each STAGING_PROXIES entry's implementation (ERC-1967 slot) at `block`. */
+  implementations: { name: string; proxy: Address; implementation: Address }[];
 }
 
 /**
@@ -484,18 +511,35 @@ export async function readFreezeState(client: PublicClient, machine: Address, de
     depositors.map((d) => mappingSlot(d, MACHINE_STORAGE_SLOT + F_AUTHORIZED_DEPOSITORS)),
     blockNumber,
   );
+  const implementations = await Promise.all(
+    STAGING_PROXIES.map(async (p) => {
+      const word = await client.getStorageAt({ address: p.proxy, slot: numberToHex(ERC1967_IMPLEMENTATION_SLOT, { size: 32 }), blockNumber });
+      return { name: p.name, proxy: p.proxy, implementation: getAddress(`0x${(word ?? "0x").slice(2).padStart(64, "0").slice(24)}`) };
+    }),
+  );
   return {
     block: blockNumber,
     machinePaused,
     buybackPool,
     buybackPoolPaused,
     depositors: depositors.map((address, i) => ({ address, authorized: statuses[i] !== 0n })),
+    implementations,
   };
+}
+
+/** Proxies whose implementation is not the pinned one (re-audit R-04). */
+export function implementationProblems(s: FreezeState): string[] {
+  return s.implementations.flatMap((i) => {
+    const pin = STAGING_PROXIES.find((p) => p.proxy === i.proxy);
+    return pin && pin.implementation === i.implementation
+      ? []
+      : [`block ${s.block}: ${i.name} ${i.proxy} implementation is ${i.implementation}, pinned ${pin?.implementation ?? "none"} (upgraded? review it, then update STAGING_PROXIES)`];
+  });
 }
 
 /** Why the state is not frozen; empty when every mutator reachable without a trusted role is closed. */
 export function freezeProblems(s: FreezeState): string[] {
-  const p: string[] = [];
+  const p: string[] = [...implementationProblems(s)];
   if (!s.machinePaused) p.push(`block ${s.block}: the staging PackMachine is not paused (openPack is open)`);
   if (s.buybackPool !== STAGING_BUYBACK_POOL) p.push(`block ${s.block}: machine buybackPool is ${s.buybackPool}, expected ${STAGING_BUYBACK_POOL}`);
   if (!s.buybackPoolPaused) p.push(`block ${s.block}: BuybackPool ${s.buybackPool} is not paused (buyback -> depositFromPool is open to any card holder)`);
@@ -506,8 +550,9 @@ export function freezeProblems(s: FreezeState): string[] {
 }
 
 /**
- * Pause and depositor transitions in [fromBlock, toBlock]. With the state frozen at fromBlock - 1
- * and at toBlock, none may exist: that proves the freeze held for every block in between.
+ * Pause, depositor and proxy-upgrade transitions in [fromBlock, toBlock]. With the state frozen
+ * (and every implementation pinned) at fromBlock - 1 and at toBlock, none may exist: that proves
+ * the freeze held for every block in between.
  */
 export async function freezeTransitions(
   client: PublicClient,
@@ -525,13 +570,15 @@ export async function freezeTransitions(
     toBlock,
     ...tuning,
   });
+  const upgrades = await scanLogs(client, { address: STAGING_PROXIES.map((p) => p.proxy), events: EV_UPGRADED, fromBlock, toBlock, ...tuning });
   const names: Record<string, string> = {
     [keccak256(toHex("Paused(address)"))]: "Paused",
     [keccak256(toHex("Unpaused(address)"))]: "Unpaused",
     [keccak256(toHex("AuthorizedDepositorUpdated(address,bool)"))]: "AuthorizedDepositorUpdated",
     [keccak256(toHex("BuybackPoolUpdated(address,address)"))]: "BuybackPoolUpdated",
+    [keccak256(toHex("Upgraded(address)"))]: "Upgraded",
   };
-  return logs.map((l) => `${names[l.topics[0] as string] ?? l.topics[0]} on ${l.address} in block ${l.blockNumber} (tx ${l.transactionHash})`);
+  return [...logs, ...upgrades].map((l) => `${names[l.topics[0] as string] ?? l.topics[0]} on ${l.address} in block ${l.blockNumber} (tx ${l.transactionHash})`);
 }
 
 // ---------------------------------------------------------------------------------------------

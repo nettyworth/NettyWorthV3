@@ -170,7 +170,7 @@ contract NettyVRFCoordinatorAuditRegressionTest is NettyVRFCoordinatorForkBase {
     }
 
     /// PoC test_F02_onlyRecoveryIsAdminInjectedWords, kept as the executable form of the
-    /// staging manual-recovery runbook (docs/pack-rip-latency/RUNBOOK-vrf-staging-manual-recovery.md):
+    /// staging manual-recovery runbook (aws docs/runbooks/vrf-staging-manual-recovery.md):
     /// pause, drain, the Safe becomes the router's coordinator, delivers words derived from a
     /// pre-announced future block hash, points the router back, unpauses. Also shows why the
     /// runbook drains first: an in-house request fulfilled mid-recovery would fail terminally.

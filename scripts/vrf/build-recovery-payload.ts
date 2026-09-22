@@ -3,7 +3,7 @@
  * (Failed, or Unprovable past the 8191-block window). The staging PackMachine has no
  * refund function (audit F-02, accepted), so the Safe settles the open by briefly becoming
  * the router's coordinator and delivering words itself. Runbook:
- * aws/docs/pack-rip-latency/RUNBOOK-vrf-staging-manual-recovery.md.
+ * aws/docs/runbooks/vrf-staging-manual-recovery.md.
  *
  *   node --experimental-strip-types scripts/vrf/build-recovery-payload.ts \
  *     --coordinator 0x... --request-id <id> --announced-block <n> [--rpc <url>] [--out dir]
@@ -16,7 +16,7 @@
  * the batch executes (audit N-01). The script refuses unless:
  *   - the request is Failed or Unprovable, belongs to the staging router, and the router has
  *     not settled it (chunked scan from the request block, log-scan.ts; audit N-02);
- *   - the router's coordinator is --coordinator and no other request is Pending on it;
+ *   - the router's coordinator is --coordinator and no other staging-router request is Pending on it;
  *   - the announced block is mined and after the request block;
  *   - every pool mutator is frozen (recovery-freeze.ts): the machine and the BuybackPool paused,
  *     no authorized depositor, at the announced block AND now, with no pause or depositor
@@ -121,16 +121,18 @@ try {
   const settled = await scanLogs(client, { address: STAGING_ROUTER, events: ROUTER_FULFILLED, args: { requestId }, fromBlock: r.blockNum, toBlock: latest, ...tuning });
   if (settled.length) fail(`the router already settled request ${requestId} (tx ${settled[0].transactionHash})`);
 
-  // Any request still provable would fail terminally while the Safe is the coordinator, and a
-  // fulfilment would change the pools. Older requests cannot be delivered, so the window is the range.
-  const requested = await scanLogs(client, { address: coordinator, events: REQUESTED, fromBlock: latest > WINDOW ? latest - WINDOW : 0n, toBlock: latest, ...tuning });
+  // Any staging-router request still provable would fail terminally while the Safe is the
+  // router's coordinator, and its fulfilment would change the pools. Requests from other routers
+  // (if the coordinator is ever shared) touch neither, and must not block or reroll the recovery
+  // (re-audit R-02). Older requests cannot be delivered, so the window is the range.
+  const requested = await scanLogs(client, { address: coordinator, events: REQUESTED, args: { router: STAGING_ROUTER }, fromBlock: latest > WINDOW ? latest - WINDOW : 0n, toBlock: latest, ...tuning });
   for (const l of requested) {
     const id = BigInt(l.topics[1] as Hex);
     if (id === requestId) continue;
     // eslint-disable-next-line no-await-in-loop
     const other = await client.readContract({ address: coordinator, abi: coordAbi, functionName: "getRequest", args: [id], blockNumber: latest });
     if (other.status === 1 && latest - other.blockNum <= WINDOW) {
-      fail(`request ${id} is still Pending: wait for the fulfiller to drain it (check-pending.ts) before recovering`);
+      fail(`request ${id} is a staging-router request still Pending: wait for the fulfiller to drain it (check-pending.ts --only-router) before recovering`);
     }
   }
 

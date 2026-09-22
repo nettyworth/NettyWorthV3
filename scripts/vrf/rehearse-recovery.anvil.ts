@@ -1,6 +1,6 @@
 /**
  * End-to-end rehearsal of the staging manual-recovery TOOLING on an anvil fork of Base
- * (audit N-01 / N-02). Runs the real scripts as subprocesses against the fork and checks that
+ * (audit N-01 / N-02, re-audit R-01 / R-02 / R-04). Runs the real scripts as subprocesses against the fork and checks that
  * they refuse when any pool mutator is left open or changes, and that a correctly frozen
  * recovery delivers exactly the recorded card.
  *
@@ -44,7 +44,9 @@ import {
   STAGING_ASSET_LENDING_POOL,
   STAGING_BUYBACK_POOL,
   STAGING_MACHINE,
+  STAGING_PROXIES,
   STAGING_ROUTER,
+  ERC1967_IMPLEMENTATION_SLOT,
 } from "./recovery-freeze.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -57,6 +59,10 @@ const OUT = mkdtempSync(join(tmpdir(), "vrf-recovery-rehearsal-"));
 const USDC = getAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 const STAGING_PM = getAddress("0x3AED0BcDf2a578688d31ac394d99Fa710b780EC6");
 const STAGING_REGISTRY = getAddress("0xb57233fbc2539dbD3285e95Dd28E3E40Ea670552");
+/** Production router: stands in for a second router sharing the coordinator (re-audit R-02). */
+const OTHER_ROUTER = getAddress("0x4aD5C628030546D12754F608081a6256D6c5FDc9");
+/** An older BuybackPool implementation with code, to fake an unreviewed upgrade (re-audit R-04). */
+const OTHER_BUYBACK_IMPL = getAddress("0x591fb8f6377f4f629e41a132692a8931be1619e7");
 const PACK_ID = 13n;
 const VRF_SK = 0x5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eedn;
 // anvil's well-known, publicly documented dev keys (funded on the fork by anvil).
@@ -88,6 +94,10 @@ const pausable = parseAbi(["function pause()", "function unpause()", "function p
 const pmAbi = parseAbi(["function grantRole(bytes32,address)"]);
 const erc20 = parseAbi(["function approve(address,uint256) returns (bool)"]);
 const registryAbi = parseAbi(["function setPackTierWeights(address,uint256,uint32[6])"]);
+const requestAbi = parseAbi([
+  "struct RandomWordsRequest { bytes32 keyHash; uint256 subId; uint16 requestConfirmations; uint32 callbackGasLimit; uint32 numWords; bytes extraArgs; }",
+  "function requestRandomWords(RandomWordsRequest req) returns (uint256)",
+]);
 const CARD_WON = keccak256(toHex("CardWon(address,uint256,uint256)"));
 
 const client = createTestClient({ mode: "anvil", chain: base, transport: http(URL, { timeout: 120_000 }) })
@@ -222,7 +232,8 @@ async function main(): Promise<void> {
   console.log(`request ${rid} is Failed (stranded)`);
 
   const builderArgs = (announced: bigint) => ["--coordinator", coord, "--request-id", rid.toString(), "--announced-block", announced.toString(), "--out", OUT];
-  const pending = tool("check-pending.ts", ["--coordinator", coord, "--from-block", deployRc.blockNumber.toString()]);
+  const pendingArgs = ["--coordinator", coord, "--from-block", deployRc.blockNumber.toString(), "--only-router", STAGING_ROUTER];
+  const pending = tool("check-pending.ts", pendingArgs);
   expect("check-pending --coordinator reports the Failed request (exit 3)", pending.code === 3 && /needs manual recovery/.test(pending.out), `exit ${pending.code}`);
 
   const clean = await client.snapshot();
@@ -258,8 +269,9 @@ async function main(): Promise<void> {
   snap = await client.snapshot();
   {
     const a = await announceAndMine();
-    const f = tool("build-recovery-freeze.ts", ["--out", OUT]);
-    await executeBatchFile(join(OUT, "recovery-freeze.json"));
+    const out4 = mkdtempSync(join(tmpdir(), "vrf-recovery-r4-"));
+    const f = tool("build-recovery-freeze.ts", ["--out", out4]);
+    await executeBatchFile(join(out4, "recovery-freeze.json"));
     await client.mine({ blocks: 2 });
     const r = tool("build-recovery-payload.ts", builderArgs(a));
     expect("builder refuses when the freeze came after the announced block", f.code === 0 && r.code === 2 && new RegExp(`block ${a}: .*not paused`).test(r.out), `freeze exit ${f.code}, builder exit ${r.code}`);
@@ -269,9 +281,43 @@ async function main(): Promise<void> {
   // R5: the procedure. Freeze, (drain: nothing Pending), announce, build, check.
   const f = tool("build-recovery-freeze.ts", ["--out", OUT]);
   expect("build-recovery-freeze writes freeze + unfreeze after simulating both", f.code === 0 && /simulated as the Safe/.test(f.out), `exit ${f.code}`);
+  const unfreezeCalls = () => (JSON.parse(readFileSync(join(OUT, "recovery-unfreeze.json"), "utf8")) as { transactions: unknown[] }).transactions.length;
+  const fullUnfreeze = unfreezeCalls();
   await executeBatchFile(join(OUT, "recovery-freeze.json"));
-  const again = tool("build-recovery-freeze.ts", ["--out", OUT]);
-  expect("build-recovery-freeze writes nothing once frozen", again.code === 0 && /already frozen/.test(again.out), `exit ${again.code}`);
+  const noResume = tool("build-recovery-freeze.ts", ["--out", OUT]);
+  expect("build-recovery-freeze refuses to rebuild during a freeze without --resume", noResume.code === 2 && /--resume/.test(noResume.out), `exit ${noResume.code}`);
+  const again = tool("build-recovery-freeze.ts", ["--out", OUT, "--resume"]);
+  expect(
+    "build-recovery-freeze --resume once frozen: no freeze batch, full unfreeze kept",
+    again.code === 0 && /already frozen/.test(again.out) && unfreezeCalls() === fullUnfreeze,
+    `exit ${again.code}, unfreeze ${unfreezeCalls()}/${fullUnfreeze} call(s)`,
+  );
+  // R-01: part of the freeze is lifted, then restored with --resume. The unfreeze must still be
+  // the full inverse of the pre-incident state, not of the partly frozen one.
+  await asSafe(STAGING_BUYBACK_POOL, encodeFunctionData({ abi: pausable, functionName: "unpause" }));
+  const partial = tool("build-recovery-freeze.ts", ["--out", OUT, "--resume"]);
+  const partialFreeze = (JSON.parse(readFileSync(join(OUT, "recovery-freeze.json"), "utf8")) as { transactions: unknown[] }).transactions.length;
+  expect(
+    "R-01: rebuilding a partly lifted freeze keeps the full unfreeze",
+    partial.code === 0 && partialFreeze === 1 && unfreezeCalls() === fullUnfreeze,
+    `exit ${partial.code}, freeze ${partialFreeze} call(s), unfreeze ${unfreezeCalls()}/${fullUnfreeze} call(s)`,
+  );
+  await executeBatchFile(join(OUT, "recovery-freeze.json"));
+  // R-02: a request from another router stays Pending on the shared coordinator. It must not
+  // block the staging recovery (the staging-router filter), while the unfiltered scan still sees it.
+  await asSafe(coord, encodeFunctionData({ abi: coordAbi, functionName: "setRouter", args: [OTHER_ROUTER, true] } as never));
+  await send(OTHER_ROUTER, coord, encodeFunctionData({
+    abi: requestAbi,
+    functionName: "requestRandomWords",
+    args: [{ keyHash: `0x${"0".repeat(64)}`, subId: 0n, requestConfirmations: 1, callbackGasLimit: 500_000, numWords: 1, extraArgs: "0x" }],
+  }));
+  const unfiltered = tool("check-pending.ts", ["--coordinator", coord, "--from-block", deployRc.blockNumber.toString()]);
+  const filtered = tool("check-pending.ts", pendingArgs);
+  expect(
+    "R-02: another router's Pending request blocks only the unfiltered drain",
+    unfiltered.code === 1 && filtered.code === 3,
+    `unfiltered exit ${unfiltered.code}, --only-router exit ${filtered.code}`,
+  );
   const announced = await announceAndMine();
   const b = tool("build-recovery-payload.ts", builderArgs(announced));
   expect("builder accepts a correct freeze and records the draw state", b.code === 0 && /freeze held from block/.test(b.out), `exit ${b.code}${b.code ? `: ${b.out.trim().split("\n").slice(-3).join(" | ")}` : ""}`);
@@ -305,6 +351,18 @@ async function main(): Promise<void> {
   c = tool("check-recovery-payload.ts", ["--record", recordFile]);
   expect("check refuses a modified batch file", c.code === 2 && /was modified after it was built/.test(c.out), `exit ${c.code}`);
   writeFileSync(batchFile, original);
+  // R-04: an implementation change that emits no event (a raw storage write) is caught by the pin.
+  s2 = await client.snapshot();
+  const bb = STAGING_PROXIES.find((p) => p.name === "BuybackPool");
+  if (!bb) throw new Error("no BuybackPool pin");
+  await client.setStorageAt({
+    address: bb.proxy,
+    index: numberToHex(ERC1967_IMPLEMENTATION_SLOT, { size: 32 }),
+    value: numberToHex(hexToBigInt(OTHER_BUYBACK_IMPL), { size: 32 }),
+  });
+  c = tool("check-recovery-payload.ts", ["--record", recordFile]);
+  expect("R-04: check refuses when a pinned proxy's implementation changed", c.code === 2 && /BuybackPool .* implementation is/.test(c.out), `exit ${c.code}`);
+  await client.revert({ id: s2 });
 
   // R10: execute as the final signer, verify, unfreeze.
   const { won } = await executeBatchFile(batchFile);
@@ -313,7 +371,7 @@ async function main(): Promise<void> {
     won.length === record.predicted.won.length && won.every((w, i) => w.toString() === record.predicted.won[i]),
     `won [${won}] recorded [${record.predicted.won}]`,
   );
-  const settledPending = tool("check-pending.ts", ["--coordinator", coord, "--from-block", deployRc.blockNumber.toString()]);
+  const settledPending = tool("check-pending.ts", pendingArgs);
   expect("check-pending shows it settled by the router (exit 0)", settledPending.code === 0 && /settled by router/.test(settledPending.out), `exit ${settledPending.code}`);
   c = tool("check-recovery-payload.ts", ["--record", recordFile]);
   expect("check refuses to run the batch twice", c.code === 2 && /already settled/.test(c.out), `exit ${c.code}`);
@@ -321,6 +379,14 @@ async function main(): Promise<void> {
   const mPaused = await client.readContract({ address: STAGING_MACHINE, abi: machineAbi, functionName: "paused" });
   const bPaused = await client.readContract({ address: STAGING_BUYBACK_POOL, abi: pausable, functionName: "paused" });
   expect("unfreeze restores machine, BuybackPool and depositor", !mPaused && !bPaused && (await isAuthorized(STAGING_ASSET_LENDING_POOL)), `machine paused ${mPaused}, BuybackPool paused ${bPaused}`);
+  const fin = tool("build-recovery-freeze.ts", ["--out", OUT, "--finish"]);
+  let baselineGone = false;
+  try {
+    readFileSync(join(OUT, "recovery-baseline.json"));
+  } catch {
+    baselineGone = true;
+  }
+  expect("--finish confirms the baseline is restored and closes the incident", fin.code === 0 && baselineGone, `exit ${fin.code}`);
 }
 
 try {

@@ -1,7 +1,7 @@
 /**
  * Pre-execution check for a staging manual-recovery batch (audit N-01). The FINAL Safe signer
  * runs it immediately before executing, and executes only on exit 0. Runbook:
- * aws/docs/pack-rip-latency/RUNBOOK-vrf-staging-manual-recovery.md.
+ * aws/docs/runbooks/vrf-staging-manual-recovery.md.
  *
  *   node --experimental-strip-types scripts/vrf/check-recovery-payload.ts \
  *     --record deployments/safe/vrf-staging/recovery-<id>.record.json [--rpc <url>] [--chunk <blocks>] [--delay <ms>]
@@ -11,9 +11,9 @@
  *     exactly setVRFCoordinator(Safe), rawFulfillRandomWords(id, words from the announced block
  *     hash), setVRFCoordinator(coordinator);
  *   - the request is still Failed/Unprovable and unsettled, the router still points at the
- *     coordinator, and no other request is Pending on it;
- *   - every pool mutator is still frozen, with no pause or depositor transition since the
- *     announced block;
+ *     coordinator, and no other staging-router request is Pending on it;
+ *   - every pool mutator is still frozen and every proxy implementation pinned, with no pause,
+ *     depositor or upgrade transition since the announced block;
  *   - the machine is still the verified clone; the pending open, the ORDERED pools of the pack
  *     (same fingerprint) and the tier weights the machine resolves are unchanged;
  *   - the card(s) predicted from the pools equal the recorded ones, and eth_simulateV1 of the
@@ -159,13 +159,13 @@ try {
   check(getAddress(current) === coordinator, `the router's coordinator is ${current}, not ${coordinator}`);
   const settled = await scanLogs(client, { address: STAGING_ROUTER, events: ROUTER_FULFILLED, args: { requestId }, fromBlock: r.blockNum, toBlock: latest, ...tuning });
   check(settled.length === 0, `the router already settled request ${requestId}${settled[0] ? ` (tx ${settled[0].transactionHash})` : ""}`);
-  const requested = await scanLogs(client, { address: coordinator, events: REQUESTED, fromBlock: latest > WINDOW ? latest - WINDOW : 0n, toBlock: latest, ...tuning });
+  const requested = await scanLogs(client, { address: coordinator, events: REQUESTED, args: { router: STAGING_ROUTER }, fromBlock: latest > WINDOW ? latest - WINDOW : 0n, toBlock: latest, ...tuning });
   for (const l of requested) {
     const id = BigInt(l.topics[1] as Hex);
     if (id === requestId) continue;
     // eslint-disable-next-line no-await-in-loop
     const other = await client.readContract({ address: coordinator, abi: coordAbi, functionName: "getRequest", args: [id], blockNumber: latest });
-    check(!(other.status === 1 && latest - other.blockNum <= WINDOW), `request ${id} is Pending on the coordinator`);
+    check(!(other.status === 1 && latest - other.blockNum <= WINDOW), `request ${id} is a staging-router request Pending on the coordinator`);
   }
 
   // 3. Freeze still in effect, and never lifted since the announced block.

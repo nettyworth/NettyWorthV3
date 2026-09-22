@@ -7,7 +7,8 @@
  *     is shared by the staging and production routers.
  *
  *   node --experimental-strip-types scripts/vrf/check-pending.ts --coordinator <coordinator> [--from-block <n>]
- *         [--deployment-file base.staging.snapshot] [--deployment-key NettyVRFCoordinator] [...]
+ *         [--deployment-file base.staging.snapshot] [--deployment-key NettyVRFCoordinator]
+ *         [--only-router <router>] [...]
  *     Every NettyVRFCoordinator request since the coordinator's deployment block, classified:
  *       Pending     still provable (within BLOCKHASH_WINDOW = 8191 blocks): the fulfiller can answer
  *       Unprovable  Pending on chain but past the window: can never be proven
@@ -19,6 +20,9 @@
  *     The scan starts at --from-block, else at `deployedAtBlock` recorded by
  *     deploy-vrf-coordinator.ts in deployments/<file>.json[<key>] (address must match). It
  *     never falls back to a partial lookback: a missed request would be a stranded user.
+ *     --only-router limits the scan to requests from that router (the staging manual-recovery
+ *     runbook passes the staging router, so another router sharing the coordinator can neither
+ *     block the drain nor force a new announcement; re-audit R-02).
  *
  * Common: [--chunk <blocks>] [--delay <ms>] [--rpc <url>] (default BASE_RPC_URL, else mainnet.base.org)
  * Exit codes: 0 nothing open; 1 requests still pending (do NOT switch coordinators);
@@ -117,14 +121,19 @@ try {
   const addr = getAddress(coordinator as string);
   const from = coordinatorFromBlock(addr);
   if (from > latest) usage(`--from-block ${from} is after the latest block ${latest}`);
-  const req = await scan(
-    addr,
-    parseAbiItem(
+  const onlyRouterArg = arg("only-router");
+  const onlyRouter = onlyRouterArg === undefined ? undefined : getAddress(onlyRouterArg);
+  const req = await scanLogs(client, {
+    address: addr,
+    events: parseAbiItem(
       "event RandomWordsRequested(uint256 indexed requestId, address indexed router, bytes32 indexed keyHash, uint256 preSeed, uint64 blockNum, uint32 numWords, uint32 callbackGasLimit)",
-    ),
-    from,
-    latest,
-  );
+    ) as AbiEvent,
+    ...(onlyRouter ? { args: { router: onlyRouter } } : {}),
+    fromBlock: from,
+    toBlock: latest,
+    chunk: CHUNK,
+    delayMs: DELAY_MS,
+  });
   const abi = [
     {
       type: "function",
@@ -159,6 +168,7 @@ try {
     else if (r.status === 3) cls = "Failed";
     else if (r.status === 1) cls = latest - r.blockNum > BLOCKHASH_WINDOW ? "Unprovable" : "Pending";
     else throw new Error(`request ${id} has unexpected on-chain status ${r.status}`);
+    if (onlyRouter && getAddress(r.router) !== onlyRouter) throw new Error(`request ${id} was filtered for router ${onlyRouter} but records router ${r.router}`);
     rows.push({ id, cls, router: getAddress(r.router), blockNum: r.blockNum });
   }
 
@@ -187,7 +197,7 @@ try {
     }
   }
   console.log(
-    `coordinator ${addr}: blocks ${from}..${latest}, ${rows.length} requested: ` +
+    `coordinator ${addr}${onlyRouter ? ` (router ${onlyRouter} only)` : ""}: blocks ${from}..${latest}, ${rows.length} requested: ` +
       `${counts.Pending} Pending, ${counts.Unprovable} Unprovable, ${counts.Failed} Failed, ${counts.Fulfilled} Fulfilled`,
   );
   if (counts.Pending) {
