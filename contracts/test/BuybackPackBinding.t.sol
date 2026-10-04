@@ -454,27 +454,48 @@ contract BuybackPackBindingTest is Test {
     }
 
     // =========================================================================
-    // Tokens registered without a pack (the live clone): eligibility mask
+    // Pack attribution at win time
     // =========================================================================
 
-    /// @notice Phase-1 limit: without a recorded pack, a card listed in both packs is
-    ///         accepted by either pack's code, because the mask cannot say which one it
-    ///         was won from.
-    function test_multiPackCard_withoutRecordedPack_acceptsEitherCode() public {
+    /// @notice A card listed in both packs and won from Core is recorded as Core, so
+    ///         Elite's code is refused even though the card is eligible for Elite.
+    function test_rip_recordsWonPack_forMultiPackCard() public {
         uint256 tokenId = _depositCard(_packs(CORE, ELITE));
         _rip(CORE);
         _approvePool();
 
-        (bool known, ) = pool.getTokenPackId(tokenId);
-        assertFalse(
-            known,
-            "the current PackFulfillLib registers without a pack"
-        );
+        (bool known, uint256 packId) = pool.getTokenPackId(tokenId);
+        assertTrue(known, "the machine records the pack at win time");
+        assertEq(packId, CORE);
+
+        _expectWrongPack(ELITE_CODE, 1 << CORE);
+        vm.prank(ripper);
+        pool.buyback(tokenId, ELITE_CODE);
 
         uint256 before = usdc.balanceOf(ripper);
         vm.prank(ripper);
-        pool.buyback(tokenId, ELITE_CODE);
-        assertEq(usdc.balanceOf(ripper) - before, (FMV * ELITE_BPS) / 10_000);
+        pool.buyback(tokenId, CORE_CODE);
+        assertEq(usdc.balanceOf(ripper) - before, (FMV * CORE_BPS) / 10_000);
+    }
+
+    /// @notice A token with no recorded pack (registered by an older machine) gets no
+    ///         pack rate: its eligibility list cannot say which pack it was won from.
+    ///         The seller still gets the base rate without a code.
+    function test_unrecordedPack_rejectsPackBoundCode() public {
+        uint256 tokenId = _depositCard(_packs(CORE));
+        _rip(CORE);
+        vm.prank(address(packMachine));
+        pool.registerToken(tokenId, 0, address(packMachine), PRICE);
+        _approvePool();
+
+        _expectWrongPack(CORE_CODE, 0);
+        vm.prank(ripper);
+        pool.buyback(tokenId, CORE_CODE);
+
+        uint256 before = usdc.balanceOf(ripper);
+        vm.prank(ripper);
+        pool.buyback(tokenId);
+        assertEq(usdc.balanceOf(ripper) - before, (FMV * DEFAULT_BPS) / 10_000);
     }
 
     // =========================================================================
