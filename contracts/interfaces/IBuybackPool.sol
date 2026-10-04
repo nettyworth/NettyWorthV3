@@ -58,6 +58,18 @@ interface IBuybackPool {
         uint128 amountPaidPerCard
     ) external;
 
+    /// @notice Same as the 4-arg overload, plus the pack the token was won from. Pack-bound
+    ///         buyback codes are then matched against that exact pack. Tokens registered
+    ///         through any other overload fall back to the machine's eligibility mask.
+    /// @param packId Pack on `sourcePackMachine` the token was won from (0–255).
+    function registerToken(
+        uint256 tokenId,
+        uint8 tier,
+        address sourcePackMachine,
+        uint128 amountPaidPerCard,
+        uint256 packId
+    ) external;
+
     /// @notice Compat overload for PackMachine clones that call the 3-arg selector
     ///         (deployed before the amountPaidPerCard field was added).
     ///         amountPaidPerCard is recorded as 0; these tokens can only be bought back
@@ -165,6 +177,13 @@ interface IBuybackPool {
     function getTokenPaidAmount(
         uint256 tokenId
     ) external view returns (uint128);
+
+    /// @notice The pack a token was won from, when its machine recorded one at registration.
+    /// @return known  False for tokens registered through an overload without the pack.
+    /// @return packId The recorded pack; meaningless when `known` is false.
+    function getTokenPackId(
+        uint256 tokenId
+    ) external view returns (bool known, uint256 packId);
 
     function poolBalance() external view returns (uint256);
 

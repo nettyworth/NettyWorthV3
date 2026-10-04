@@ -18,7 +18,9 @@ import {Roles} from "./lib/Roles.sol";
 ///           • Discount — reduces a PackMachine pack price by 1–100% (100–10000 bps).
 ///             Consumed by registered PackMachine clones via `redeemDiscount`.
 ///           • Buyback — overrides BuybackPool payout rate to any value 1–100% (100–10000 bps).
-///             Consumed by the BuybackPool singleton via `redeemBuyback`.
+///             Consumed by the BuybackPool singleton via `redeemBuyback`. A buyback code
+///             made with `createPackBuybackCode` is bound to one (machine, packId) and only
+///             applies to tokens won from that pack.
 ///
 ///         Both kinds support:
 ///           • Expiration dates (unix timestamp; 0 = never)
@@ -67,6 +69,10 @@ contract PromoCodeRegistry is
         mapping(bytes32 => mapping(address => bool)) allowlisted;
         /// @dev Per-code per-user redemption flags.  Only relevant when codes[id].oncePerUser == true.
         mapping(bytes32 => mapping(address => bool)) hasRedeemed;
+        /// @dev Pack a buyback code is bound to, stored as packId + 1 (0 = unbound).
+        ///      The bound machine lives in codes[id].machine. Appended at struct end to
+        ///      preserve ERC-7201 storage layout on upgrade.
+        mapping(bytes32 => uint256) buybackPackPlusOne;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nettyworth.storage.PromoCodeRegistry")) - 1)) & ~bytes32(uint256(0xff))
@@ -221,6 +227,61 @@ contract PromoCodeRegistry is
         );
     }
 
+    /// @notice Create an open, uncapped buyback code that only applies to tokens won from
+    ///         `packId` on `machine`.
+    /// @dev Per-pack sell-back rates are delivered as auto-applied buyback codes. Without
+    ///      the binding, a code minted for one pack paid its rate on a card from any pack.
+    /// @param codeId   keccak256(bytes(codeString)) computed off-chain.
+    /// @param bps      Buyback rate in [100, 10000] (1%–100%).
+    /// @param expiry   Unix seconds after which the code is expired; 0 = never.
+    /// @param machine  PackMachine clone the pack belongs to.
+    /// @param packId   Pack on `machine` whose cards the code applies to (0–255).
+    function createPackBuybackCode(
+        bytes32 codeId,
+        uint16 bps,
+        uint64 expiry,
+        address machine,
+        uint256 packId
+    ) external onlyProtocolRole(Roles.PACK_OPERATOR_ROLE) {
+        PromoCodeRegistryStorage storage $ = _getStorage();
+        if ($.codes[codeId].exists)
+            revert PromoCodeRegistry__CodeExists(codeId);
+        _validateBps(PromoKind.Buyback, bps);
+        // A token's pack membership is a uint256 bitmask, so packId must fit in it.
+        if (packId > type(uint8).max)
+            revert PromoCodeRegistry__InvalidPackId(packId);
+        address factory = $.packMachineFactory;
+        if (factory == address(0)) revert PromoCodeRegistry__NotConfigured();
+        if (!IPackMachineFactory(factory).isPackMachine(machine))
+            revert PromoCodeRegistry__NotPackMachine(machine);
+
+        $.codes[codeId] = PromoCode({
+            kind: PromoKind.Buyback,
+            bps: bps,
+            expiry: expiry,
+            maxRedemptions: 0,
+            redeemedCount: 0,
+            restricted: false,
+            active: true,
+            oncePerUser: false,
+            exists: true,
+            machine: machine
+        });
+        $.buybackPackPlusOne[codeId] = packId + 1;
+
+        emit CodeCreated(
+            codeId,
+            PromoKind.Buyback,
+            bps,
+            expiry,
+            0,
+            false,
+            false,
+            machine
+        );
+        emit BuybackCodeBound(codeId, machine, packId);
+    }
+
     /// @notice Activate or deactivate a code.
     function setActive(
         bytes32 codeId,
@@ -341,6 +402,29 @@ contract PromoCodeRegistry is
         PromoCodeRegistryStorage storage $ = _getStorage();
         if (msg.sender != $.buybackPool)
             revert PromoCodeRegistry__UnauthorizedRedeemer(msg.sender);
+        // This overload carries no token context, so it cannot honour a pack binding.
+        if ($.buybackPackPlusOne[codeId] != 0)
+            revert PromoCodeRegistry__WrongPack(codeId, address(0), 0);
+        return _validateAndConsume($, codeId, user, PromoKind.Buyback);
+    }
+
+    /// @inheritdoc IPromoCodeRegistry
+    function redeemBuyback(
+        bytes32 codeId,
+        address user,
+        address machine,
+        uint256 packMask
+    ) external override whenNotPaused returns (uint16 bps) {
+        PromoCodeRegistryStorage storage $ = _getStorage();
+        if (msg.sender != $.buybackPool)
+            revert PromoCodeRegistry__UnauthorizedRedeemer(msg.sender);
+        uint256 packPlusOne = $.buybackPackPlusOne[codeId];
+        if (packPlusOne != 0) {
+            if (
+                machine != $.codes[codeId].machine ||
+                (packMask >> (packPlusOne - 1)) & 1 == 0
+            ) revert PromoCodeRegistry__WrongPack(codeId, machine, packMask);
+        }
         return _validateAndConsume($, codeId, user, PromoKind.Buyback);
     }
 
@@ -353,6 +437,21 @@ contract PromoCodeRegistry is
         bytes32 codeId
     ) external view override returns (PromoCode memory) {
         return _getStorage().codes[codeId];
+    }
+
+    /// @inheritdoc IPromoCodeRegistry
+    function getBuybackBinding(
+        bytes32 codeId
+    )
+        external
+        view
+        override
+        returns (address machine, bool bound, uint256 packId)
+    {
+        PromoCodeRegistryStorage storage $ = _getStorage();
+        uint256 packPlusOne = $.buybackPackPlusOne[codeId];
+        if (packPlusOne == 0) return (address(0), false, 0);
+        return ($.codes[codeId].machine, true, packPlusOne - 1);
     }
 
     /// @inheritdoc IPromoCodeRegistry
