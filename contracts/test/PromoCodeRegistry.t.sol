@@ -985,4 +985,206 @@ contract PromoCodeRegistryTest is Test {
         assertEq(registry.getCode(DISCOUNT_CODE).redeemedCount, 0);
         assertEq(registry.getCode(BUYBACK_CODE).redeemedCount, 0);
     }
+
+    // =========================================================================
+    // Pack-bound buyback codes
+    // =========================================================================
+
+    bytes32 internal constant PACK_CODE = keccak256("PACKRATE:elite:v1");
+    uint256 internal constant ELITE = 5;
+
+    function _createPackCode() internal {
+        vm.prank(operator);
+        registry.createPackBuybackCode(PACK_CODE, BUYBACK_BPS_95, 0, packMachine, ELITE);
+    }
+
+    function test_createPackBuybackCode_storesBinding() public {
+        vm.expectEmit(true, true, true, true, address(registry));
+        emit IPromoCodeRegistry.BuybackCodeBound(PACK_CODE, packMachine, ELITE);
+        _createPackCode();
+
+        IPromoCodeRegistry.PromoCode memory c = registry.getCode(PACK_CODE);
+        assertEq(uint8(c.kind), uint8(IPromoCodeRegistry.PromoKind.Buyback));
+        assertEq(c.bps, BUYBACK_BPS_95);
+        assertEq(c.machine, packMachine);
+        assertEq(c.maxRedemptions, 0);
+        assertFalse(c.restricted);
+        assertFalse(c.oncePerUser);
+        assertTrue(c.active);
+
+        (address machine, bool bound, uint256 packId) = registry.getBuybackBinding(PACK_CODE);
+        assertEq(machine, packMachine);
+        assertTrue(bound);
+        assertEq(packId, ELITE);
+    }
+
+    function test_getBuybackBinding_unboundCode() public {
+        _createBuybackCode(BUYBACK_CODE, BUYBACK_BPS_95);
+        (address machine, bool bound, uint256 packId) = registry.getBuybackBinding(BUYBACK_CODE);
+        assertEq(machine, address(0));
+        assertFalse(bound);
+        assertEq(packId, 0);
+    }
+
+    function test_createPackBuybackCode_packZeroIsBound() public {
+        vm.prank(operator);
+        registry.createPackBuybackCode(PACK_CODE, BUYBACK_BPS_95, 0, packMachine, 0);
+        (, bool bound, uint256 packId) = registry.getBuybackBinding(PACK_CODE);
+        assertTrue(bound);
+        assertEq(packId, 0);
+    }
+
+    function test_createPackBuybackCode_revertIfNotOperator() public {
+        vm.prank(unauthorized);
+        vm.expectRevert();
+        registry.createPackBuybackCode(PACK_CODE, BUYBACK_BPS_95, 0, packMachine, ELITE);
+    }
+
+    function test_createPackBuybackCode_revertIfNotPackMachine() public {
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(IPromoCodeRegistry.PromoCodeRegistry__NotPackMachine.selector, unauthorized)
+        );
+        registry.createPackBuybackCode(PACK_CODE, BUYBACK_BPS_95, 0, unauthorized, ELITE);
+    }
+
+    function test_createPackBuybackCode_revertIfPackIdOutsideMask() public {
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(IPromoCodeRegistry.PromoCodeRegistry__InvalidPackId.selector, 256)
+        );
+        registry.createPackBuybackCode(PACK_CODE, BUYBACK_BPS_95, 0, packMachine, 256);
+    }
+
+    function test_createPackBuybackCode_revertIfCodeExists() public {
+        _createBuybackCode(PACK_CODE, BUYBACK_BPS_95);
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(IPromoCodeRegistry.PromoCodeRegistry__CodeExists.selector, PACK_CODE)
+        );
+        registry.createPackBuybackCode(PACK_CODE, BUYBACK_BPS_95, 0, packMachine, ELITE);
+    }
+
+    function test_createPackBuybackCode_revertIfInvalidBps() public {
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPromoCodeRegistry.PromoCodeRegistry__InvalidBps.selector,
+                IPromoCodeRegistry.PromoKind.Buyback,
+                uint16(99)
+            )
+        );
+        registry.createPackBuybackCode(PACK_CODE, 99, 0, packMachine, ELITE);
+    }
+
+    function test_redeemBuyback_boundCode_matchingPack() public {
+        _createPackCode();
+        vm.prank(buybackPool);
+        uint16 bps = registry.redeemBuyback(PACK_CODE, user, packMachine, 1 << ELITE);
+        assertEq(bps, BUYBACK_BPS_95);
+        assertEq(registry.getCode(PACK_CODE).redeemedCount, 1);
+    }
+
+    function test_redeemBuyback_boundCode_maskContainingPack() public {
+        _createPackCode();
+        vm.prank(buybackPool);
+        uint16 bps = registry.redeemBuyback(PACK_CODE, user, packMachine, (1 << 1) | (1 << ELITE));
+        assertEq(bps, BUYBACK_BPS_95);
+    }
+
+    function test_redeemBuyback_boundCode_revertWrongPack_notConsumed() public {
+        _createPackCode();
+        vm.prank(buybackPool);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPromoCodeRegistry.PromoCodeRegistry__WrongPack.selector,
+                PACK_CODE,
+                packMachine,
+                uint256(1 << 1)
+            )
+        );
+        registry.redeemBuyback(PACK_CODE, user, packMachine, 1 << 1);
+        assertEq(registry.getCode(PACK_CODE).redeemedCount, 0);
+    }
+
+    function test_redeemBuyback_boundCode_revertWrongMachine() public {
+        _createPackCode();
+        address other = makeAddr("otherMachine");
+        vm.prank(buybackPool);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPromoCodeRegistry.PromoCodeRegistry__WrongPack.selector,
+                PACK_CODE,
+                other,
+                uint256(1 << ELITE)
+            )
+        );
+        registry.redeemBuyback(PACK_CODE, user, other, 1 << ELITE);
+    }
+
+    function test_redeemBuyback_boundCode_revertEmptyMask() public {
+        _createPackCode();
+        vm.prank(buybackPool);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPromoCodeRegistry.PromoCodeRegistry__WrongPack.selector,
+                PACK_CODE,
+                packMachine,
+                uint256(0)
+            )
+        );
+        registry.redeemBuyback(PACK_CODE, user, packMachine, 0);
+    }
+
+    /// @notice The 2-arg overload has no token context, so it must not redeem a bound code.
+    function test_redeemBuyback_twoArg_revertForBoundCode() public {
+        _createPackCode();
+        vm.prank(buybackPool);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPromoCodeRegistry.PromoCodeRegistry__WrongPack.selector,
+                PACK_CODE,
+                address(0),
+                uint256(0)
+            )
+        );
+        registry.redeemBuyback(PACK_CODE, user);
+    }
+
+    function test_redeemBuyback_fourArg_unboundCodeIgnoresContext() public {
+        _createBuybackCode(BUYBACK_CODE, BUYBACK_BPS_95);
+        vm.prank(buybackPool);
+        uint16 bps = registry.redeemBuyback(BUYBACK_CODE, user, makeAddr("anyMachine"), 0);
+        assertEq(bps, BUYBACK_BPS_95);
+    }
+
+    function test_redeemBuyback_fourArg_revertIfNotPool() public {
+        _createPackCode();
+        vm.prank(unauthorized);
+        vm.expectRevert(
+            abi.encodeWithSelector(IPromoCodeRegistry.PromoCodeRegistry__UnauthorizedRedeemer.selector, unauthorized)
+        );
+        registry.redeemBuyback(PACK_CODE, user, packMachine, 1 << ELITE);
+    }
+
+    function test_redeemBuyback_fourArg_revertWhenPaused() public {
+        _createPackCode();
+        vm.prank(pauser);
+        registry.pause();
+        vm.prank(buybackPool);
+        vm.expectRevert();
+        registry.redeemBuyback(PACK_CODE, user, packMachine, 1 << ELITE);
+    }
+
+    /// @notice A deactivated bound code is rejected like any other inactive code.
+    function test_redeemBuyback_boundCode_revertWhenInactive() public {
+        _createPackCode();
+        vm.prank(operator);
+        registry.setActive(PACK_CODE, false);
+        vm.prank(buybackPool);
+        vm.expectRevert(
+            abi.encodeWithSelector(IPromoCodeRegistry.PromoCodeRegistry__Inactive.selector, PACK_CODE)
+        );
+        registry.redeemBuyback(PACK_CODE, user, packMachine, 1 << ELITE);
+    }
 }

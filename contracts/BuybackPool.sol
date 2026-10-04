@@ -67,6 +67,12 @@ contract BuybackPool is
         ///      field. A Spend-mode buyback on a token with amountPaidPerCard == 0 reverts
         ///      BuybackPool__NoPaidAmount.
         uint128 amountPaidPerCard;
+        /// @dev Pack the token was won from, stored as packId + 1. 0 = unknown: the token
+        ///      was registered through an overload that does not carry the pack, so a
+        ///      pack-bound buyback code is checked against the source machine's eligibility
+        ///      mask instead. Appended at struct end (fits in the slot shared with
+        ///      amountPaidPerCard) to preserve storage layout on upgrade.
+        uint32 packIdPlusOne;
     }
 
     /// @custom:storage-location erc7201:nettyworth.storage.BuybackPool
@@ -122,6 +128,8 @@ contract BuybackPool is
         address indexed sourcePackMachine,
         uint8 tier
     );
+    /// @notice Emitted with TokenRegistered when the registering machine supplied the pack.
+    event TokenPackRecorded(uint256 indexed tokenId, uint256 indexed packId);
     /// @notice Emitted on every successful buyback.
     /// @param payout       Gross payout = basis × buybackBps / BPS (before fee).
     /// @param sellerAmount Net USDC actually transferred to the seller (payout − fee).
@@ -204,6 +212,8 @@ contract BuybackPool is
     error BuybackPool__NoPaidAmount(uint256 tokenId);
     /// @notice The supplied mode value is not a valid BuybackMode.
     error BuybackPool__InvalidMode(uint8 mode);
+    /// @notice packId does not fit the pack bitmask used for pack-bound buyback codes.
+    error BuybackPool__InvalidPackId(uint256 packId);
 
     uint16 private constant BPS_PRECISION = 10000;
 
@@ -268,7 +278,28 @@ contract BuybackPool is
         address sourcePackMachine,
         uint128 amountPaidPerCard
     ) external {
-        _registerToken(tokenId, tier, sourcePackMachine, amountPaidPerCard);
+        _registerToken(tokenId, tier, sourcePackMachine, amountPaidPerCard, 0);
+    }
+
+    /// @notice Same as the 4-arg overload, plus the pack the token was won from. Pack-bound
+    ///         buyback codes are then matched against that exact pack rather than the
+    ///         source machine's eligibility mask.
+    function registerToken(
+        uint256 tokenId,
+        uint8 tier,
+        address sourcePackMachine,
+        uint128 amountPaidPerCard,
+        uint256 packId
+    ) external {
+        if (packId > type(uint8).max) revert BuybackPool__InvalidPackId(packId);
+        _registerToken(
+            tokenId,
+            tier,
+            sourcePackMachine,
+            amountPaidPerCard,
+            uint32(packId + 1)
+        );
+        emit TokenPackRecorded(tokenId, packId);
     }
 
     /// @notice Compat overload for PackMachine clones that call the 3-arg selector
@@ -280,7 +311,7 @@ contract BuybackPool is
         uint8 tier,
         address sourcePackMachine
     ) external {
-        _registerToken(tokenId, tier, sourcePackMachine, 0);
+        _registerToken(tokenId, tier, sourcePackMachine, 0, 0);
     }
 
     /// @notice Legacy 4-arg overload for already-deployed PackMachine clones that were
@@ -294,14 +325,17 @@ contract BuybackPool is
         uint8 tier,
         address sourcePackMachine
     ) external {
-        _registerToken(tokenId, tier, sourcePackMachine, 0);
+        _registerToken(tokenId, tier, sourcePackMachine, 0, 0);
     }
 
+    /// @dev Every overload overwrites the whole record, so a re-won token never keeps the
+    ///      pack recorded for a previous win.
     function _registerToken(
         uint256 tokenId,
         uint8 tier,
         address sourcePackMachine,
-        uint128 amountPaidPerCard
+        uint128 amountPaidPerCard,
+        uint32 packIdPlusOne
     ) private {
         BuybackPoolStorage storage $ = _getStorage();
         if (!$.registeredPackMachines[msg.sender])
@@ -311,7 +345,8 @@ contract BuybackPool is
             tier: tier,
             sourcePackMachine: sourcePackMachine,
             isActive: true,
-            amountPaidPerCard: amountPaidPerCard
+            amountPaidPerCard: amountPaidPerCard,
+            packIdPlusOne: packIdPlusOne
         });
 
         emit TokenRegistered(tokenId, sourcePackMachine, tier);
@@ -526,6 +561,17 @@ contract BuybackPool is
         return (info.tier, info.sourcePackMachine, info.isActive);
     }
 
+    /// @notice The pack a token was won from, when its machine recorded one at registration.
+    /// @return known  False for tokens registered through an overload without the pack.
+    /// @return packId The recorded pack; meaningless when `known` is false.
+    function getTokenPackId(
+        uint256 tokenId
+    ) external view returns (bool known, uint256 packId) {
+        uint32 packIdPlusOne = _getStorage().tokenInfo[tokenId].packIdPlusOne;
+        if (packIdPlusOne == 0) return (false, 0);
+        return (true, packIdPlusOne - 1);
+    }
+
     function poolBalance() external view returns (uint256) {
         return IERC20(_getStorage().paymentToken).balanceOf(address(this));
     }
@@ -628,16 +674,20 @@ contract BuybackPool is
         uint16 buybackBps = $.packMachineBuybackBps[info.sourcePackMachine];
         if (buybackBps == 0) buybackBps = $.defaultBuybackBps;
 
-        // ── Apply a buyback-boost promo code if provided ───────────────────
-        // Boosted rates (9000/9500/9800) are always higher than the configured
-        // default/override, so the code bps is used directly rather than taking max.
+        // ── Apply a buyback promo code if provided ─────────────────────────
+        // The code bps replaces the base rate rather than taking max. A pack-bound code
+        // (per-pack sell-back rate) only redeems for a token from its own pack: the
+        // registry checks it against the pack recorded at win time, or, for tokens
+        // registered without one, every pack the source machine lists the token in.
         if (codeId != bytes32(0)) {
             address registry = $.promoCodeRegistry;
             if (registry == address(0))
                 revert BuybackPool__PromoRegistryNotSet();
             uint16 boostedBps = IPromoCodeRegistry(registry).redeemBuyback(
                 codeId,
-                caller
+                caller,
+                info.sourcePackMachine,
+                _packMask(info, tokenId)
             );
             buybackBps = boostedBps;
             emit BuybackBoosted(tokenId, caller, codeId, boostedBps);
@@ -696,6 +746,27 @@ contract BuybackPool is
 
         // Auto re-deposit the NFT back into its source PackMachine.
         _redeposit($, tokenId, tier, sourceMachine);
+    }
+
+    /// @dev The packs a token is attributed to, as a bitmask (bit p = pack p). Exactly the
+    ///      recorded pack when the registering machine supplied one; otherwise the source
+    ///      machine's eligibility mask, which it keeps after a win. A machine that cannot
+    ///      answer yields 0, so a pack-bound code fails closed.
+    function _packMask(
+        TokenBuybackInfo storage info,
+        uint256 tokenId
+    ) private view returns (uint256) {
+        uint32 packIdPlusOne = info.packIdPlusOne;
+        if (packIdPlusOne != 0) return uint256(1) << (packIdPlusOne - 1);
+        // try/catch cannot catch the decode failure of a call to an address without code.
+        if (info.sourcePackMachine.code.length == 0) return 0;
+        try
+            IPackMachine(info.sourcePackMachine).getTokenEligibility(tokenId)
+        returns (uint256 mask) {
+            return mask;
+        } catch {
+            return 0;
+        }
     }
 
     function _redeposit(

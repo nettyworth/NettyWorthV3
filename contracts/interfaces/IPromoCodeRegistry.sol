@@ -25,8 +25,10 @@ interface IPromoCodeRegistry {
         bool active; // admin kill switch
         bool oncePerUser; // true = each address may redeem at most once
         bool exists; // distinguishes a created code from a default-zero record
-        /// @dev Discount codes only. If non-zero, only this PackMachine clone may redeem.
+        /// @dev Discount: if non-zero, only this PackMachine clone may redeem.
         ///      address(0) = valid on any registered PackMachine (global code).
+        ///      Buyback: the machine of a pack-bound code (createPackBuybackCode);
+        ///      address(0) for codes created via createCode, which apply to any token.
         address machine;
     }
 
@@ -52,6 +54,15 @@ interface IPromoCodeRegistry {
     error PromoCodeRegistry__WrongMachine(bytes32 codeId, address expected, address actual);
     error PromoCodeRegistry__BatchTooLarge(uint256 given, uint256 max);
     error PromoCodeRegistry__NotConfigured();
+    /// @notice A pack-bound buyback code was presented for a token that was not won from
+    ///         the code's (machine, packId). `packMask` is the token's pack bitmask.
+    error PromoCodeRegistry__WrongPack(
+        bytes32 codeId,
+        address machine,
+        uint256 packMask
+    );
+    error PromoCodeRegistry__InvalidPackId(uint256 packId);
+    error PromoCodeRegistry__NotPackMachine(address machine);
 
     // =========================================================================
     // Events
@@ -96,6 +107,12 @@ interface IPromoCodeRegistry {
         address indexed oldPool,
         address indexed newPool
     );
+    /// @notice Emitted alongside CodeCreated when a buyback code is bound to one pack.
+    event BuybackCodeBound(
+        bytes32 indexed codeId,
+        address indexed machine,
+        uint256 indexed packId
+    );
 
     // =========================================================================
     // Redemption (called by spokes)
@@ -124,6 +141,24 @@ interface IPromoCodeRegistry {
         address user
     ) external returns (uint16 bps);
 
+    /// @notice Consume a buyback code for a token from `machine` whose pack membership is
+    ///         `packMask` (bit p set = the token belongs to pack p).
+    /// @dev Only callable by the configured BuybackPool singleton. A pack-bound code
+    ///      reverts PromoCodeRegistry__WrongPack unless `machine` is the code's machine
+    ///      and `packMask` has the code's pack bit set. Unbound codes ignore both arguments.
+    /// @param codeId   keccak256 hash of the off-chain promo-code string.
+    /// @param user     Economic beneficiary (token seller).
+    /// @param machine  PackMachine clone the token was won from.
+    /// @param packMask Packs the token is attributed to: exactly one bit when the pool
+    ///                 recorded the pack at win time, else the clone's eligibility mask.
+    /// @return bps     Buyback rate override in basis points ([100, 10000] = 1%–100%).
+    function redeemBuyback(
+        bytes32 codeId,
+        address user,
+        address machine,
+        uint256 packMask
+    ) external returns (uint16 bps);
+
     /// @notice Reverse a previously consumed discount code when a pack open yields zero cards
     ///         (all-cards-failed VRF path).
     /// @dev Only callable by the same PackMachine clone that originally redeemed the code
@@ -141,6 +176,14 @@ interface IPromoCodeRegistry {
 
     /// @notice Return the full on-chain record for a code.
     function getCode(bytes32 codeId) external view returns (PromoCode memory);
+
+    /// @notice The (machine, packId) a buyback code is bound to.
+    /// @return machine The bound PackMachine clone (address(0) when unbound).
+    /// @return bound   False for codes that apply to any token.
+    /// @return packId  The bound pack; meaningless when `bound` is false.
+    function getBuybackBinding(
+        bytes32 codeId
+    ) external view returns (address machine, bool bound, uint256 packId);
 
     /// @notice How many redemptions remain before the code is exhausted.
     /// @return Remaining count, or type(uint256).max when uncapped (maxRedemptions == 0).

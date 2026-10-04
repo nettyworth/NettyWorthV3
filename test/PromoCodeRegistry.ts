@@ -270,6 +270,45 @@ describe("PromoCodeRegistry", async function () {
     });
 
     // =========================================================================
+    // Pack-bound buyback codes
+    // =========================================================================
+
+    it("pack-bound buyback code only redeems for a token in its pack", async () => {
+        const { registry } = await deploy();
+        const ELITE = 5n;
+
+        await registry.write.createPackBuybackCode(
+            [BUYBACK_CODE_ID, BUYBACK_BPS_95, 0n, packMachineAddr, ELITE],
+            { account: walletOperator.account },
+        );
+        const [machine, bound, packId] = await registry.read.getBuybackBinding([BUYBACK_CODE_ID]);
+        assert.equal(machine.toLowerCase(), packMachineAddr.toLowerCase());
+        assert.equal(bound, true);
+        assert.equal(packId, ELITE);
+
+        // A Core card (pack 1) presenting the Elite code.
+        await assert.rejects(
+            registry.write.redeemBuyback([BUYBACK_CODE_ID, userAddress, packMachineAddr, 1n << 1n], {
+                account: walletBuybackPool.account,
+            }),
+            /WrongPack/,
+        );
+        // The overload without token context cannot redeem a bound code.
+        await assert.rejects(
+            registry.write.redeemBuyback([BUYBACK_CODE_ID, userAddress], {
+                account: walletBuybackPool.account,
+            }),
+            /WrongPack/,
+        );
+        assert.equal((await registry.read.getCode([BUYBACK_CODE_ID])).redeemedCount, 0);
+
+        await registry.write.redeemBuyback([BUYBACK_CODE_ID, userAddress, packMachineAddr, 1n << ELITE], {
+            account: walletBuybackPool.account,
+        });
+        assert.equal((await registry.read.getCode([BUYBACK_CODE_ID])).redeemedCount, 1);
+    });
+
+    // =========================================================================
     // Redemption count rollback (simulate failed outer tx)
     // =========================================================================
 
