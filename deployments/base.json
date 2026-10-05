@@ -86,7 +86,7 @@
   },
   "BuybackPool": {
     "proxy": "0x60e0Ea52aD26EF5b5A6da2132587aD62d43AAa47",
-    "implementation": "0xedb6bfb2ef1b5acb5f502e387e63e3dfe2214c07",
+    "implementation": "0xae291be2ed2b468d4ca478c903f4d239a26959be",
     "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
     "assetNFT": "0x2F7AFE6B9C272CAff83a3377afbaeD2C8901B865",
     "paymentToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -94,7 +94,7 @@
     "factory": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
     "defaultBuybackBps": 8000,
     "deployedAt": "2026-07-11T06:59:39.715Z",
-    "upgradedAt": "2026-07-13T05:03:33.010Z",
+    "upgradedAt": "2026-10-05T14:58:57.000Z",
     "upgradeHistory": [
       {
         "previousImplementation": "0x196B1e07E7B1359d2fF08026A187c83aC670a3Ea",
@@ -102,17 +102,24 @@
         "upgradedAt": "2026-07-13T05:03:33.009Z",
         "txHash": "0xad79a25493e90992787f581690a033a9f778e0b8065e87dea303e4fcafd301ca",
         "upgradeCalldata": "0x"
+      },
+      {
+        "previousImplementation": "0xb7c11E5d8aD4c215ff6A1359a080f7A8FA6b7719",
+        "newImplementation": "0xae291be2ed2b468d4ca478c903f4d239a26959be",
+        "upgradedAt": "2026-10-05T14:58:57.000Z",
+        "executedBy": "Safe 0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+        "note": "PR #20 pack-bound buyback codes; txHash to add from Safe"
       }
     ]
   },
   "PromoCodeRegistry": {
     "proxy": "0x8239fcbda24a38d77f046575738e98a24f8ea64c",
-    "implementation": "0x60470d97ad01fd252809a807b3dfcf81e7d55d0f",
+    "implementation": "0xae8773682dec8a82c36667b4511f10d1d8a91410",
     "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
     "packMachineFactory": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
     "buybackPool": "0x60e0Ea52aD26EF5b5A6da2132587aD62d43AAa47",
     "deployedAt": "2026-07-09T11:11:47.419Z",
-    "upgradedAt": "2026-07-09T18:28:09.439Z",
+    "upgradedAt": "2026-10-05T14:58:57.000Z",
     "upgradeHistory": [
       {
         "previousImplementation": "0xc125D21FddFF2Efa622a0fc1F0eD0A3fbda6C835",
@@ -127,6 +134,13 @@
         "upgradedAt": "2026-07-09T18:28:09.437Z",
         "txHash": "0xe87d0bc240881b3ee184d36e88e40c00a48215ff3c5a7c2989ec13f65a2827cf",
         "upgradeCalldata": "0x"
+      },
+      {
+        "previousImplementation": "0x7FD3D1EE7B8E2C9e7cA2B8074361F2d94B3d21E5",
+        "newImplementation": "0xae8773682dec8a82c36667b4511f10d1d8a91410",
+        "upgradedAt": "2026-10-05T14:58:57.000Z",
+        "executedBy": "Safe 0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+        "note": "PR #20 pack-bound buyback codes; txHash to add from Safe"
       }
     ]
   },
