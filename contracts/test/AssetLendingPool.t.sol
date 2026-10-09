@@ -52,6 +52,32 @@ contract MockPackMachineFactory {
     }
 }
 
+// Replays the 2026-10-08 attack contract inside one call: borrow against its own
+// NFTs, park a large (flash-loaned) lender deposit, repay to trigger the interest
+// distribution, then exit with principal + inflated interest.
+contract MockFlashJitAttacker {
+    function attack(
+        AssetLendingPool pool,
+        MockERC20 usdc,
+        IERC721 nft,
+        uint256[] calldata tokenIds,
+        uint256 principal,
+        uint8 termId,
+        uint256 depositAmount
+    ) external {
+        nft.setApprovalForAll(address(pool), true);
+        usdc.approve(address(pool), type(uint256).max);
+
+        pool.borrowBundle(tokenIds, principal, termId);
+        uint256[] memory loans = pool.getBorrowerLoans(address(this));
+        uint256 loanId = loans[loans.length - 1];
+
+        pool.lenderDeposit(depositAmount);
+        pool.repay(loanId);
+        pool.lenderWithdraw(depositAmount);
+    }
+}
+
 contract AssetLendingPoolTest is Test {
     AssetLendingPool internal pool;
     AssetLendingPoolConfig internal config;
@@ -1812,6 +1838,11 @@ contract AssetLendingPoolTest is Test {
         vm.stopPrank();
     }
 
+    /// @dev Moves time past the lenderWithdraw lock that follows every lenderDeposit.
+    function _warpPastLenderLock() internal {
+        vm.warp(block.timestamp + pool.LENDER_WITHDRAW_LOCK());
+    }
+
     /// @dev Originates a loan for `borrower` and immediately repays it, realizing
     ///      its fixed interest into the distribution accumulator. Returns the loan.
     function _borrowAndRepay(
@@ -1910,6 +1941,7 @@ contract AssetLendingPoolTest is Test {
         vm.startPrank(lender1);
         usdc.approve(address(pool), 1000e6);
         pool.lenderDeposit(1000e6);
+        _warpPastLenderLock();
         pool.lenderWithdraw(600e6);
         vm.stopPrank();
 
@@ -2208,6 +2240,7 @@ contract AssetLendingPoolTest is Test {
         assertGt(earned, 0);
 
         // Full withdrawal auto-claims the earned interest into lender1's wallet.
+        _warpPastLenderLock();
         uint256 balBefore = usdc.balanceOf(lender1);
         vm.prank(lender1);
         pool.lenderWithdraw(1000e6);
@@ -2698,5 +2731,337 @@ contract AssetLendingPoolTest is Test {
         );
         vm.prank(borrower);
         pool.borrowBundle(ids, 100e6, 0);
+    }
+
+    // =========================================================================
+    // Lender interest solvency (2026-10-08 incident)
+    // =========================================================================
+    // The pool was drained because _distributeInterest divided a loan's lender
+    // portion by the lender total snapshotted at origination while paying it out
+    // on live balances: capital deposited after origination claimed far more than
+    // the loan's interest. These tests pin the fixed behaviour and the withdraw
+    // lock that keeps flash-loaned deposits from exiting in the same transaction.
+
+    // ERC-7201 slot of AssetLendingPoolStorageLib.PoolStorage and the field index of
+    // `lenderLastDepositAt` within it (used to emulate a pre-upgrade lender).
+    bytes32 internal constant POOL_STORAGE_SLOT =
+        0xe550184268bc9f659edbb9c6b24d954d35d7ee2960ec89c48b5d88c17e160c00;
+    uint256 internal constant LENDER_LAST_DEPOSIT_AT_FIELD = 22;
+
+    function _repayLoan(uint256 loanId) internal {
+        IAssetLendingPool.Loan memory loan = pool.getLoan(loanId);
+        uint256 repayAmount = loan.principal + loan.interest;
+        usdc.mint(loan.borrower, repayAmount);
+        vm.startPrank(loan.borrower);
+        usdc.approve(address(pool), repayAmount);
+        pool.repay(loanId);
+        vm.stopPrank();
+    }
+
+    function _lenderPortion(
+        uint256 interest,
+        uint256 shareBps
+    ) internal pure returns (uint256) {
+        return (interest * shareBps) / 10_000;
+    }
+
+    function _claimable(address lender) internal view returns (uint256) {
+        return pool.getLenderInfo(lender).claimableInterest;
+    }
+
+    function _lenderLastDepositAtSlot(
+        address lender
+    ) internal pure returns (bytes32) {
+        return
+            keccak256(
+                abi.encode(
+                    lender,
+                    uint256(POOL_STORAGE_SLOT) + LENDER_LAST_DEPOSIT_AT_FIELD
+                )
+            );
+    }
+
+    /// @dev Idle capital + unwithdrawn protocol interest + every lender's claimable
+    ///      interest must be backed by tokens actually held by the pool.
+    function _assertPoolCoversObligations(
+        address[] memory lenders
+    ) internal view {
+        IAssetLendingPool.PoolInfo memory info = pool.getPoolInfo();
+        uint256 owed =
+            info.totalDeposited -
+                info.totalBorrowed +
+                info.totalInterestEarned -
+                info.interestWithdrawn;
+        for (uint256 i; i < lenders.length; i++) {
+            owed += _claimable(lenders[i]);
+        }
+        assertGe(usdc.balanceOf(address(pool)), owed, "pool insolvent");
+    }
+
+    /// @dev Incident replay: a ~218x deposit lands between origination and repay.
+    ///      Before the fix the late depositor could claim ~218x the lender portion.
+    function test_LenderInterest_DepositAfterOrigination_NeverExceedsLenderPortion()
+        public
+    {
+        _enableLenders();
+        address attacker = makeAddr("attacker");
+        uint256 honest = 1_000e6;
+        uint256 late = 218_000e6;
+        _lenderDeposit(lender1, honest);
+
+        uint256 tokenId = _mintNFT(borrower);
+        _appraise(tokenId);
+        uint256 loanId = _borrow(borrower, tokenId, 400e6, 0);
+        IAssetLendingPool.Loan memory loan = pool.getLoan(loanId);
+
+        _lenderDeposit(attacker, late);
+        _repayLoan(loanId);
+
+        uint256 portion = _lenderPortion(
+            loan.interest,
+            loan.lenderShareBpsSnapshot
+        );
+        uint256 honestClaim = _claimable(lender1);
+        uint256 attackerClaim = _claimable(attacker);
+
+        assertLe(honestClaim + attackerClaim, portion);
+        assertApproxEqAbs(attackerClaim, (portion * late) / (late + honest), 1);
+        assertApproxEqAbs(honestClaim, (portion * honest) / (late + honest), 1);
+
+        address[] memory lenders = new address[](2);
+        lenders[0] = lender1;
+        lenders[1] = attacker;
+        _assertPoolCoversObligations(lenders);
+    }
+
+    /// @dev The exact H001 example from the audit report: 10k honest + 10k JIT,
+    ///      80% share, 1,000 interest. The snapshot "fix" paid 800 to EACH side
+    ///      (1,600 total for 800 earned); the live divisor pays 800 in total.
+    function test_LenderInterest_AuditorH001Scenario_PaysOnlyLenderPortion()
+        public
+    {
+        _enableLenders();
+        address attacker = makeAddr("attacker");
+        // 5,000 principal at 20% APR over 365 days = 1,000 interest.
+        vm.prank(admin);
+        config.setTermConfig(3, 365 days, 2000, true);
+        _lenderDeposit(lender1, 10_000e6);
+
+        uint256 tokenId = _mintNFT(borrower);
+        vm.prank(admin);
+        config.setAppraisal(tokenId, 10_000e6, 0, 0);
+        uint256 loanId = _borrow(borrower, tokenId, 5_000e6, 3);
+        assertEq(pool.getLoan(loanId).interest, 1_000e6);
+
+        _lenderDeposit(attacker, 10_000e6);
+        _repayLoan(loanId);
+
+        assertEq(_claimable(lender1), 400e6);
+        assertEq(_claimable(attacker), 400e6);
+    }
+
+    /// @dev Deposits that shrink between origination and repay hand the whole
+    ///      lender portion to the lenders still in the pool, never more.
+    function test_LenderInterest_DepositsShrinkBeforeRepay_RemainingLenderGetsFullPortion()
+        public
+    {
+        _enableLenders();
+        _lenderDeposit(lender1, 1_000e6);
+        _lenderDeposit(lender2, 1_000e6);
+
+        uint256 tokenId = _mintNFT(borrower);
+        _appraise(tokenId);
+        uint256 loanId = _borrow(borrower, tokenId, 400e6, 0);
+        IAssetLendingPool.Loan memory loan = pool.getLoan(loanId);
+
+        _warpPastLenderLock();
+        vm.prank(lender2);
+        pool.lenderWithdraw(1_000e6);
+        _repayLoan(loanId);
+
+        uint256 portion = _lenderPortion(
+            loan.interest,
+            loan.lenderShareBpsSnapshot
+        );
+        assertApproxEqAbs(_claimable(lender1), portion, 1);
+        assertLe(_claimable(lender1), portion);
+        assertEq(_claimable(lender2), 0);
+
+        address[] memory lenders = new address[](2);
+        lenders[0] = lender1;
+        lenders[1] = lender2;
+        _assertPoolCoversObligations(lenders);
+    }
+
+    /// @dev Default recovery (acquireDefaultedAsset → _resolveAndRecredit) shares the
+    ///      same distribution path and must be bounded the same way.
+    function test_LenderInterest_DefaultRecovery_DepositAfterOrigination_NeverExceedsLenderPortion()
+        public
+    {
+        _enableLenders();
+        address attacker = makeAddr("attacker");
+        _lenderDeposit(lender1, 1_000e6);
+
+        (uint256 loanId, ) = _createDefaultedLoan(400e6);
+        IAssetLendingPool.Loan memory loan = pool.getLoan(loanId);
+        uint256 interest = pool.getDefaultRecord(loanId).interestValue;
+        assertGt(interest, 0);
+
+        _lenderDeposit(attacker, 218_000e6);
+        vm.prank(admin);
+        pool.acquireDefaultedAsset(loanId, address(mockMachine), 0);
+
+        uint256 portion = _lenderPortion(interest, loan.lenderShareBpsSnapshot);
+        assertLe(_claimable(lender1) + _claimable(attacker), portion);
+
+        address[] memory lenders = new address[](2);
+        lenders[0] = lender1;
+        lenders[1] = attacker;
+        _assertPoolCoversObligations(lenders);
+    }
+
+    function test_LenderWithdraw_RevertsWithinLock() public {
+        _enableLenders();
+        _lenderDeposit(lender1, 1_000e6);
+        uint256 unlocksAt = block.timestamp + pool.LENDER_WITHDRAW_LOCK();
+        assertEq(pool.getLenderUnlockTime(lender1), unlocksAt);
+
+        vm.warp(unlocksAt - 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAssetLendingPool
+                    .AssetLendingPool__LenderWithdrawLocked
+                    .selector,
+                unlocksAt
+            )
+        );
+        vm.prank(lender1);
+        pool.lenderWithdraw(1_000e6);
+    }
+
+    function test_LenderWithdraw_SucceedsOnceLockExpires() public {
+        _enableLenders();
+        _lenderDeposit(lender1, 1_000e6);
+
+        vm.warp(pool.getLenderUnlockTime(lender1));
+        vm.prank(lender1);
+        pool.lenderWithdraw(1_000e6);
+
+        assertEq(usdc.balanceOf(lender1), 1_000e6);
+        assertEq(pool.getLenderInfo(lender1).deposited, 0);
+    }
+
+    /// @dev A top-up restarts the lock on the lender's whole balance.
+    function test_LenderWithdraw_TopUpRestartsLock() public {
+        _enableLenders();
+        _lenderDeposit(lender1, 1_000e6);
+        _warpPastLenderLock();
+
+        _lenderDeposit(lender1, 1e6);
+        uint256 unlocksAt = block.timestamp + pool.LENDER_WITHDRAW_LOCK();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAssetLendingPool
+                    .AssetLendingPool__LenderWithdrawLocked
+                    .selector,
+                unlocksAt
+            )
+        );
+        vm.prank(lender1);
+        pool.lenderWithdraw(1_000e6);
+    }
+
+    /// @dev Lenders who deposited before the upgrade have lenderLastDepositAt == 0
+    ///      and must be able to exit immediately.
+    function test_LenderWithdraw_PreUpgradeLenderIsNotLocked() public {
+        _enableLenders();
+        _lenderDeposit(lender1, 1_000e6);
+
+        bytes32 slot = _lenderLastDepositAtSlot(lender1);
+        assertEq(uint256(vm.load(address(pool), slot)), block.timestamp);
+        vm.store(address(pool), slot, bytes32(0));
+        assertEq(pool.getLenderUnlockTime(lender1), 0);
+
+        vm.prank(lender1);
+        pool.lenderWithdraw(1_000e6);
+        assertEq(usdc.balanceOf(lender1), 1_000e6);
+    }
+
+    /// @dev The lock only guards principal; earned interest stays claimable.
+    function test_ClaimLenderInterest_AllowedDuringLock() public {
+        _enableLenders();
+        _lenderDeposit(lender1, 1_000e6);
+        _borrowAndRepay(400e6, 0);
+
+        assertLt(block.timestamp, pool.getLenderUnlockTime(lender1));
+        uint256 earned = _claimable(lender1);
+        assertGt(earned, 0);
+
+        vm.prank(lender1);
+        pool.claimLenderInterest();
+        assertEq(usdc.balanceOf(lender1), earned);
+    }
+
+    /// @dev The 2026-10-08 call sequence in a single transaction now reverts: the
+    ///      flash-loaned deposit cannot be withdrawn, so the flash loan cannot be repaid.
+    function test_LenderWithdrawLock_BlocksSameTxFlashDepositAttack() public {
+        _enableLenders();
+        _lenderDeposit(lender1, 1_000e6);
+
+        MockFlashJitAttacker attacker = new MockFlashJitAttacker();
+        uint256 tokenId = _mintNFT(address(attacker));
+        _appraise(tokenId);
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = tokenId;
+
+        uint256 flashAmount = 218_000e6;
+        usdc.mint(address(attacker), flashAmount + 500e6);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAssetLendingPool
+                    .AssetLendingPool__LenderWithdrawLocked
+                    .selector,
+                block.timestamp + pool.LENDER_WITHDRAW_LOCK()
+            )
+        );
+        attacker.attack(
+            pool,
+            usdc,
+            IERC721(address(assetNFT)),
+            ids,
+            400e6,
+            0,
+            flashAmount
+        );
+    }
+
+    function testFuzz_LenderInterest_ClaimsNeverExceedLenderPortion(
+        uint256 honest,
+        uint256 other,
+        uint256 principal,
+        bool otherBeforeOrigination
+    ) public {
+        honest = bound(honest, 1e6, 1_000_000e6);
+        other = bound(other, 1e6, 100_000_000e6);
+        principal = bound(principal, 1e6, MAX_LOAN);
+        _enableLenders();
+        address otherLender = makeAddr("otherLender");
+
+        _lenderDeposit(lender1, honest);
+        if (otherBeforeOrigination) _lenderDeposit(otherLender, other);
+
+        uint256 tokenId = _mintNFT(borrower);
+        _appraise(tokenId);
+        uint256 loanId = _borrow(borrower, tokenId, principal, 0);
+        IAssetLendingPool.Loan memory loan = pool.getLoan(loanId);
+
+        if (!otherBeforeOrigination) _lenderDeposit(otherLender, other);
+        _repayLoan(loanId);
+
+        assertLe(
+            _claimable(lender1) + _claimable(otherLender),
+            _lenderPortion(loan.interest, loan.lenderShareBpsSnapshot)
+        );
     }
 }

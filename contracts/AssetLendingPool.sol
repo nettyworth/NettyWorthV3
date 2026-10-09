@@ -47,6 +47,11 @@ contract AssetLendingPool is
 
     uint256 private constant BPS = 10_000;
 
+    /// @notice How long lenderWithdraw stays locked after a lender's latest deposit.
+    /// @dev Blocks flash-loaned deposits from capturing an interest distribution and
+    ///      exiting in the same transaction (2026-10-08 incident).
+    uint256 public constant LENDER_WITHDRAW_LOCK = 1 days;
+
     // =========================================================================
     // Storage (ERC-7201 namespaced) — runtime state only; config lives in
     // the separate AssetLendingPoolConfig contract.
@@ -254,6 +259,7 @@ contract AssetLendingPool is
     // =========================================================================
 
     /// @notice Deposit USDC into the pool as an external lender.
+    /// @dev Starts (or restarts) the LENDER_WITHDRAW_LOCK on the lender's whole balance.
     /// @param amount Amount of payment token to deposit.
     function lenderDeposit(
         uint256 amount
@@ -265,6 +271,7 @@ contract AssetLendingPool is
 
         LendingLib.accrueRewardDebtForDeposit($, msg.sender, amount);
 
+        $.lenderLastDepositAt[msg.sender] = block.timestamp;
         $.lenderDeposits[msg.sender] += amount;
         $.totalLenderDeposits += amount;
         $.totalDeposited += amount;
@@ -278,7 +285,8 @@ contract AssetLendingPool is
     // =========================================================================
 
     /// @notice Withdraw idle (unborrowed) capital. Only available liquidity can be withdrawn.
-    /// @dev Intentionally omits `whenNotPaused` so lenders can always exit.
+    /// @dev Intentionally omits `whenNotPaused` so lenders can always exit, except during
+    ///      the LENDER_WITHDRAW_LOCK window after their latest deposit.
     /// @param amount Amount to withdraw.
     function lenderWithdraw(uint256 amount) external override nonReentrant {
         if (amount == 0) revert AssetLendingPool__ZeroAmount();
@@ -290,6 +298,10 @@ contract AssetLendingPool is
         uint256 available = $.totalDeposited - $.totalBorrowed;
         if (amount > available)
             revert AssetLendingPool__InsufficientLiquidity();
+
+        uint256 unlocksAt = _lenderUnlockTime($, msg.sender);
+        if (block.timestamp < unlocksAt)
+            revert AssetLendingPool__LenderWithdrawLocked(unlocksAt);
 
         LendingLib.claimLenderInterestInternal($, msg.sender);
 
@@ -603,6 +615,22 @@ contract AssetLendingPool is
             $.totalLenderDeposits == 0
                 ? 0
                 : (info.deposited * BPS) / $.totalLenderDeposits;
+    }
+
+    /// @inheritdoc IAssetLendingPool
+    function getLenderUnlockTime(
+        address lender
+    ) external view override returns (uint256) {
+        return _lenderUnlockTime(_getStorage(), lender);
+    }
+
+    /// @dev Zero when the lender has never deposited since the lock was introduced.
+    function _lenderUnlockTime(
+        AssetLendingPoolStorageLib.PoolStorage storage $,
+        address lender
+    ) private view returns (uint256) {
+        uint256 lastDepositAt = $.lenderLastDepositAt[lender];
+        return lastDepositAt == 0 ? 0 : lastDepositAt + LENDER_WITHDRAW_LOCK;
     }
 
     // =========================================================================

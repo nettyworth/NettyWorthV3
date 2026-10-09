@@ -310,6 +310,7 @@ contract AssetLendingPoolUtilizationTest is Test {
 
         // Available idle: 200 - 160 = 40 USDC (the 20% reserve)
         // Lender should be able to withdraw up to their deposit share of idle capital (40 USDC)
+        vm.warp(block.timestamp + pool.LENDER_WITHDRAW_LOCK());
         vm.startPrank(lender);
         pool.lenderWithdraw(40e6); // withdraws the reserved portion
         vm.stopPrank();

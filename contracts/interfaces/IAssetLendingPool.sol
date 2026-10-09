@@ -260,6 +260,7 @@ interface IAssetLendingPool {
     error AssetLendingPool__LenderDepositsDisabled();
     error AssetLendingPool__InsufficientLenderBalance();
     error AssetLendingPool__NoInterestToClaim();
+    error AssetLendingPool__LenderWithdrawLocked(uint256 unlocksAt);
     error AssetLendingPool__DefaultNotFound();
     error AssetLendingPool__DefaultAlreadyResolved();
     error AssetLendingPool__NotInAcquisitionPhase();
@@ -356,6 +357,11 @@ interface IAssetLendingPool {
     function getLenderInfo(
         address lender
     ) external view returns (LenderInfo memory);
+
+    /// @notice Timestamp from which `lender` may call lenderWithdraw (0 = not locked).
+    function getLenderUnlockTime(
+        address lender
+    ) external view returns (uint256);
 
     // =========================================================================
     // Admin functions

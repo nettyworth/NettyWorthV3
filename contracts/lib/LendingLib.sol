@@ -404,7 +404,6 @@ library LendingLib {
         interest = loan.interest;
         uint256[] memory tokenIds = loan.tokenIds;
         uint256 lenderShareBpsSnap = loan.lenderShareBpsSnapshot;
-        uint256 lenderDepositsSnap = loan.lenderDepositsSnapshot;
 
         // ---- State writes (CEI) ----
         loan.isPaid = true;
@@ -413,7 +412,7 @@ library LendingLib {
         _clearActiveLoans($, tokenIds);
         _removeBorrowerLoan($, borrower, loanId);
 
-        _distributeInterest($, interest, lenderShareBpsSnap, lenderDepositsSnap);
+        _distributeInterest($, interest, lenderShareBpsSnap);
 
         // ---- External interactions ----
         $.paymentToken.safeTransferFrom(payer, address(this), principal + interest);
@@ -662,6 +661,7 @@ library LendingLib {
         uint256 expireTime = block.timestamp + term.duration;
 
         uint256 lenderShareBpsSnap = $.config.lenderShareBps();
+        // Informational only: no longer used as the interest divisor (see _distributeInterest).
         uint256 lenderDepositsSnap = $.totalLenderDeposits;
         uint256 originationFeeBpsSnap = $.config.originationFeeBps();
 
@@ -721,19 +721,25 @@ library LendingLib {
         $.totalDeposited += principal;
         $.totalDefaultedPrincipal -= principal;
 
-        IAssetLendingPool.Loan storage loan = $.loans[loanId];
-        _distributeInterest($, interest, loan.lenderShareBpsSnapshot, loan.lenderDepositsSnapshot);
+        _distributeInterest($, interest, $.loans[loanId].lenderShareBpsSnapshot);
     }
 
+    /// @dev Credits the lender portion of `interest` to `accInterestPerShare`.
+    ///      The divisor MUST be the live `$.totalLenderDeposits`: claims are paid as
+    ///      `lenderDeposits[lender] * accInterestPerShare`, i.e. against live balances,
+    ///      so dividing by anything smaller (such as the per-loan
+    ///      `lenderDepositsSnapshot`) lets capital deposited after origination claim
+    ///      more than `lenderPortion` out of other lenders' principal. That is how the
+    ///      pool was drained on 2026-10-08. JIT deposits are instead contained by the
+    ///      withdraw lock in AssetLendingPool.lenderWithdraw.
+    ///      `lenderShareBps` stays per-loan (snapshotted at origination, M003 fix).
     function _distributeInterest(
         AssetLendingPoolStorageLib.PoolStorage storage $,
         uint256 interest,
-        uint256 lenderShareBps,
-        uint256 totalLenderDeposits
+        uint256 lenderShareBps
     ) private {
         if (interest == 0) return;
-        if (totalLenderDeposits == 0)
-            totalLenderDeposits = $.totalLenderDeposits;
+        uint256 totalLenderDeposits = $.totalLenderDeposits;
         if (lenderShareBps == 0) lenderShareBps = $.config.lenderShareBps();
         uint256 lenderPortion;
         if (totalLenderDeposits > 0) {

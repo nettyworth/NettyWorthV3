@@ -58,6 +58,14 @@ library AssetLendingPoolStorageLib {
         /// @dev Tracks the index of each loanId within borrowerLoans[borrower] for O(1)
         ///      swap-and-pop removal when a loan is closed (repaid or defaulted).
         mapping(uint256 loanId => uint256 index) borrowerLoanIndex;
+        // =====================================================================
+        // Lender withdraw lock (2026-10-08 incident fix)
+        // =====================================================================
+        /// @dev Timestamp of each lender's most recent lenderDeposit. lenderWithdraw is
+        ///      locked for LENDER_WITHDRAW_LOCK after it, so flash-loaned capital cannot
+        ///      deposit, capture an interest distribution and exit in the same tx.
+        ///      Zero for lenders who deposited before this field existed (never locked).
+        mapping(address lender => uint256) lenderLastDepositAt;
     }
 
     // =========================================================================
