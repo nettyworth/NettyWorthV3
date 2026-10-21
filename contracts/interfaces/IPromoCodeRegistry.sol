@@ -149,8 +149,8 @@ interface IPromoCodeRegistry {
     /// @param codeId   keccak256 hash of the off-chain promo-code string.
     /// @param user     Economic beneficiary (token seller).
     /// @param machine  PackMachine clone the token was won from.
-    /// @param packMask Packs the token is attributed to: exactly one bit when the pool
-    ///                 recorded the pack at win time, else the clone's eligibility mask.
+    /// @param packMask The pack the token was won from as a one-bit mask, or 0 when the
+    ///                 pool has no recorded pack (a pack-bound code then reverts).
     /// @return bps     Buyback rate override in basis points ([100, 10000] = 1%–100%).
     function redeemBuyback(
         bytes32 codeId,

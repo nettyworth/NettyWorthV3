@@ -178,7 +178,9 @@ library PackFulfillLib {
                 emit CardWon(pending.user, tokenId, requestId);
                 // Register with BuybackPool so the user can sell the card back.
                 // paidPerCard is the net USDC the buyer paid per card — used by
-                // BuybackPool when the machine is in Spend mode.
+                // BuybackPool when the machine is in Spend mode. The pack is
+                // recorded because a card can sit in several packs at once, and
+                // only the pack it was won from may set its sell-back rate.
                 // Wrapped in try/catch: a registration failure must never revert card
                 // delivery — the user already owns the NFT at this point.
                 if (poolActive) {
@@ -187,7 +189,8 @@ library PackFulfillLib {
                             tokenId,
                             uint8(selectedTier),
                             address(this),
-                            paidPerCard
+                            paidPerCard,
+                            pending.packId
                         )
                     {} catch {
                         emit BuybackRegistrationFailed(tokenId, requestId);

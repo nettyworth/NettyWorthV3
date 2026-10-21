@@ -60,7 +60,7 @@ interface IBuybackPool {
 
     /// @notice Same as the 4-arg overload, plus the pack the token was won from. Pack-bound
     ///         buyback codes are then matched against that exact pack. Tokens registered
-    ///         through any other overload fall back to the machine's eligibility mask.
+    ///         through any other overload get no pack-bound rate.
     /// @param packId Pack on `sourcePackMachine` the token was won from (0–255).
     function registerToken(
         uint256 tokenId,
