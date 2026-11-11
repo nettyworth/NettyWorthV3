@@ -171,6 +171,55 @@ if (!hasBurnerRole) {
   process.exit(1);
 }
 
+// ─── Refuse to burn tokens still in a PackMachine pool ───────────────────────
+// batchBurn does not check the owner. A burned token left in a pool is re-added
+// after every failed draw (CardFailed), so take it out of the pools first.
+const nft = await viem.getContractAt("AssetNFT", proxyAddress);
+const factoryEntry = deploymentData["PackMachineFactory"] as
+  | Record<string, unknown>
+  | undefined;
+if (!factoryEntry?.proxy) {
+  console.warn(
+    "WARN: PackMachineFactory not in deployment file; skipping the pack-pool check.",
+  );
+} else {
+  const factory = await viem.getContractAt(
+    "PackMachineFactory",
+    getAddress(factoryEntry.proxy as string),
+  );
+  const isMachine = new Map<string, boolean>();
+  const pooled: { tokenId: bigint; machine: `0x${string}` }[] = [];
+  for (let i = 0; i < tokenIds.length; i += 200) {
+    const chunk = tokenIds.slice(i, i + 200);
+    const owns = await nft.read.explicitOwnershipsOf([chunk]);
+    for (let j = 0; j < chunk.length; j++) {
+      const owner = owns[j].addr;
+      if (owns[j].burned) continue;
+      if (!isMachine.has(owner)) {
+        isMachine.set(owner, await factory.read.isPackMachine([owner]));
+      }
+      if (!isMachine.get(owner)) continue;
+      const machine = await viem.getContractAt("PackMachine", owner);
+      if ((await machine.read.getTokenEligibility([chunk[j]])) !== 0n) {
+        pooled.push({ tokenId: chunk[j], machine: owner });
+      }
+    }
+  }
+  if (pooled.length > 0) {
+    console.error(
+      `\n${pooled.length} token(s) are still in a PackMachine pool. Burning them leaves undrawable cards behind:`,
+    );
+    for (const p of pooled) console.error(`  #${p.tokenId}  machine ${p.machine}`);
+    const ids = pooled.map((p) => p.tokenId).join(",");
+    console.error(
+      `Remove them first (they are RemovedFromPlatform, so the scan flags them NOT_HELD):\n` +
+        `  PACK_MACHINE=${pooled[0].machine} TOKEN_IDS=${ids} EXECUTE=true \\\n` +
+        `    npx hardhat run scripts/remove-burned-from-pool.ts --network ${connection.networkName}`,
+    );
+    process.exit(1);
+  }
+}
+
 // ─── Preview token state (first batch only) ──────────────────────────────────
 console.log(`\nAssetNFT proxy: ${proxyAddress}`);
 console.log(`Tokens to burn: ${tokenIds.length}`);
@@ -191,7 +240,6 @@ if (connection.networkConfig.type === "http") {
 }
 
 // ─── Burn in batches of ≤50 ───────────────────────────────────────────────────
-const nft = await viem.getContractAt("AssetNFT", proxyAddress);
 const totalBatches = Math.ceil(tokenIds.length / BATCH_SIZE);
 console.log(
   `\nBurning ${tokenIds.length} tokens in ${totalBatches} batch(es)...`,

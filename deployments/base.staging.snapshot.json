@@ -159,5 +159,23 @@
     "packMachineFactory": "0x2Dd68af36e7001690d2c815B68103d7FA81E20D1",
     "buybackPool": "0x778e60808A37FAABD61446a4ed29C11fF6d64698",
     "deployedAt": "2026-07-07T08:00:38.103Z"
+  },
+  "P2PTradeEscrow": {
+    "proxy": "0x535dbd7b89ac69da91c1cdb71d0f04903e88ce60",
+    "implementation": "0xca82f63ed09f37b3609d7d5c22d9b679f4b5616e",
+    "owner": "0xc9e1a4d1f52ae8dc52eb0642cba1edc4c56e29ef",
+    "ownerAccepted": true,
+    "refundRecipient": "0xC9e1A4D1F52aE8Dc52eb0642CbA1edc4c56E29Ef",
+    "allowedTokens": [
+      {
+        "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "type": "ERC20"
+      },
+      {
+        "token": "0x27b125fB73094e53741b850ad779a746a59B089A",
+        "type": "ERC721"
+      }
+    ],
+    "deployedAt": "2026-11-11T13:55:49.162Z"
   }
 }

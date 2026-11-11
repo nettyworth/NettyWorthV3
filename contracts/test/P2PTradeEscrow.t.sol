@@ -56,6 +56,14 @@ contract P2PTradeEscrowTest is Test {
         );
         escrow = P2PTradeEscrow(address(proxy));
 
+        // Token allow-list: only listed (token, type) pairs may enter a trade.
+        vm.startPrank(admin);
+        escrow.setTokenAllowed(address(usdc), IP2PTradeEscrow.AssetType.ERC20, true);
+        escrow.setTokenAllowed(address(dai), IP2PTradeEscrow.AssetType.ERC20, true);
+        escrow.setTokenAllowed(address(nft), IP2PTradeEscrow.AssetType.ERC721, true);
+        escrow.setTokenAllowed(address(erc1155), IP2PTradeEscrow.AssetType.ERC1155, true);
+        vm.stopPrank();
+
         // Mint assets to alice (initiator)
         nft.mint(alice, TOKEN_ID_1);
         usdc.mint(alice, USDC_AMOUNT);
