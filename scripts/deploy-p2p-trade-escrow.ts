@@ -1,7 +1,54 @@
+/**
+ * deploy-p2p-trade-escrow.ts
+ *
+ * Deploys the P2PTradeEscrow implementation behind an ERC-1967 / UUPS proxy
+ * and initializes it with `owner`. Standalone contract — no PermissionManager
+ * roles or wiring needed.
+ *
+ * Staging and production share the `base` network (same chain, same key), so
+ * the deployment record file is selectable via DEPLOYMENTS_FILE to keep a
+ * staging deploy out of the production record (deployments/base.json).
+ *
+ * Usage
+ * -----
+ * # Staging on Base (records into deployments/base.staging.snapshot.json):
+ * DEPLOYMENTS_FILE=base.staging.snapshot \
+ *   npx hardhat run scripts/deploy-p2p-trade-escrow.ts --network base
+ *
+ * # Replace the staging deployment with a fresh one (overwrites its record):
+ * FORCE_REDEPLOY=1 DEPLOYMENTS_FILE=base.staging.snapshot \
+ *   REFUND_RECIPIENT=0x<wallet> ALLOWED_ERC20=0x<usdc> ALLOWED_ERC721=0x<assetNFT> \
+ *   npx hardhat run scripts/deploy-p2p-trade-escrow.ts --network base
+ *
+ * # Production on Base (records into deployments/base.json):
+ * OWNER=0x<safe> REFUND_RECIPIENT=0x<wallet> ALLOWED_ERC20=0x<usdc> ALLOWED_ERC721=0x<assetNFT> \
+ *   npx hardhat run scripts/deploy-p2p-trade-escrow.ts --network base
+ *
+ * # Dry-run on a local fork (no prompt, no JSON write):
+ * npx hardhat run scripts/deploy-p2p-trade-escrow.ts --network forkBase
+ *
+ * Optional env vars:
+ *   OWNER             — final owner (default: deployer); when it differs from
+ *                       the deployer it must call acceptOwnership()
+ *   REFUND_RECIPIENT  — wallet refunded for externally funded (Coinflow) offers;
+ *                       those offers revert until it is set
+ *   ALLOWED_ERC20 / ALLOWED_ERC721 / ALLOWED_ERC1155
+ *                     — comma-separated token allow-list per asset type; no
+ *                       trade can be created with a token that isn't on it
+ *   DEPLOYMENTS_FILE  — record file basename under deployments/
+ *                       (default: the network name)
+ *   FORCE_REDEPLOY=1  — deploy even if the record file already has a
+ *                       P2PTradeEscrow entry (the old entry is overwritten)
+ */
+
 import { network } from "hardhat";
 import { encodeFunctionData, getAddress } from "viem";
 import { createInterface } from "node:readline/promises";
-import { saveDeployment, waitForCode } from "./lib/deployments.js";
+import {
+    readDeployments,
+    saveDeployment,
+    waitForCode,
+} from "./lib/deployments.js";
 
 async function confirm(
     networkName: string,
@@ -10,6 +57,7 @@ async function confirm(
     owner: string,
     refundRecipient: string | null,
     allowed: AllowedToken[],
+    recordFile: string,
 ): Promise<boolean> {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     console.log("\n=== P2PTradeEscrow Deployment Summary ===");
@@ -19,7 +67,7 @@ async function confirm(
     console.log(`Owner:     ${owner}${owner.toLowerCase() === deployer.toLowerCase() ? "" : " (transferred after setup; must acceptOwnership)"}`);
     console.log(`Refunds:   ${refundRecipient ?? "(none — set later with setRefundRecipient)"}`);
     console.log(`Tokens:    ${allowed.length ? allowed.map((t) => `${t.label} ${t.token}`).join(", ") : "(none — no trade can be created)"}`);
-    console.log(`Record:    deployments/${networkName}.json`);
+    console.log(`Record:    deployments/${recordFile}.json`);
     console.log("=========================================\n");
     const answer = await rl.question("Proceed with deployment? (yes/no): ");
     rl.close();
@@ -28,6 +76,7 @@ async function confirm(
 
 const connection = await network.create();
 const { viem } = connection;
+const isLive = connection.networkConfig.type === "http";
 
 const publicClient = await viem.getPublicClient();
 const [deployerClient] = await viem.getWalletClients();
@@ -67,9 +116,33 @@ const allowed: AllowedToken[] = ASSET_TYPES.flatMap(({ env, assetType, label }) 
         .map((a) => ({ token: getAddress(a) as `0x${string}`, assetType, label })),
 );
 
+const recordFile = process.env.DEPLOYMENTS_FILE ?? connection.networkName;
+
+// ─── Guard against losing track of an existing deployment ────────────────────
+if (isLive && process.env.FORCE_REDEPLOY !== "1") {
+    const existing = (await readDeployments(recordFile))["P2PTradeEscrow"] as
+        | { proxy?: string }
+        | undefined;
+    if (existing) {
+        console.error(
+            `deployments/${recordFile}.json already records P2PTradeEscrow at ${existing.proxy}.\n` +
+                "Set FORCE_REDEPLOY=1 to deploy a new one and overwrite the record.",
+        );
+        process.exit(1);
+    }
+}
+
 // ─── Confirmation prompt ──────────────────────────────────────────────────────
-if (connection.networkConfig.type === "http") {
-    const ok = await confirm(connection.networkName, chainId, deployerAddress, owner, refundRecipient, allowed);
+if (isLive) {
+    const ok = await confirm(
+        connection.networkName,
+        chainId,
+        deployerAddress,
+        owner,
+        refundRecipient,
+        allowed,
+        recordFile,
+    );
     if (!ok) { console.log("Deployment cancelled."); process.exit(0); }
 }
 
@@ -94,6 +167,7 @@ console.log(`  Proxy: ${proxy.address}`);
 
 // ─── [4/4] Configure, hand over ownership, verify ─────────────────────────────
 console.log("[4/4] Configuring and verifying deployment...");
+await waitForCode(publicClient, proxy.address);
 const escrow = await viem.getContractAt("P2PTradeEscrow", proxy.address);
 
 if (refundRecipient) {
@@ -161,8 +235,8 @@ console.log(`Tokens:         ${allowed.length ? allowed.map((t) => `${t.label} $
 console.log("============================================\n");
 
 // ─── Persist deployment record ────────────────────────────────────────────────
-if (connection.networkConfig.type === "http") {
-    await saveDeployment(connection.networkName, "P2PTradeEscrow", {
+if (isLive) {
+    await saveDeployment(recordFile, "P2PTradeEscrow", {
         proxy: proxy.address,
         implementation: impl.address,
         owner,
@@ -171,5 +245,5 @@ if (connection.networkConfig.type === "http") {
         allowedTokens: allowed.map(({ token, label }) => ({ token, type: label })),
         deployedAt: new Date().toISOString(),
     });
-    console.log(`Deployment info saved to deployments/${connection.networkName}.json`);
+    console.log(`Deployment info saved to deployments/${recordFile}.json`);
 }

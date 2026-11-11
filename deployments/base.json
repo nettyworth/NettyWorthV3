@@ -144,6 +144,13 @@
       }
     ]
   },
+  "PackBatcher": {
+    "proxy": "0x2612B7e75913630aF05Fb8F56d5f9Bb18e8957Cd",
+    "implementation": "0xe1EFe6eA13EEA2B8c2b62D221eC167a821851825",
+    "permissionManager": "0xC4816911a267B27F4509929Be4Fc4516BDe7eC1D",
+    "packMachineFactory": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
+    "deployedAt": "2026-08-05T16:35:16.442Z"
+  },
   "AssetLendingPoolConfig": {
     "proxy": "0x99e04cc8Ad25EA0d35a924293dA80a7c8ed2c9A1",
     "implementation": "0x0f697205df567c2c2e3b7a00226c99e2bfb2668f",
