@@ -17,11 +17,11 @@
  *
  * # Replace the staging deployment with a fresh one (overwrites its record):
  * FORCE_REDEPLOY=1 DEPLOYMENTS_FILE=base.staging.snapshot \
- *   REFUND_RECIPIENT=0x<wallet> ALLOWED_ERC20=0x<usdc> ALLOWED_ERC721=0x<assetNFT> \
+ *   ALLOWED_ERC20=0x<usdc> ALLOWED_ERC721=0x<assetNFT> \
  *   npx hardhat run scripts/deploy-p2p-trade-escrow.ts --network base
  *
- * # Production on Base (records into deployments/base.json):
- * OWNER=0x<safe> REFUND_RECIPIENT=0x<wallet> ALLOWED_ERC20=0x<usdc> ALLOWED_ERC721=0x<assetNFT> \
+ * # Production on Base (records into deployments/base.json; OWNER is required):
+ * OWNER=0x<safe> ALLOWED_ERC20=0x<usdc> ALLOWED_ERC721=0x<assetNFT> \
  *   npx hardhat run scripts/deploy-p2p-trade-escrow.ts --network base
  *
  * # Dry-run on a local fork (no prompt, no JSON write):
@@ -29,9 +29,8 @@
  *
  * Optional env vars:
  *   OWNER             — final owner (default: deployer); when it differs from
- *                       the deployer it must call acceptOwnership()
- *   REFUND_RECIPIENT  — wallet refunded for externally funded (Coinflow) offers;
- *                       those offers revert until it is set
+ *                       the deployer it must call acceptOwnership(). Required,
+ *                       and must not be the deployer, for the production record
  *   ALLOWED_ERC20 / ALLOWED_ERC721 / ALLOWED_ERC1155
  *                     — comma-separated token allow-list per asset type; no
  *                       trade can be created with a token that isn't on it
@@ -45,6 +44,7 @@ import { network } from "hardhat";
 import { encodeFunctionData, getAddress } from "viem";
 import { createInterface } from "node:readline/promises";
 import {
+    getDeploymentPath,
     readDeployments,
     saveDeployment,
     waitForCode,
@@ -55,7 +55,6 @@ async function confirm(
     chainId: number,
     deployer: string,
     owner: string,
-    refundRecipient: string | null,
     allowed: AllowedToken[],
     recordFile: string,
 ): Promise<boolean> {
@@ -65,7 +64,6 @@ async function confirm(
     console.log(`Chain ID:  ${chainId}`);
     console.log(`Deployer:  ${deployer}`);
     console.log(`Owner:     ${owner}${owner.toLowerCase() === deployer.toLowerCase() ? "" : " (transferred after setup; must acceptOwnership)"}`);
-    console.log(`Refunds:   ${refundRecipient ?? "(none — set later with setRefundRecipient)"}`);
     console.log(`Tokens:    ${allowed.length ? allowed.map((t) => `${t.label} ${t.token}`).join(", ") : "(none — no trade can be created)"}`);
     console.log(`Record:    deployments/${recordFile}.json`);
     console.log("=========================================\n");
@@ -86,18 +84,11 @@ const chainId = await publicClient.getChainId();
 // The proxy is initialised with the deployer as owner so this script can configure it, then
 // ownership is handed to OWNER (e.g. the Safe) with Ownable2Step: OWNER must call
 // acceptOwnership() to take it. Without OWNER the deployer stays owner (fine for testnets,
-// not for production — the owner can upgrade the escrow and redirect refunds).
+// not for production — the owner can upgrade the escrow and pause it).
 const owner: `0x${string}` = process.env.OWNER
     ? (getAddress(process.env.OWNER) as `0x${string}`)
     : deployerAddress;
 const transfersOwnership = owner.toLowerCase() !== deployerAddress.toLowerCase();
-
-// Refund recipient = the NettyWorth wallet (treasury) that receives offered ERC20 refunds of
-// externally funded (Coinflow) trades and may cancel them on a chargeback. Externally
-// funded offers revert until it is set.
-const refundRecipient: `0x${string}` | null = process.env.REFUND_RECIPIENT
-    ? (getAddress(process.env.REFUND_RECIPIENT) as `0x${string}`)
-    : null;
 
 // Token allow-list — no trade can be created with a token that isn't on it. Comma-separated
 // addresses per asset type, e.g. ALLOWED_ERC20=<USDC> ALLOWED_ERC721=<AssetNFT>.
@@ -117,6 +108,36 @@ const allowed: AllowedToken[] = ASSET_TYPES.flatMap(({ env, assetType, label }) 
 );
 
 const recordFile = process.env.DEPLOYMENTS_FILE ?? connection.networkName;
+
+// ─── Input guards (audit LOW-4) ───────────────────────────────────────────────
+const inputErrors: string[] = [];
+// transferOwnership(0) would only clear the pending owner: the deployer would stay owner.
+if (owner === "0x0000000000000000000000000000000000000000") {
+    inputErrors.push("OWNER is the zero address.");
+}
+// One token on two type lists is a misconfiguration: an AssetNFT also allowed as ERC20
+// could be escrowed with transferFrom and never released.
+const seen = new Map<string, string>();
+for (const t of allowed) {
+    const key = t.token.toLowerCase();
+    const other = seen.get(key);
+    if (other && other !== t.label) {
+        inputErrors.push(`${t.token} is allowed as both ${other} and ${t.label}.`);
+    }
+    seen.set(key, t.label);
+}
+// The production record (deployments/base.json) must end up owned by the Safe, not the
+// deployer key. Compared as resolved, case-folded paths: DEPLOYMENTS_FILE=./base or =Base
+// (case-insensitive macOS filesystem) writes the same file.
+const isProductionRecord =
+    getDeploymentPath(recordFile).toLowerCase() === getDeploymentPath("base").toLowerCase();
+if (isLive && isProductionRecord && !transfersOwnership) {
+    inputErrors.push("The production record (deployments/base.json) needs OWNER=<Safe>, not the deployer.");
+}
+if (inputErrors.length > 0) {
+    for (const e of inputErrors) console.error(`  ${e}`);
+    process.exit(1);
+}
 
 // ─── Guard against losing track of an existing deployment ────────────────────
 if (isLive && process.env.FORCE_REDEPLOY !== "1") {
@@ -139,7 +160,6 @@ if (isLive) {
         chainId,
         deployerAddress,
         owner,
-        refundRecipient,
         allowed,
         recordFile,
     );
@@ -170,11 +190,6 @@ console.log("[4/4] Configuring and verifying deployment...");
 await waitForCode(publicClient, proxy.address);
 const escrow = await viem.getContractAt("P2PTradeEscrow", proxy.address);
 
-if (refundRecipient) {
-    console.log(`  Setting refund recipient ${refundRecipient}...`);
-    const hash = await escrow.write.setRefundRecipient([refundRecipient]);
-    await publicClient.waitForTransactionReceipt({ hash });
-}
 for (const t of allowed) {
     console.log(`  Allowing ${t.label} ${t.token}...`);
     const hash = await escrow.write.setTokenAllowed([t.token, t.assetType, true]);
@@ -189,7 +204,6 @@ if (transfersOwnership) {
 const actualOwner = await escrow.read.owner();
 const pendingOwner = await escrow.read.pendingOwner();
 const nextId = await escrow.read.nextTradeId();
-const [, domainName, domainVersion] = await escrow.read.eip712Domain();
 
 const errors: string[] = [];
 if (actualOwner.toLowerCase() !== deployerAddress.toLowerCase()) {
@@ -205,13 +219,6 @@ for (const t of allowed) {
 }
 if (nextId !== 0n) {
     errors.push(`  nextTradeId: expected 0, got ${nextId}`);
-}
-if (domainName !== "P2PTradeEscrow" || domainVersion !== "1") {
-    errors.push(`  eip712Domain: expected P2PTradeEscrow/1, got ${domainName}/${domainVersion}`);
-}
-const actualRefundRecipient = await escrow.read.refundRecipient();
-if (refundRecipient && actualRefundRecipient.toLowerCase() !== refundRecipient.toLowerCase()) {
-    errors.push(`  refundRecipient: expected "${refundRecipient}", got "${actualRefundRecipient}"`);
 }
 
 if (errors.length > 0) {
@@ -229,8 +236,6 @@ if (transfersOwnership) {
     console.log(`Pending owner:  ${pendingOwner} ✓ — must call acceptOwnership() to take over`);
 }
 console.log(`nextTradeId:    ${nextId} ✓`);
-console.log(`EIP-712:        ${domainName} v${domainVersion} ✓`);
-console.log(`Refunds:        ${refundRecipient ? `${refundRecipient} ✓` : "(not set — externally funded offers revert)"}`);
 console.log(`Tokens:         ${allowed.length ? allowed.map((t) => `${t.label} ${t.token}`).join(", ") + " ✓" : "(none — no trade can be created)"}`);
 console.log("============================================\n");
 
@@ -241,7 +246,6 @@ if (isLive) {
         implementation: impl.address,
         owner,
         ownerAccepted: !transfersOwnership,
-        refundRecipient,
         allowedTokens: allowed.map(({ token, label }) => ({ token, type: label })),
         deployedAt: new Date().toISOString(),
     });

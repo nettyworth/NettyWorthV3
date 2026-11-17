@@ -330,7 +330,7 @@ Blocks `createListing`, `buyNow`, `commitBid`, `settleAuction`. Force-close/canc
 ### Pause P2PTradeEscrow
 
 Requires owner. Call `P2PTradeEscrow.pause()`.  
-Blocks `createTrade` and `acceptTrade`. `cancelTrade`/`expireTrade` intentionally remain open so escrowed assets can always be reclaimed.
+Blocks `createTrade`, `acceptTrade` and `counterTrade`. `cancelTrade`/`rejectTrade`/`expireTrade`/`claimRefund` intentionally remain open so escrowed assets can always be reclaimed.
 
 ### Blacklist a wallet
 
