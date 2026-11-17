@@ -64,6 +64,13 @@ describe("P2PTradeEscrow", async function () {
       escrowProxy.address,
     );
 
+    // ── Token allow-list (owner = admin): no trade can use an unlisted token ──
+    // AssetType: 0 = ERC20, 1 = ERC721, 2 = ERC1155.
+    await escrow.write.setTokenAllowed([usdc.address, 0, true]);
+    await escrow.write.setTokenAllowed([dai.address, 0, true]);
+    await escrow.write.setTokenAllowed([nft.address, 1, true]);
+    await escrow.write.setTokenAllowed([erc1155.address, 2, true]);
+
     // ── Setup: mint assets to alice ──
     await nft.write.mint([aliceAddress, TOKEN_ID_1]);
     await usdc.write.mint([aliceAddress, USDC_AMOUNT]);
@@ -117,11 +124,7 @@ describe("P2PTradeEscrow", async function () {
     return { assetType: AssetType.ERC20, token, tokenId: 0n, amount };
   }
 
-  function erc1155Asset(
-    token: `0x${string}`,
-    tokenId: bigint,
-    amount: bigint,
-  ) {
+  function erc1155Asset(token: `0x${string}`, tokenId: bigint, amount: bigint) {
     return { assetType: AssetType.ERC1155, token, tokenId, amount };
   }
 
@@ -133,7 +136,12 @@ describe("P2PTradeEscrow", async function () {
     const { escrow, usdc, nft } = await deploy();
 
     const tx = await escrow.write.createTrade(
-      [bobAddress, [nftAsset(nft.address, TOKEN_ID_1)], [erc20Asset(usdc.address, USDC_AMOUNT)], 0n],
+      [
+        bobAddress,
+        [nftAsset(nft.address, TOKEN_ID_1)],
+        [erc20Asset(usdc.address, USDC_AMOUNT)],
+        0n,
+      ],
       { account: walletAlice.account },
     );
 
@@ -250,10 +258,7 @@ describe("P2PTradeEscrow", async function () {
       await erc1155.read.balanceOf([aliceAddress, ERC1155_ID]),
       ERC1155_AMOUNT * 2n,
     );
-    assert.equal(
-      await erc1155.read.balanceOf([bobAddress, ERC1155_ID]),
-      0n,
-    );
+    assert.equal(await erc1155.read.balanceOf([bobAddress, ERC1155_ID]), 0n);
   });
 
   // =========================================================================
@@ -264,7 +269,12 @@ describe("P2PTradeEscrow", async function () {
     const { escrow, usdc, nft } = await deploy();
 
     await escrow.write.createTrade(
-      [bobAddress, [nftAsset(nft.address, TOKEN_ID_1)], [erc20Asset(usdc.address, USDC_AMOUNT)], 0n],
+      [
+        bobAddress,
+        [nftAsset(nft.address, TOKEN_ID_1)],
+        [erc20Asset(usdc.address, USDC_AMOUNT)],
+        0n,
+      ],
       { account: walletAlice.account },
     );
 
@@ -286,7 +296,12 @@ describe("P2PTradeEscrow", async function () {
     const { escrow, usdc, nft } = await deploy();
 
     await escrow.write.createTrade(
-      [bobAddress, [nftAsset(nft.address, TOKEN_ID_1)], [erc20Asset(usdc.address, USDC_AMOUNT)], 0n],
+      [
+        bobAddress,
+        [nftAsset(nft.address, TOKEN_ID_1)],
+        [erc20Asset(usdc.address, USDC_AMOUNT)],
+        0n,
+      ],
       { account: walletAlice.account },
     );
 
@@ -317,7 +332,12 @@ describe("P2PTradeEscrow", async function () {
     const deadline = block.timestamp + BigInt(ONE_HOUR);
 
     await escrow.write.createTrade(
-      [bobAddress, [nftAsset(nft.address, TOKEN_ID_1)], [erc20Asset(usdc.address, USDC_AMOUNT)], deadline],
+      [
+        bobAddress,
+        [nftAsset(nft.address, TOKEN_ID_1)],
+        [erc20Asset(usdc.address, USDC_AMOUNT)],
+        deadline,
+      ],
       { account: walletAlice.account },
     );
 
@@ -344,13 +364,17 @@ describe("P2PTradeEscrow", async function () {
     const { escrow, usdc, nft } = await deploy();
 
     await escrow.write.createTrade(
-      [bobAddress, [nftAsset(nft.address, TOKEN_ID_1)], [erc20Asset(usdc.address, USDC_AMOUNT)], 0n],
+      [
+        bobAddress,
+        [nftAsset(nft.address, TOKEN_ID_1)],
+        [erc20Asset(usdc.address, USDC_AMOUNT)],
+        0n,
+      ],
       { account: walletAlice.account },
     );
 
     await assert.rejects(
-      () =>
-        escrow.write.acceptTrade([0n], { account: walletCarol.account }),
+      () => escrow.write.acceptTrade([0n], { account: walletCarol.account }),
       /P2PTradeEscrow__NotCounterparty/,
     );
   });
@@ -373,7 +397,12 @@ describe("P2PTradeEscrow", async function () {
     const deadline = block.timestamp + BigInt(ONE_HOUR);
 
     await escrow.write.createTrade(
-      [bobAddress, [nftAsset(nft.address, TOKEN_ID_1)], [erc20Asset(usdc.address, USDC_AMOUNT)], deadline],
+      [
+        bobAddress,
+        [nftAsset(nft.address, TOKEN_ID_1)],
+        [erc20Asset(usdc.address, USDC_AMOUNT)],
+        deadline,
+      ],
       { account: walletAlice.account },
     );
 
@@ -382,8 +411,7 @@ describe("P2PTradeEscrow", async function () {
     await testClient.mine({ blocks: 1 });
 
     await assert.rejects(
-      () =>
-        escrow.write.acceptTrade([0n], { account: walletBob.account }),
+      () => escrow.write.acceptTrade([0n], { account: walletBob.account }),
       /P2PTradeEscrow__TradeExpired/,
     );
   });
@@ -396,13 +424,17 @@ describe("P2PTradeEscrow", async function () {
     const { escrow, usdc, nft } = await deploy();
 
     await escrow.write.createTrade(
-      [bobAddress, [nftAsset(nft.address, TOKEN_ID_1)], [erc20Asset(usdc.address, USDC_AMOUNT)], 0n],
+      [
+        bobAddress,
+        [nftAsset(nft.address, TOKEN_ID_1)],
+        [erc20Asset(usdc.address, USDC_AMOUNT)],
+        0n,
+      ],
       { account: walletAlice.account },
     );
 
     await assert.rejects(
-      () =>
-        escrow.write.cancelTrade([0n], { account: walletBob.account }),
+      () => escrow.write.cancelTrade([0n], { account: walletBob.account }),
       /P2PTradeEscrow__NotInitiator/,
     );
   });
@@ -427,8 +459,7 @@ describe("P2PTradeEscrow", async function () {
     await escrow.write.acceptTrade([0n], { account: walletBob.account });
 
     await assert.rejects(
-      () =>
-        escrow.write.acceptTrade([0n], { account: walletBob.account }),
+      () => escrow.write.acceptTrade([0n], { account: walletBob.account }),
       /P2PTradeEscrow__TradeNotActive/,
     );
   });
@@ -445,7 +476,12 @@ describe("P2PTradeEscrow", async function () {
     await assert.rejects(
       () =>
         escrow.write.createTrade(
-          [bobAddress, [nftAsset(nft.address, TOKEN_ID_1)], [erc20Asset(usdc.address, USDC_AMOUNT)], 0n],
+          [
+            bobAddress,
+            [nftAsset(nft.address, TOKEN_ID_1)],
+            [erc20Asset(usdc.address, USDC_AMOUNT)],
+            0n,
+          ],
           { account: walletAlice.account },
         ),
       /EnforcedPause|paused/i,
@@ -456,15 +492,19 @@ describe("P2PTradeEscrow", async function () {
     const { escrow, usdc, nft } = await deploy();
 
     await escrow.write.createTrade(
-      [bobAddress, [nftAsset(nft.address, TOKEN_ID_1)], [erc20Asset(usdc.address, USDC_AMOUNT)], 0n],
+      [
+        bobAddress,
+        [nftAsset(nft.address, TOKEN_ID_1)],
+        [erc20Asset(usdc.address, USDC_AMOUNT)],
+        0n,
+      ],
       { account: walletAlice.account },
     );
 
     await escrow.write.pause({ account: walletAdmin.account });
 
     await assert.rejects(
-      () =>
-        escrow.write.acceptTrade([0n], { account: walletBob.account }),
+      () => escrow.write.acceptTrade([0n], { account: walletBob.account }),
       /EnforcedPause|paused/i,
     );
   });

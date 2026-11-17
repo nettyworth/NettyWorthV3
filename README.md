@@ -708,7 +708,12 @@ SKIP_NFT_WIRING=                  # Set to true to skip AssetNFT wiring (call se
 PERMISSION_MANAGER_PROXY=         # (optional) Override PermissionManager proxy; falls back to deployments/<network>.json
 
 # --- deploy-p2p-trade-escrow.ts ---
-OWNER=                            # (optional) Owner address; defaults to deployer
+OWNER=                            # Owner (Safe); required for deployments/base.json, else defaults to deployer
+ALLOWED_ERC20=                    # Comma-separated ERC20 allow-list (USDC)
+ALLOWED_ERC721=                   # Comma-separated ERC721 allow-list (AssetNFT proxy)
+ALLOWED_ERC1155=                  # (optional) Leave empty: an ERC1155 hook can grief refunds
+DEPLOYMENTS_FILE=                 # (optional) Record basename, e.g. base.staging.snapshot; defaults to the network name
+FORCE_REDEPLOY=                   # (optional) 1 = deploy even if the record already has P2PTradeEscrow
 
 # --- set-pack-machine-implementation.ts ---
 NEW_PACK_MACHINE_IMPL=            # (optional) Reuse a pre-deployed impl; skip the deploy step
@@ -1047,7 +1052,7 @@ Saves `NettyWorthMarketplace.proxy` and `.implementation` to `deployments/<netwo
 npx hardhat run scripts/deploy-p2p-trade-escrow.ts --network <network>
 ```
 
-Deploys the `P2PTradeEscrow` implementation and ERC1967 proxy. `initialize(owner)` is called with the `OWNER` env var, or the deployer address if unset — set `OWNER` to a multi-sig for production. Saves `P2PTradeEscrow.proxy`, `.implementation`, and `.owner` to `deployments/<network>.json`.
+Deploys the `P2PTradeEscrow` implementation and ERC1967 proxy, initialised with the deployer as owner so the script can set the token allow-list (`ALLOWED_*`). When `OWNER` differs from the deployer, ownership is then transferred with Ownable2Step and `OWNER` must call `acceptOwnership()`. `OWNER` (the Safe) is required for the production record `deployments/base.json`. Saves `P2PTradeEscrow.proxy`, `.implementation`, `.owner`, `.ownerAccepted` and `.allowedTokens` to `deployments/<DEPLOYMENTS_FILE or network>.json`.
 
 ---
 
