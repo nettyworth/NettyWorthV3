@@ -94,7 +94,11 @@ Order matters — each script reads earlier contract addresses from
 
 7. [ ] **P2PTradeEscrow** — `scripts/deploy-p2p-trade-escrow.ts`
    - Fully standalone (Ownable2Step, no PermissionManager).
-   - `OWNER` env var optional (defaults to deployer).
+   - `OWNER` = the Safe — required for the production record (`deployments/base.json`); the
+     script configures with the deployer, then transfers ownership and the Safe must call
+     `acceptOwnership()`. Optional elsewhere (defaults to the deployer).
+   - `ALLOWED_ERC20` / `ALLOWED_ERC721` = USDC / AssetNFT proxy (no trade can use any other
+     token). Keep ERC1155 off the allow-list.
 
 8. [ ] **PromoCodeRegistry** — `scripts/deploy-promo-code-registry.ts` *(optional)*
    - Reads PackMachineFactory + BuybackPool from JSON.
