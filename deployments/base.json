@@ -237,5 +237,22 @@
       "factory": "0xB8bC099620047Af55AdA4f2Ba93348003437A320",
       "createdAt": "2026-07-11T07:59:36.759Z"
     }
-  ]
+  ],
+  "P2PTradeEscrow": {
+    "proxy": "0x784f7a4dde9e40367303c808dbb55a969274c8d7",
+    "implementation": "0xc621e4a22720166aa19bb561f8161c62b6870b6b",
+    "owner": "0xfe78E8aa8f4B9f616e05a94604aB86A7B192f456",
+    "ownerAccepted": false,
+    "allowedTokens": [
+      {
+        "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "type": "ERC20"
+      },
+      {
+        "token": "0x2F7AFE6B9C272CAff83a3377afbaeD2C8901B865",
+        "type": "ERC721"
+      }
+    ],
+    "deployedAt": "2026-11-17T17:36:27.240Z"
+  }
 }
